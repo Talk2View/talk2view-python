@@ -1,9 +1,11 @@
 name: Publish to PyPI
 
 # Manual, deliberate publishes (workflow_dispatch) and tagged GitHub Releases.
-# Publishing uses PyPI Trusted Publishing (OIDC) — no long-lived token — and is
-# gated behind the `pypi` environment, so it requires a manual approval in the
-# repository's Environments settings before the upload runs.
+# Publishing uses PyPI Trusted Publishing (OIDC) — no long-lived token — and the
+# upload job runs in the `pypi` environment. It waits for a manual approval only
+# if that environment is configured to require a reviewer (Settings →
+# Environments → pypi → Required reviewers); without one, a run uploads to PyPI
+# unattended.
 on:
   workflow_dispatch:
   release:
