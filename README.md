@@ -12,7 +12,7 @@ only keeps the version in order: after 0.2.0b1 and before 0.2.0.
 
 - **Documentation:** [docs.talk2view.com](https://docs.talk2view.com)
 - **TypeScript SDK:** [`@talk2view/sdk` on npm](https://www.npmjs.com/package/@talk2view/sdk)
-- **Partner key:** Talk2View is in private beta.
+- **Partner key:** the Talk2View platform is in private beta.
   [Request a partner key](https://talk2view.com/resources/contact?subject=partner-key)
   through the contact form.
 
