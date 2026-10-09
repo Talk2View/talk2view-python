@@ -1,32 +1,34 @@
 [build-system]
-requires = ["hatchling"]
+# hatchling 1.27 is the first release whose default core metadata (2.4)
+# includes the PEP 639 License-Expression and License-File fields: 1.26
+# leaves them out, and older releases reject license-files as a list.
+requires = ["hatchling>=1.27"]
 build-backend = "hatchling.build"
 
 [project]
 name = "talk2view"
-version = "0.2.0b1"
-description = "Talk2View Python SDK — add AI natural-language control to desktop and Python apps (beta)."
+version = "0.2.0b2"
+description = "Placeholder that reserves the talk2view name for the upcoming Talk2View Python SDK. It has no API yet."
 readme = "README.md"
 requires-python = ">=3.10"
-license = { file = "LICENSE" }
+license = "MIT"
+license-files = ["LICENSE"]
 authors = [{ name = "A2B Technology Corporation Pty Ltd" }]
 keywords = ["talk2view", "ai", "agent", "sdk", "assistant"]
 classifiers = [
-  "Development Status :: 4 - Beta",
+  "Development Status :: 2 - Pre-Alpha",
   "Intended Audience :: Developers",
-  "License :: Other/Proprietary License",
   "Operating System :: OS Independent",
   "Programming Language :: Python :: 3",
   "Programming Language :: Python :: 3.10",
   "Programming Language :: Python :: 3.11",
   "Programming Language :: Python :: 3.12",
   "Programming Language :: Python :: 3.13",
-  "Typing :: Typed",
 ]
 
 [project.urls]
 Homepage = "https://talk2view.com"
-Documentation = "https://engine.talk2view.com/docs"
+Documentation = "https://docs.talk2view.com"
 Repository = "https://github.com/Talk2View/talk2view-python"
 Changelog = "https://github.com/Talk2View/talk2view-python/blob/main/CHANGELOG.md"
 
