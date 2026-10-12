@@ -15,6 +15,8 @@ only keeps the version in order: after 0.2.0b1 and before 0.2.0.
 - **Partner key:** the Talk2View platform is in private beta.
   [Request a partner key](https://talk2view.com/resources/contact?subject=partner-key)
   through the contact form.
+- **Security problems:** do not open an issue. See
+  [SECURITY.md](https://github.com/Talk2View/talk2view-python/blob/main/SECURITY.md).
 
 ## Intended use and data handling
 
