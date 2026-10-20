@@ -1,0 +1,13 @@
+{
+  "phases": [
+    [
+      { "type": "text", "content": "Partial" },
+      {
+        "type": "error",
+        "message": "An error occurred. Please try again later.",
+        "errorType": "internal_error"
+      },
+      { "type": "done", "threadId": "thread_contract" }
+    ]
+  ]
+}

@@ -1,0 +1,34 @@
+{
+  "phases": [
+    [
+      {
+        "type": "tool_event",
+        "event": "tool_start",
+        "toolName": "generate_image",
+        "toolCallId": "call_contract_3",
+        "arguments": { "prompt": "a red cube" }
+      },
+      {
+        "type": "tool_event",
+        "event": "tool_end",
+        "toolName": "generate_image",
+        "toolCallId": "call_contract_3",
+        "status": "ok",
+        "display": {
+          "kind": "image",
+          "attachment_id": "att_contract_1",
+          "image": "/v1/attachments/att_contract_1/content",
+          "filename": "generated.png",
+          "mime_type": "image/png",
+          "width": 1024,
+          "height": 1024,
+          "prompt": "a red cube",
+          "model": "contract-image-model",
+          "source_image_id": null
+        }
+      },
+      { "type": "text", "content": "Here is your image." },
+      { "type": "done", "threadId": "thread_contract" }
+    ]
+  ]
+}

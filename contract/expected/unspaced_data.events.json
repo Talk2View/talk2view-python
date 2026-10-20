@@ -1,0 +1,9 @@
+{
+  "phases": [
+    [
+      { "type": "text", "content": "Hello" },
+      { "type": "text", "content": " world" },
+      { "type": "done", "threadId": "thread_contract" }
+    ]
+  ]
+}

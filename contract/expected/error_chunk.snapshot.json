@@ -1,0 +1,9 @@
+{
+  "messages": [
+    { "role": "user", "content": "Trigger an upstream failure" },
+    { "role": "assistant", "content": "Partial", "isStreaming": false }
+  ],
+  "error": "An error occurred. Please try again later.",
+  "threadId": "thread_contract",
+  "pendingApproval": null
+}

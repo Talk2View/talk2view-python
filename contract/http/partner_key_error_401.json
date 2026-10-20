@@ -1,0 +1,9 @@
+{
+  "body": {
+    "error": {
+      "message": "Invalid partner API key",
+      "type": "partner_key_error"
+    }
+  },
+  "status": 401
+}

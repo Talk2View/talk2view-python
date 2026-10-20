@@ -1,0 +1,2233 @@
+{
+ "cancel_mid_stream_then_cancel_an_approval": {
+  "approvals": [
+   {
+    "decision": {
+     "action": "deny",
+     "feedback": "Cancelled by the user",
+     "updated_input": null
+    },
+    "tool_call_id": "call_1"
+   }
+  ],
+  "batches": [
+   {
+    "ops": [
+     {
+      "path": [
+       "messages",
+       0
+      ],
+      "type": "set",
+      "value": {
+       "content": "first",
+       "id": "msg_1",
+       "role": "user",
+       "timestamp": "<ts>"
+      }
+     },
+     {
+      "path": [
+       "messages",
+       1
+      ],
+      "type": "set",
+      "value": {
+       "content": "",
+       "id": "msg_2",
+       "isStreaming": true,
+       "role": "assistant",
+       "timestamp": "<ts>"
+      }
+     },
+     {
+      "path": [
+       "isLoading"
+      ],
+      "type": "set",
+      "value": true
+     }
+    ],
+    "seq": 1
+   },
+   {
+    "ops": [
+     {
+      "path": [
+       "messages",
+       1,
+       "content"
+      ],
+      "type": "append-text",
+      "value": "Partial "
+     }
+    ],
+    "seq": 2
+   },
+   {
+    "ops": [
+     {
+      "path": [
+       "messages",
+       1,
+       "content"
+      ],
+      "type": "append-text",
+      "value": "answer"
+     }
+    ],
+    "seq": 3
+   },
+   {
+    "ops": [
+     {
+      "path": [
+       "messages",
+       1,
+       "isStreaming"
+      ],
+      "type": "set",
+      "value": false
+     },
+     {
+      "path": [
+       "isLoading"
+      ],
+      "type": "set",
+      "value": false
+     }
+    ],
+    "seq": 4
+   },
+   {
+    "ops": [
+     {
+      "path": [
+       "messages",
+       2
+      ],
+      "type": "set",
+      "value": {
+       "content": "second",
+       "id": "msg_3",
+       "role": "user",
+       "timestamp": "<ts>"
+      }
+     },
+     {
+      "path": [
+       "messages",
+       3
+      ],
+      "type": "set",
+      "value": {
+       "content": "",
+       "id": "msg_4",
+       "isStreaming": true,
+       "role": "assistant",
+       "timestamp": "<ts>"
+      }
+     },
+     {
+      "path": [
+       "isLoading"
+      ],
+      "type": "set",
+      "value": true
+     }
+    ],
+    "seq": 5
+   },
+   {
+    "ops": [
+     {
+      "path": [
+       "messages",
+       3,
+       "isStreaming"
+      ],
+      "type": "set",
+      "value": false
+     },
+     {
+      "path": [
+       "messages"
+      ],
+      "type": "set",
+      "value": [
+       {
+        "content": "first",
+        "id": "msg_1",
+        "role": "user",
+        "timestamp": "<ts>"
+       },
+       {
+        "content": "Partial answer",
+        "id": "msg_2",
+        "isStreaming": false,
+        "role": "assistant",
+        "timestamp": "<ts>"
+       },
+       {
+        "content": "second",
+        "id": "msg_3",
+        "role": "user",
+        "timestamp": "<ts>"
+       }
+      ]
+     },
+     {
+      "path": [
+       "isLoading"
+      ],
+      "type": "set",
+      "value": false
+     }
+    ],
+    "seq": 6
+   },
+   {
+    "ops": [
+     {
+      "path": [
+       "messages",
+       3
+      ],
+      "type": "set",
+      "value": {
+       "content": "delete x",
+       "id": "msg_5",
+       "role": "user",
+       "timestamp": "<ts>"
+      }
+     },
+     {
+      "path": [
+       "messages",
+       4
+      ],
+      "type": "set",
+      "value": {
+       "content": "",
+       "id": "msg_6",
+       "isStreaming": true,
+       "role": "assistant",
+       "timestamp": "<ts>"
+      }
+     },
+     {
+      "path": [
+       "isLoading"
+      ],
+      "type": "set",
+      "value": true
+     }
+    ],
+    "seq": 7
+   },
+   {
+    "ops": [
+     {
+      "path": [
+       "messages",
+       4,
+       "steps"
+      ],
+      "type": "set",
+      "value": [
+       {
+        "args": {
+         "path": "/x"
+        },
+        "name": "delete_file",
+        "source": "client",
+        "status": "running",
+        "toolCallId": "call_1"
+       }
+      ]
+     },
+     {
+      "path": [
+       "pendingApproval"
+      ],
+      "type": "set",
+      "value": {
+       "arguments": {
+        "path": "/x"
+       },
+       "description": "Delete",
+       "toolCallId": "call_1",
+       "toolName": "delete_file"
+      }
+     },
+     {
+      "path": [
+       "isLoading"
+      ],
+      "type": "set",
+      "value": false
+     }
+    ],
+    "seq": 8
+   },
+   {
+    "ops": [
+     {
+      "path": [
+       "pendingApproval"
+      ],
+      "type": "set",
+      "value": null
+     },
+     {
+      "path": [
+       "isLoading"
+      ],
+      "type": "set",
+      "value": true
+     }
+    ],
+    "seq": 9
+   },
+   {
+    "ops": [
+     {
+      "path": [
+       "messages",
+       4,
+       "steps",
+       0
+      ],
+      "type": "set",
+      "value": {
+       "args": {
+        "path": "/x"
+       },
+       "name": "delete_file",
+       "source": "client",
+       "status": "denied",
+       "toolCallId": "call_1"
+      }
+     }
+    ],
+    "seq": 10
+   },
+   {
+    "ops": [
+     {
+      "path": [
+       "messages",
+       4,
+       "isStreaming"
+      ],
+      "type": "set",
+      "value": false
+     },
+     {
+      "path": [
+       "messages",
+       5
+      ],
+      "type": "set",
+      "value": {
+       "content": "",
+       "id": "msg_7",
+       "isStreaming": true,
+       "role": "assistant",
+       "timestamp": "<ts>"
+      }
+     },
+     {
+      "path": [
+       "messages",
+       5,
+       "content"
+      ],
+      "type": "append-text",
+      "value": "Not deleted."
+     }
+    ],
+    "seq": 11
+   },
+   {
+    "ops": [
+     {
+      "path": [
+       "threadId"
+      ],
+      "type": "set",
+      "value": "thread_1"
+     }
+    ],
+    "seq": 12
+   },
+   {
+    "ops": [
+     {
+      "path": [
+       "messages",
+       5,
+       "isStreaming"
+      ],
+      "type": "set",
+      "value": false
+     },
+     {
+      "path": [
+       "isLoading"
+      ],
+      "type": "set",
+      "value": false
+     }
+    ],
+    "seq": 13
+   },
+   {
+    "ops": [
+     {
+      "path": [
+       "messages",
+       6
+      ],
+      "type": "set",
+      "value": {
+       "content": "thanks",
+       "id": "msg_8",
+       "role": "user",
+       "timestamp": "<ts>"
+      }
+     },
+     {
+      "path": [
+       "messages",
+       7
+      ],
+      "type": "set",
+      "value": {
+       "content": "",
+       "id": "msg_9",
+       "isStreaming": true,
+       "role": "assistant",
+       "timestamp": "<ts>"
+      }
+     },
+     {
+      "path": [
+       "isLoading"
+      ],
+      "type": "set",
+      "value": true
+     }
+    ],
+    "seq": 14
+   },
+   {
+    "ops": [
+     {
+      "path": [
+       "messages",
+       7,
+       "content"
+      ],
+      "type": "append-text",
+      "value": "Welcome"
+     }
+    ],
+    "seq": 15
+   },
+   {
+    "ops": [
+     {
+      "path": [
+       "messages",
+       7,
+       "isStreaming"
+      ],
+      "type": "set",
+      "value": false
+     },
+     {
+      "path": [
+       "isLoading"
+      ],
+      "type": "set",
+      "value": false
+     }
+    ],
+    "seq": 16
+   }
+  ],
+  "histories": [
+   [],
+   [
+    {
+     "content": "first",
+     "role": "user",
+     "tool_call_id": null
+    },
+    {
+     "content": "Partial answer",
+     "role": "assistant",
+     "tool_call_id": null
+    }
+   ],
+   [
+    {
+     "content": "first",
+     "role": "user",
+     "tool_call_id": null
+    },
+    {
+     "content": "Partial answer",
+     "role": "assistant",
+     "tool_call_id": null
+    }
+   ],
+   [
+    {
+     "content": "first",
+     "role": "user",
+     "tool_call_id": null
+    },
+    {
+     "content": "Partial answer",
+     "role": "assistant",
+     "tool_call_id": null
+    },
+    {
+     "content": "delete x",
+     "role": "user",
+     "tool_call_id": null
+    },
+    {
+     "content": "Not deleted.",
+     "role": "assistant",
+     "tool_call_id": null
+    }
+   ]
+  ],
+  "notices": [],
+  "snapshot": {
+   "agentStatus": null,
+   "alwaysAllowedTools": [],
+   "error": null,
+   "isAnonymous": false,
+   "isLoading": false,
+   "messages": [
+    {
+     "content": "first",
+     "id": "msg_1",
+     "role": "user",
+     "timestamp": "<ts>"
+    },
+    {
+     "content": "Partial answer",
+     "id": "msg_2",
+     "isStreaming": false,
+     "role": "assistant",
+     "timestamp": "<ts>"
+    },
+    {
+     "content": "second",
+     "id": "msg_3",
+     "role": "user",
+     "timestamp": "<ts>"
+    },
+    {
+     "content": "delete x",
+     "id": "msg_5",
+     "role": "user",
+     "timestamp": "<ts>"
+    },
+    {
+     "content": "",
+     "id": "msg_6",
+     "isStreaming": false,
+     "role": "assistant",
+     "steps": [
+      {
+       "args": {
+        "path": "/x"
+       },
+       "name": "delete_file",
+       "source": "client",
+       "status": "denied",
+       "toolCallId": "call_1"
+      }
+     ],
+     "timestamp": "<ts>"
+    },
+    {
+     "content": "Not deleted.",
+     "id": "msg_7",
+     "isStreaming": false,
+     "role": "assistant",
+     "timestamp": "<ts>"
+    },
+    {
+     "content": "thanks",
+     "id": "msg_8",
+     "role": "user",
+     "timestamp": "<ts>"
+    },
+    {
+     "content": "Welcome",
+     "id": "msg_9",
+     "isStreaming": false,
+     "role": "assistant",
+     "timestamp": "<ts>"
+    }
+   ],
+   "pendingApproval": null,
+   "seq": 16,
+   "skills": {
+    "available": false,
+    "local": [],
+    "needsSessionReset": false,
+    "platform": null,
+    "registered": []
+   },
+   "threadId": "thread_1"
+  }
+ },
+ "client_approval_then_auto": {
+  "approvals": [
+   {
+    "decision": {
+     "action": "always",
+     "feedback": null,
+     "updated_input": null
+    },
+    "tool_call_id": "call_1"
+   },
+   {
+    "decision": {
+     "action": "once",
+     "feedback": null,
+     "updated_input": null
+    },
+    "tool_call_id": "call_2"
+   }
+  ],
+  "batches": [
+   {
+    "ops": [
+     {
+      "path": [
+       "messages",
+       0
+      ],
+      "type": "set",
+      "value": {
+       "content": "send email",
+       "id": "msg_1",
+       "role": "user",
+       "timestamp": "<ts>"
+      }
+     },
+     {
+      "path": [
+       "messages",
+       1
+      ],
+      "type": "set",
+      "value": {
+       "content": "",
+       "id": "msg_2",
+       "isStreaming": true,
+       "role": "assistant",
+       "timestamp": "<ts>"
+      }
+     },
+     {
+      "path": [
+       "isLoading"
+      ],
+      "type": "set",
+      "value": true
+     }
+    ],
+    "seq": 1
+   },
+   {
+    "ops": [
+     {
+      "path": [
+       "messages",
+       1,
+       "content"
+      ],
+      "type": "append-text",
+      "value": "Let me "
+     }
+    ],
+    "seq": 2
+   },
+   {
+    "ops": [
+     {
+      "path": [
+       "messages",
+       1,
+       "steps"
+      ],
+      "type": "set",
+      "value": [
+       {
+        "args": {
+         "to": "a@b.com"
+        },
+        "name": "send_email",
+        "source": "client",
+        "status": "running",
+        "toolCallId": "call_1"
+       }
+      ]
+     },
+     {
+      "path": [
+       "pendingApproval"
+      ],
+      "type": "set",
+      "value": {
+       "arguments": {
+        "to": "a@b.com"
+       },
+       "description": "Send",
+       "toolCallId": "call_1",
+       "toolName": "send_email"
+      }
+     },
+     {
+      "path": [
+       "isLoading"
+      ],
+      "type": "set",
+      "value": false
+     }
+    ],
+    "seq": 3
+   },
+   {
+    "ops": [
+     {
+      "path": [
+       "alwaysAllowedTools"
+      ],
+      "type": "set",
+      "value": [
+       "send_email"
+      ]
+     },
+     {
+      "path": [
+       "pendingApproval"
+      ],
+      "type": "set",
+      "value": null
+     },
+     {
+      "path": [
+       "isLoading"
+      ],
+      "type": "set",
+      "value": true
+     }
+    ],
+    "seq": 4
+   },
+   {
+    "ops": [
+     {
+      "path": [
+       "messages",
+       1,
+       "steps",
+       0
+      ],
+      "type": "set",
+      "value": {
+       "args": {
+        "to": "a@b.com"
+       },
+       "name": "send_email",
+       "source": "client",
+       "status": "used",
+       "toolCallId": "call_1"
+      }
+     }
+    ],
+    "seq": 5
+   },
+   {
+    "ops": [
+     {
+      "path": [
+       "messages",
+       1,
+       "isStreaming"
+      ],
+      "type": "set",
+      "value": false
+     },
+     {
+      "path": [
+       "messages",
+       2
+      ],
+      "type": "set",
+      "value": {
+       "content": "",
+       "id": "msg_3",
+       "isStreaming": true,
+       "role": "assistant",
+       "timestamp": "<ts>"
+      }
+     },
+     {
+      "path": [
+       "messages",
+       2,
+       "content"
+      ],
+      "type": "append-text",
+      "value": "Sent!"
+     }
+    ],
+    "seq": 6
+   },
+   {
+    "ops": [
+     {
+      "path": [
+       "threadId"
+      ],
+      "type": "set",
+      "value": "thread_1"
+     }
+    ],
+    "seq": 7
+   },
+   {
+    "ops": [
+     {
+      "path": [
+       "messages",
+       2,
+       "isStreaming"
+      ],
+      "type": "set",
+      "value": false
+     },
+     {
+      "path": [
+       "isLoading"
+      ],
+      "type": "set",
+      "value": false
+     }
+    ],
+    "seq": 8
+   },
+   {
+    "ops": [
+     {
+      "path": [
+       "messages",
+       3
+      ],
+      "type": "set",
+      "value": {
+       "content": "send another",
+       "id": "msg_4",
+       "role": "user",
+       "timestamp": "<ts>"
+      }
+     },
+     {
+      "path": [
+       "messages",
+       4
+      ],
+      "type": "set",
+      "value": {
+       "content": "",
+       "id": "msg_5",
+       "isStreaming": true,
+       "role": "assistant",
+       "timestamp": "<ts>"
+      }
+     },
+     {
+      "path": [
+       "isLoading"
+      ],
+      "type": "set",
+      "value": true
+     }
+    ],
+    "seq": 9
+   },
+   {
+    "ops": [
+     {
+      "path": [
+       "messages",
+       4,
+       "steps"
+      ],
+      "type": "set",
+      "value": [
+       {
+        "args": {
+         "to": "c@d.com"
+        },
+        "name": "send_email",
+        "source": "client",
+        "status": "running",
+        "toolCallId": "call_2"
+       }
+      ]
+     },
+     {
+      "path": [
+       "agentStatus"
+      ],
+      "type": "set",
+      "value": {
+       "message": "Auto-approved send_email",
+       "type": "auto-approved"
+      }
+     }
+    ],
+    "seq": 10
+   },
+   {
+    "ops": [
+     {
+      "path": [
+       "messages",
+       4,
+       "steps",
+       0
+      ],
+      "type": "set",
+      "value": {
+       "args": {
+        "to": "c@d.com"
+       },
+       "name": "send_email",
+       "source": "client",
+       "status": "used",
+       "toolCallId": "call_2"
+      }
+     }
+    ],
+    "seq": 11
+   },
+   {
+    "ops": [
+     {
+      "path": [
+       "messages",
+       4,
+       "isStreaming"
+      ],
+      "type": "set",
+      "value": false
+     },
+     {
+      "path": [
+       "messages",
+       5
+      ],
+      "type": "set",
+      "value": {
+       "content": "",
+       "id": "msg_6",
+       "isStreaming": true,
+       "role": "assistant",
+       "timestamp": "<ts>"
+      }
+     },
+     {
+      "path": [
+       "messages",
+       5,
+       "content"
+      ],
+      "type": "append-text",
+      "value": "Sent 2"
+     }
+    ],
+    "seq": 12
+   },
+   {
+    "ops": [
+     {
+      "path": [
+       "messages",
+       5,
+       "isStreaming"
+      ],
+      "type": "set",
+      "value": false
+     },
+     {
+      "path": [
+       "agentStatus"
+      ],
+      "type": "set",
+      "value": null
+     },
+     {
+      "path": [
+       "isLoading"
+      ],
+      "type": "set",
+      "value": false
+     }
+    ],
+    "seq": 13
+   }
+  ],
+  "histories": [
+   [],
+   [
+    {
+     "content": "send email",
+     "role": "user",
+     "tool_call_id": null
+    },
+    {
+     "content": "Let me \n\nSent!",
+     "role": "assistant",
+     "tool_call_id": null
+    }
+   ]
+  ],
+  "notices": [],
+  "snapshot": {
+   "agentStatus": null,
+   "alwaysAllowedTools": [
+    "send_email"
+   ],
+   "error": null,
+   "isAnonymous": false,
+   "isLoading": false,
+   "messages": [
+    {
+     "content": "send email",
+     "id": "msg_1",
+     "role": "user",
+     "timestamp": "<ts>"
+    },
+    {
+     "content": "Let me ",
+     "id": "msg_2",
+     "isStreaming": false,
+     "role": "assistant",
+     "steps": [
+      {
+       "args": {
+        "to": "a@b.com"
+       },
+       "name": "send_email",
+       "source": "client",
+       "status": "used",
+       "toolCallId": "call_1"
+      }
+     ],
+     "timestamp": "<ts>"
+    },
+    {
+     "content": "Sent!",
+     "id": "msg_3",
+     "isStreaming": false,
+     "role": "assistant",
+     "timestamp": "<ts>"
+    },
+    {
+     "content": "send another",
+     "id": "msg_4",
+     "role": "user",
+     "timestamp": "<ts>"
+    },
+    {
+     "content": "",
+     "id": "msg_5",
+     "isStreaming": false,
+     "role": "assistant",
+     "steps": [
+      {
+       "args": {
+        "to": "c@d.com"
+       },
+       "name": "send_email",
+       "source": "client",
+       "status": "used",
+       "toolCallId": "call_2"
+      }
+     ],
+     "timestamp": "<ts>"
+    },
+    {
+     "content": "Sent 2",
+     "id": "msg_6",
+     "isStreaming": false,
+     "role": "assistant",
+     "timestamp": "<ts>"
+    }
+   ],
+   "pendingApproval": null,
+   "seq": 13,
+   "skills": {
+    "available": false,
+    "local": [],
+    "needsSessionReset": false,
+    "platform": null,
+    "registered": []
+   },
+   "threadId": "thread_1"
+  }
+ },
+ "engine_gated_tool_then_edit_and_clear": {
+  "approvals": [
+   {
+    "decision": {
+     "action": "once",
+     "feedback": null,
+     "updated_input": null
+    },
+    "tool_call_id": "call_9"
+   }
+  ],
+  "batches": [
+   {
+    "ops": [
+     {
+      "path": [
+       "messages",
+       0
+      ],
+      "type": "set",
+      "value": {
+       "content": "email them",
+       "id": "msg_1",
+       "role": "user",
+       "timestamp": "<ts>"
+      }
+     },
+     {
+      "path": [
+       "messages",
+       1
+      ],
+      "type": "set",
+      "value": {
+       "content": "",
+       "id": "msg_2",
+       "isStreaming": true,
+       "role": "assistant",
+       "timestamp": "<ts>"
+      }
+     },
+     {
+      "path": [
+       "isLoading"
+      ],
+      "type": "set",
+      "value": true
+     }
+    ],
+    "seq": 1
+   },
+   {
+    "ops": [
+     {
+      "path": [
+       "messages",
+       1,
+       "steps"
+      ],
+      "type": "set",
+      "value": [
+       {
+        "args": {
+         "to": "a@b.com"
+        },
+        "name": "gmail_send",
+        "source": "platform",
+        "status": "running",
+        "toolCallId": "call_9"
+       }
+      ]
+     },
+     {
+      "path": [
+       "pendingApproval"
+      ],
+      "type": "set",
+      "value": {
+       "arguments": {
+        "to": "a@b.com"
+       },
+       "description": "Send an email to a@b.com",
+       "details": [
+        {
+         "label": "To",
+         "value": "a@b.com"
+        }
+       ],
+       "kind": "engine",
+       "toolCallId": "call_9",
+       "toolName": "gmail_send"
+      }
+     },
+     {
+      "path": [
+       "isLoading"
+      ],
+      "type": "set",
+      "value": false
+     }
+    ],
+    "seq": 2
+   },
+   {
+    "ops": [
+     {
+      "path": [
+       "pendingApproval"
+      ],
+      "type": "set",
+      "value": null
+     },
+     {
+      "path": [
+       "isLoading"
+      ],
+      "type": "set",
+      "value": true
+     }
+    ],
+    "seq": 3
+   },
+   {
+    "ops": [
+     {
+      "path": [
+       "messages",
+       1,
+       "steps",
+       0
+      ],
+      "type": "set",
+      "value": {
+       "args": {
+        "to": "a@b.com"
+       },
+       "name": "gmail_send",
+       "source": "platform",
+       "status": "used",
+       "toolCallId": "call_9"
+      }
+     }
+    ],
+    "seq": 4
+   },
+   {
+    "ops": [
+     {
+      "path": [
+       "messages",
+       1,
+       "steps",
+       0
+      ],
+      "type": "set",
+      "value": {
+       "args": {
+        "to": "a@b.com"
+       },
+       "name": "gmail_send",
+       "result": "Tool failed",
+       "source": "platform",
+       "status": "denied",
+       "toolCallId": "call_9"
+      }
+     }
+    ],
+    "seq": 5
+   },
+   {
+    "ops": [
+     {
+      "path": [
+       "messages",
+       1,
+       "isStreaming"
+      ],
+      "type": "set",
+      "value": false
+     },
+     {
+      "path": [
+       "messages",
+       2
+      ],
+      "type": "set",
+      "value": {
+       "content": "",
+       "id": "msg_3",
+       "isStreaming": true,
+       "role": "assistant",
+       "timestamp": "<ts>"
+      }
+     },
+     {
+      "path": [
+       "messages",
+       2,
+       "content"
+      ],
+      "type": "append-text",
+      "value": "Sorry."
+     }
+    ],
+    "seq": 6
+   },
+   {
+    "ops": [
+     {
+      "path": [
+       "threadId"
+      ],
+      "type": "set",
+      "value": "thread_1"
+     }
+    ],
+    "seq": 7
+   },
+   {
+    "ops": [
+     {
+      "path": [
+       "messages",
+       2,
+       "isStreaming"
+      ],
+      "type": "set",
+      "value": false
+     },
+     {
+      "path": [
+       "isLoading"
+      ],
+      "type": "set",
+      "value": false
+     }
+    ],
+    "seq": 8
+   },
+   {
+    "ops": [
+     {
+      "path": [
+       "messages"
+      ],
+      "type": "set",
+      "value": []
+     },
+     {
+      "path": [
+       "messages",
+       0
+      ],
+      "type": "set",
+      "value": {
+       "content": "search instead",
+       "id": "msg_4",
+       "role": "user",
+       "timestamp": "<ts>"
+      }
+     },
+     {
+      "path": [
+       "messages",
+       1
+      ],
+      "type": "set",
+      "value": {
+       "content": "",
+       "id": "msg_5",
+       "isStreaming": true,
+       "role": "assistant",
+       "timestamp": "<ts>"
+      }
+     },
+     {
+      "path": [
+       "isLoading"
+      ],
+      "type": "set",
+      "value": true
+     }
+    ],
+    "seq": 9
+   },
+   {
+    "ops": [
+     {
+      "path": [
+       "messages",
+       1,
+       "steps"
+      ],
+      "type": "set",
+      "value": [
+       {
+        "args": {
+         "q": "x"
+        },
+        "name": "web_search",
+        "source": "platform",
+        "status": "running",
+        "toolCallId": "call_2"
+       }
+      ]
+     }
+    ],
+    "seq": 10
+   },
+   {
+    "ops": [
+     {
+      "path": [
+       "messages",
+       1,
+       "steps",
+       0
+      ],
+      "type": "set",
+      "value": {
+       "args": {
+        "q": "x"
+       },
+       "display": {
+        "kind": "results"
+       },
+       "name": "web_search",
+       "source": "platform",
+       "status": "used",
+       "toolCallId": "call_2"
+      }
+     }
+    ],
+    "seq": 11
+   },
+   {
+    "ops": [
+     {
+      "path": [
+       "messages",
+       1,
+       "isStreaming"
+      ],
+      "type": "set",
+      "value": false
+     },
+     {
+      "path": [
+       "messages",
+       2
+      ],
+      "type": "set",
+      "value": {
+       "content": "",
+       "id": "msg_6",
+       "isStreaming": true,
+       "role": "assistant",
+       "timestamp": "<ts>"
+      }
+     },
+     {
+      "path": [
+       "messages",
+       2,
+       "content"
+      ],
+      "type": "append-text",
+      "value": "Found."
+     }
+    ],
+    "seq": 12
+   },
+   {
+    "ops": [
+     {
+      "path": [
+       "messages",
+       2,
+       "isStreaming"
+      ],
+      "type": "set",
+      "value": false
+     },
+     {
+      "path": [
+       "isLoading"
+      ],
+      "type": "set",
+      "value": false
+     }
+    ],
+    "seq": 13
+   },
+   {
+    "ops": [
+     {
+      "path": [
+       "messages"
+      ],
+      "type": "set",
+      "value": []
+     },
+     {
+      "path": [
+       "threadId"
+      ],
+      "type": "set",
+      "value": null
+     },
+     {
+      "path": [
+       "isLoading"
+      ],
+      "type": "set",
+      "value": true
+     }
+    ],
+    "seq": 14
+   },
+   {
+    "ops": [
+     {
+      "path": [
+       "isLoading"
+      ],
+      "type": "set",
+      "value": false
+     }
+    ],
+    "seq": 15
+   }
+  ],
+  "histories": [
+   [],
+   []
+  ],
+  "notices": [],
+  "snapshot": {
+   "agentStatus": null,
+   "alwaysAllowedTools": [],
+   "error": null,
+   "isAnonymous": false,
+   "isLoading": false,
+   "messages": [],
+   "pendingApproval": null,
+   "seq": 15,
+   "skills": {
+    "available": false,
+    "local": [],
+    "needsSessionReset": false,
+    "platform": null,
+    "registered": []
+   },
+   "threadId": null
+  }
+ },
+ "errors_and_demo_limit": {
+  "approvals": [],
+  "batches": [
+   {
+    "ops": [
+     {
+      "path": [
+       "messages",
+       0
+      ],
+      "type": "set",
+      "value": {
+       "content": "one more",
+       "id": "msg_1",
+       "role": "user",
+       "timestamp": "<ts>"
+      }
+     },
+     {
+      "path": [
+       "messages",
+       1
+      ],
+      "type": "set",
+      "value": {
+       "content": "",
+       "id": "msg_2",
+       "isStreaming": true,
+       "role": "assistant",
+       "timestamp": "<ts>"
+      }
+     },
+     {
+      "path": [
+       "isLoading"
+      ],
+      "type": "set",
+      "value": true
+     }
+    ],
+    "seq": 1
+   },
+   {
+    "ops": [
+     {
+      "path": [
+       "messages",
+       1,
+       "isStreaming"
+      ],
+      "type": "set",
+      "value": false
+     },
+     {
+      "path": [
+       "messages"
+      ],
+      "type": "set",
+      "value": [
+       {
+        "content": "one more",
+        "id": "msg_1",
+        "role": "user",
+        "timestamp": "<ts>"
+       }
+      ]
+     },
+     {
+      "path": [
+       "isLoading"
+      ],
+      "type": "set",
+      "value": false
+     }
+    ],
+    "seq": 2
+   },
+   {
+    "ops": [
+     {
+      "path": [
+       "messages"
+      ],
+      "type": "set",
+      "value": []
+     },
+     {
+      "path": [
+       "isAnonymous"
+      ],
+      "type": "set",
+      "value": false
+     },
+     {
+      "path": [
+       "messages",
+       0
+      ],
+      "type": "set",
+      "value": {
+       "content": "one more",
+       "id": "msg_3",
+       "role": "user",
+       "timestamp": "<ts>"
+      }
+     },
+     {
+      "path": [
+       "messages",
+       1
+      ],
+      "type": "set",
+      "value": {
+       "content": "",
+       "id": "msg_4",
+       "isStreaming": true,
+       "role": "assistant",
+       "timestamp": "<ts>"
+      }
+     },
+     {
+      "path": [
+       "isLoading"
+      ],
+      "type": "set",
+      "value": true
+     }
+    ],
+    "seq": 3
+   },
+   {
+    "ops": [
+     {
+      "path": [
+       "messages",
+       1,
+       "content"
+      ],
+      "type": "append-text",
+      "value": "half"
+     }
+    ],
+    "seq": 4
+   },
+   {
+    "ops": [
+     {
+      "path": [
+       "error"
+      ],
+      "type": "set",
+      "value": "boom"
+     }
+    ],
+    "seq": 5
+   },
+   {
+    "ops": [
+     {
+      "path": [
+       "messages",
+       1,
+       "isStreaming"
+      ],
+      "type": "set",
+      "value": false
+     },
+     {
+      "path": [
+       "isLoading"
+      ],
+      "type": "set",
+      "value": false
+     }
+    ],
+    "seq": 6
+   },
+   {
+    "ops": [
+     {
+      "path": [
+       "error"
+      ],
+      "type": "set",
+      "value": null
+     }
+    ],
+    "seq": 7
+   },
+   {
+    "ops": [
+     {
+      "path": [
+       "messages",
+       2
+      ],
+      "type": "set",
+      "value": {
+       "content": "after signup",
+       "id": "msg_5",
+       "role": "user",
+       "timestamp": "<ts>"
+      }
+     },
+     {
+      "path": [
+       "messages",
+       3
+      ],
+      "type": "set",
+      "value": {
+       "content": "",
+       "id": "msg_6",
+       "isStreaming": true,
+       "role": "assistant",
+       "timestamp": "<ts>"
+      }
+     },
+     {
+      "path": [
+       "isLoading"
+      ],
+      "type": "set",
+      "value": true
+     }
+    ],
+    "seq": 8
+   },
+   {
+    "ops": [
+     {
+      "path": [
+       "messages",
+       3,
+       "content"
+      ],
+      "type": "append-text",
+      "value": "ok"
+     }
+    ],
+    "seq": 9
+   },
+   {
+    "ops": [
+     {
+      "path": [
+       "threadId"
+      ],
+      "type": "set",
+      "value": "thread_1"
+     }
+    ],
+    "seq": 10
+   },
+   {
+    "ops": [
+     {
+      "path": [
+       "messages",
+       3,
+       "isStreaming"
+      ],
+      "type": "set",
+      "value": false
+     },
+     {
+      "path": [
+       "isLoading"
+      ],
+      "type": "set",
+      "value": false
+     }
+    ],
+    "seq": 11
+   }
+  ],
+  "histories": [
+   [],
+   [],
+   [
+    {
+     "content": "one more",
+     "role": "user",
+     "tool_call_id": null
+    },
+    {
+     "content": "half",
+     "role": "assistant",
+     "tool_call_id": null
+    }
+   ]
+  ],
+  "notices": [
+   "demoLimitReached"
+  ],
+  "snapshot": {
+   "agentStatus": null,
+   "alwaysAllowedTools": [],
+   "error": null,
+   "isAnonymous": false,
+   "isLoading": false,
+   "messages": [
+    {
+     "content": "one more",
+     "id": "msg_3",
+     "role": "user",
+     "timestamp": "<ts>"
+    },
+    {
+     "content": "half",
+     "id": "msg_4",
+     "isStreaming": false,
+     "role": "assistant",
+     "timestamp": "<ts>"
+    },
+    {
+     "content": "after signup",
+     "id": "msg_5",
+     "role": "user",
+     "timestamp": "<ts>"
+    },
+    {
+     "content": "ok",
+     "id": "msg_6",
+     "isStreaming": false,
+     "role": "assistant",
+     "timestamp": "<ts>"
+    }
+   ],
+   "pendingApproval": null,
+   "seq": 11,
+   "skills": {
+    "available": false,
+    "local": [],
+    "needsSessionReset": false,
+    "platform": null,
+    "registered": []
+   },
+   "threadId": "thread_1"
+  }
+ },
+ "segmented_turn": {
+  "approvals": [],
+  "batches": [
+   {
+    "ops": [
+     {
+      "path": [
+       "messages",
+       0
+      ],
+      "type": "set",
+      "value": {
+       "content": "go",
+       "id": "msg_1",
+       "role": "user",
+       "timestamp": "<ts>"
+      }
+     },
+     {
+      "path": [
+       "messages",
+       1
+      ],
+      "type": "set",
+      "value": {
+       "content": "",
+       "id": "msg_2",
+       "isStreaming": true,
+       "role": "assistant",
+       "timestamp": "<ts>"
+      }
+     },
+     {
+      "path": [
+       "isLoading"
+      ],
+      "type": "set",
+      "value": true
+     }
+    ],
+    "seq": 1
+   },
+   {
+    "ops": [
+     {
+      "path": [
+       "agentStatus"
+      ],
+      "type": "set",
+      "value": {
+       "message": "...",
+       "type": "thinking"
+      }
+     }
+    ],
+    "seq": 2
+   },
+   {
+    "ops": [
+     {
+      "path": [
+       "messages",
+       1,
+       "plan"
+      ],
+      "type": "set",
+      "value": "- [ ] a"
+     }
+    ],
+    "seq": 3
+   },
+   {
+    "ops": [
+     {
+      "path": [
+       "messages",
+       1,
+       "content"
+      ],
+      "type": "append-text",
+      "value": "one "
+     }
+    ],
+    "seq": 4
+   },
+   {
+    "ops": [
+     {
+      "path": [
+       "messages",
+       1,
+       "steps"
+      ],
+      "type": "set",
+      "value": [
+       {
+        "args": {
+         "q": "x"
+        },
+        "name": "search",
+        "source": "client",
+        "status": "used",
+        "toolCallId": "call_1"
+       }
+      ]
+     }
+    ],
+    "seq": 5
+   },
+   {
+    "ops": [
+     {
+      "path": [
+       "messages",
+       1,
+       "isStreaming"
+      ],
+      "type": "set",
+      "value": false
+     },
+     {
+      "path": [
+       "messages",
+       2
+      ],
+      "type": "set",
+      "value": {
+       "content": "",
+       "id": "msg_3",
+       "isStreaming": true,
+       "role": "assistant",
+       "timestamp": "<ts>"
+      }
+     },
+     {
+      "path": [
+       "messages",
+       2,
+       "content"
+      ],
+      "type": "append-text",
+      "value": "two"
+     }
+    ],
+    "seq": 6
+   },
+   {
+    "ops": [
+     {
+      "path": [
+       "threadId"
+      ],
+      "type": "set",
+      "value": "thread_z"
+     }
+    ],
+    "seq": 7
+   },
+   {
+    "ops": [
+     {
+      "path": [
+       "messages",
+       2,
+       "isStreaming"
+      ],
+      "type": "set",
+      "value": false
+     },
+     {
+      "path": [
+       "agentStatus"
+      ],
+      "type": "set",
+      "value": null
+     },
+     {
+      "path": [
+       "isLoading"
+      ],
+      "type": "set",
+      "value": false
+     }
+    ],
+    "seq": 8
+   },
+   {
+    "ops": [
+     {
+      "path": [
+       "messages",
+       3
+      ],
+      "type": "set",
+      "value": {
+       "content": "more",
+       "id": "msg_4",
+       "role": "user",
+       "timestamp": "<ts>"
+      }
+     },
+     {
+      "path": [
+       "messages",
+       4
+      ],
+      "type": "set",
+      "value": {
+       "content": "",
+       "id": "msg_5",
+       "isStreaming": true,
+       "role": "assistant",
+       "timestamp": "<ts>"
+      }
+     },
+     {
+      "path": [
+       "isLoading"
+      ],
+      "type": "set",
+      "value": true
+     }
+    ],
+    "seq": 9
+   },
+   {
+    "ops": [
+     {
+      "path": [
+       "messages",
+       4,
+       "content"
+      ],
+      "type": "append-text",
+      "value": "three"
+     }
+    ],
+    "seq": 10
+   },
+   {
+    "ops": [
+     {
+      "path": [
+       "messages",
+       4,
+       "isStreaming"
+      ],
+      "type": "set",
+      "value": false
+     },
+     {
+      "path": [
+       "isLoading"
+      ],
+      "type": "set",
+      "value": false
+     }
+    ],
+    "seq": 11
+   }
+  ],
+  "histories": [
+   [],
+   [
+    {
+     "content": "go",
+     "role": "user",
+     "tool_call_id": null
+    },
+    {
+     "content": "one \n\ntwo",
+     "role": "assistant",
+     "tool_call_id": null
+    }
+   ]
+  ],
+  "notices": [],
+  "snapshot": {
+   "agentStatus": null,
+   "alwaysAllowedTools": [],
+   "error": null,
+   "isAnonymous": false,
+   "isLoading": false,
+   "messages": [
+    {
+     "content": "go",
+     "id": "msg_1",
+     "role": "user",
+     "timestamp": "<ts>"
+    },
+    {
+     "content": "one ",
+     "id": "msg_2",
+     "isStreaming": false,
+     "plan": "- [ ] a",
+     "role": "assistant",
+     "steps": [
+      {
+       "args": {
+        "q": "x"
+       },
+       "name": "search",
+       "source": "client",
+       "status": "used",
+       "toolCallId": "call_1"
+      }
+     ],
+     "timestamp": "<ts>"
+    },
+    {
+     "content": "two",
+     "id": "msg_3",
+     "isStreaming": false,
+     "role": "assistant",
+     "timestamp": "<ts>"
+    },
+    {
+     "content": "more",
+     "id": "msg_4",
+     "role": "user",
+     "timestamp": "<ts>"
+    },
+    {
+     "content": "three",
+     "id": "msg_5",
+     "isStreaming": false,
+     "role": "assistant",
+     "timestamp": "<ts>"
+    }
+   ],
+   "pendingApproval": null,
+   "seq": 11,
+   "skills": {
+    "available": false,
+    "local": [],
+    "needsSessionReset": false,
+    "platform": null,
+    "registered": []
+   },
+   "threadId": "thread_z"
+  }
+ }
+}

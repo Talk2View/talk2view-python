@@ -1,0 +1,6 @@
+data: {"id":"chatcmpl-contract","object":"chat.completion.chunk","created":1700000000,"model":"contract-model","choices":[{"index":0,"message":null,"delta":{"role":null,"content":"Partial","tool_calls":null,"annotations":null,"reasoning_content":null},"finish_reason":null}],"thread_id":"thread_contract","interrupt":null,"approval":null,"status":null,"tool_event":null,"todos":null,"error":null}
+
+data: {"id":"chatcmpl-contract","object":"chat.completion.chunk","created":1700000000,"model":"contract-model","choices":[{"index":0,"message":null,"delta":{"role":null,"content":"An error occurred. Please try again later.","tool_calls":null,"annotations":null,"reasoning_content":null},"finish_reason":"stop"}],"thread_id":"thread_contract","interrupt":null,"approval":null,"status":null,"tool_event":null,"todos":null,"error":{"type":"internal_error","message":"An error occurred. Please try again later.","request_id":"req_contract_0001"}}
+
+data: [DONE]
+

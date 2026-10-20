@@ -1,0 +1,268 @@
+/*
+ * The chat page's only stylesheet, hand-written for Chromium 83.
+ * Tailwind v4 renders unstyled there, so none of it is generated. Banned, and checked by
+ * stylelint, doiuse and scripts/check-dist.mjs: flexbox `gap` (spacing is margins),
+ * :is/:where/:has, :focus-visible (focus is plain :focus), @layer, inset, aspect-ratio,
+ * container queries, dvh-style units, oklch/oklab and color-mix.
+ *
+ * Theme: every colour is a --t2v-* token. The host's Theme overrides any of them inline
+ * on <html>; html[data-theme="dark"] carries the dark palette.
+ */
+
+@font-face {
+  font-family: 'Space Grotesk';
+  font-style: normal;
+  font-weight: 300 700;
+  font-display: swap;
+  src: url('../../node_modules/@fontsource-variable/space-grotesk/files/space-grotesk-latin-wght-normal.woff2') format('woff2-variations');
+}
+
+:root {
+  --t2v-bg: #F2F0EC;
+  --t2v-fg: #021C25;
+  --t2v-accent: #26C8B8;
+  --t2v-radius: 0;
+  --t2v-surface: #FFFFFF;
+  --t2v-line: #C9C5BC;
+  --t2v-muted: #55666C;
+  --t2v-pressed: #E4E1DA;
+  --t2v-danger: #B42318;
+  --t2v-danger-bg: #FDECEA;
+  --t2v-warn-bg: #FFF4D6;
+  --t2v-warn-line: #D9A520;
+  --t2v-code-bg: #021C25;
+  --t2v-code-fg: #F2F0EC;
+  --t2v-font: 'Space Grotesk', 'Segoe UI', Arial, sans-serif;
+  --t2v-mono: Consolas, Menlo, monospace;
+  --t2v-font-size: 15px;
+}
+
+html[data-theme='dark'] {
+  --t2v-bg: #021C25;
+  --t2v-fg: #F2F0EC;
+  --t2v-surface: #0A2A35;
+  --t2v-line: #1F4450;
+  --t2v-muted: #9FB3B8;
+  --t2v-pressed: #123A46;
+  --t2v-danger: #F97066;
+  --t2v-danger-bg: #3A1512;
+  --t2v-warn-bg: #3B2F0B;
+  --t2v-warn-line: #8A6D1F;
+  --t2v-code-bg: #000F14;
+  --t2v-code-fg: #F2F0EC;
+}
+
+* { box-sizing: border-box; }
+html, body, #root { height: 100%; margin: 0; }
+body { background: var(--t2v-bg); color: var(--t2v-fg); font: var(--t2v-font-size)/1.5 var(--t2v-font); }
+button, input, select, textarea { font: inherit; color: inherit; }
+
+@keyframes t2v-pulse { 0%, 80%, 100% { opacity: 0.25; } 40% { opacity: 1; } }
+@keyframes t2v-rotate { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
+
+/* ── Frame ── */
+
+.t2v-app { display: flex; flex-direction: column; height: 100%; }
+.t2v-center { display: flex; align-items: center; justify-content: center; height: 100%; margin: 0; padding: 16px; color: var(--t2v-muted); text-align: center; }
+.t2v-header { display: flex; align-items: center; flex: 0 0 auto; padding: 6px 8px 6px 14px; border-bottom: 1px solid var(--t2v-line); background: var(--t2v-surface); }
+.t2v-title { flex: 1 1 auto; min-width: 0; margin: 0; font-size: 13px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.t2v-header-btn { margin-left: 2px; }
+.t2v-dot { position: absolute; top: 5px; right: 5px; width: 6px; height: 6px; border-radius: 50%; background: var(--t2v-accent); }
+.t2v-banner { flex: 0 0 auto; padding: 6px 14px; font-size: 13px; color: var(--t2v-danger); background: var(--t2v-danger-bg); border-bottom: 1px solid var(--t2v-line); }
+.t2v-banner-quiet { color: var(--t2v-muted); background: var(--t2v-surface); }
+.t2v-body { position: relative; flex: 1 1 auto; min-height: 0; }
+.t2v-pane { height: 100%; }
+.t2v-pane-hidden { visibility: hidden; }
+.t2v-view { position: absolute; top: 0; right: 0; bottom: 0; left: 0; overflow-y: auto; padding: 16px; background: var(--t2v-bg); }
+.t2v-view > * { margin-top: 0; margin-bottom: 0; }
+.t2v-view > * + * { margin-top: 16px; }
+
+/* ── Controls ── */
+
+.t2v-btn { display: inline-block; flex: 0 0 auto; padding: 6px 12px; border: 1px solid var(--t2v-fg); border-radius: var(--t2v-radius); background: var(--t2v-surface); color: var(--t2v-fg); font-weight: 500; cursor: pointer; }
+.t2v-btn:hover { background: var(--t2v-fg); color: var(--t2v-bg); }
+.t2v-btn-primary { background: var(--t2v-accent); color: #021C25; }
+.t2v-btn-ghost { border-color: transparent; background: transparent; }
+.t2v-btn-danger { border-color: var(--t2v-danger); background: var(--t2v-danger); color: #FFFFFF; }
+.t2v-btn-block { display: block; width: 100%; }
+.t2v-btn:disabled, .t2v-icon-btn:disabled, .t2v-send:disabled, .t2v-link:disabled { opacity: 0.45; cursor: default; }
+.t2v-btn:disabled:hover { background: var(--t2v-surface); color: var(--t2v-fg); }
+.t2v-icon-btn { position: relative; display: inline-flex; align-items: center; justify-content: center; flex: 0 0 auto; width: 28px; height: 28px; padding: 0; border: 1px solid transparent; border-radius: var(--t2v-radius); background: transparent; color: var(--t2v-muted); cursor: pointer; }
+.t2v-icon-btn:hover, .t2v-icon-btn[aria-pressed='true'] { color: var(--t2v-fg); background: var(--t2v-pressed); }
+.t2v-link { padding: 0; border: 0; background: transparent; color: inherit; text-decoration: underline; cursor: pointer; }
+.t2v-btn:focus, .t2v-icon-btn:focus, .t2v-send:focus, .t2v-link:focus, .t2v-suggestion:focus, .t2v-tool-head:focus,
+.t2v-input:focus, .t2v-text:focus, .t2v-select:focus, .t2v-textarea:focus, .t2v-skill input:focus { outline: 2px solid var(--t2v-accent); outline-offset: 2px; }
+
+.t2v-field label { display: block; margin-bottom: 4px; font-weight: 500; }
+.t2v-label-row { display: flex; align-items: baseline; justify-content: space-between; margin-bottom: 4px; }
+.t2v-label-row label { margin-bottom: 0; }
+.t2v-text, .t2v-select { display: block; width: 100%; height: 36px; padding: 0 10px; border: 1px solid var(--t2v-line); border-radius: var(--t2v-radius); background: var(--t2v-surface); color: var(--t2v-fg); }
+.t2v-textarea { display: block; width: 100%; padding: 6px 8px; border: 1px solid var(--t2v-line); border-radius: var(--t2v-radius); background: var(--t2v-surface); color: var(--t2v-fg); resize: vertical; }
+.t2v-mono { font: 12px/1.4 var(--t2v-mono); }
+.t2v-invalid { border-color: var(--t2v-danger); }
+.t2v-hint { margin: 4px 0 0 0; font-size: 12px; color: var(--t2v-muted); }
+.t2v-hint-error { color: var(--t2v-danger); }
+.t2v-muted { color: var(--t2v-muted); }
+.t2v-small { font-size: 12px; }
+.t2v-strong { font-weight: 600; }
+.t2v-truncate { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* ── Thread ── */
+
+.t2v-thread { display: flex; flex-direction: column; height: 100%; }
+/* Read aloud, never drawn. No `clip`: a 1px box that hides its overflow is enough. */
+.t2v-sr-only { position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; border: 0; overflow: hidden; white-space: nowrap; }
+.t2v-viewport { display: flex; flex-direction: column; flex: 1 1 auto; min-height: 0; overflow-y: auto; padding: 12px 12px 0 12px; }
+.t2v-welcome { margin: auto 0 16px 0; padding: 0 4px; }
+.t2v-welcome-heading { margin: 0 0 12px 0; font-size: 22px; font-weight: 500; line-height: 1.25; }
+.t2v-suggestions { display: flex; flex-wrap: wrap; margin: -4px; }
+.t2v-suggestion { margin: 4px; padding: 6px 10px; border: 1px solid var(--t2v-line); border-radius: var(--t2v-radius); background: var(--t2v-surface); text-align: left; cursor: pointer; }
+.t2v-suggestion:hover { border-color: var(--t2v-fg); }
+.t2v-suggestion:disabled, .t2v-suggestion:disabled:hover { border-color: var(--t2v-line); opacity: 0.45; cursor: default; }
+
+.t2v-msg { margin: 0 0 16px 0; }
+.t2v-msg-user { display: flex; justify-content: flex-end; }
+.t2v-user-col { display: flex; flex-direction: column; align-items: flex-end; max-width: 85%; }
+.t2v-bubble { padding: 8px 12px; border-radius: var(--t2v-radius); background: var(--t2v-fg); color: var(--t2v-bg); white-space: pre-wrap; overflow-wrap: anywhere; }
+.t2v-bubble p { margin: 0; }
+.t2v-chips { display: flex; flex-wrap: wrap; }
+.t2v-chip { display: inline-flex; align-items: center; max-width: 100%; margin: 0 6px 6px 0; padding: 3px 8px; border: 1px solid var(--t2v-line); background: var(--t2v-surface); color: var(--t2v-fg); font-size: 12px; }
+.t2v-chip svg { flex: 0 0 auto; margin-right: 4px; }
+.t2v-chip-name { max-width: 200px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+.t2v-md { overflow-wrap: anywhere; }
+.t2v-md > :first-child { margin-top: 0; }
+.t2v-md h1, .t2v-md h2, .t2v-md h3, .t2v-md h4 { margin: 16px 0 8px 0; font-size: 17px; line-height: 1.3; }
+.t2v-md p, .t2v-md ul, .t2v-md ol, .t2v-md blockquote, .t2v-md pre, .t2v-md table { margin: 0 0 12px 0; }
+.t2v-md ul, .t2v-md ol { padding-left: 24px; }
+.t2v-md li input[type='checkbox'] { margin: 0 6px 0 0; }
+.t2v-md a { color: var(--t2v-fg); text-decoration: underline; text-decoration-color: var(--t2v-accent); cursor: pointer; }
+.t2v-md code, .t2v-tool code { padding: 1px 4px; background: var(--t2v-surface); font: 13px/1.4 var(--t2v-mono); }
+.t2v-md pre, .t2v-tool pre { overflow-x: auto; padding: 8px 12px; background: var(--t2v-code-bg); color: var(--t2v-code-fg); font: 13px/1.4 var(--t2v-mono); }
+.t2v-md pre code { padding: 0; background: transparent; color: inherit; }
+.t2v-md blockquote { padding: 4px 12px; border-left: 3px solid var(--t2v-accent); color: var(--t2v-muted); }
+.t2v-md table { width: 100%; border-collapse: collapse; font-size: 13px; }
+.t2v-md th, .t2v-md td { padding: 4px 8px; border: 1px solid var(--t2v-line); text-align: left; }
+.t2v-md th { background: var(--t2v-surface); }
+.t2v-md hr { border: 0; border-top: 1px solid var(--t2v-line); }
+
+.t2v-plan { margin: 0 0 12px 0; padding: 8px 12px; border: 1px solid var(--t2v-line); background: var(--t2v-surface); }
+.t2v-plan-title { margin-bottom: 4px; font-size: 11px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; color: var(--t2v-muted); }
+.t2v-working { display: flex; align-items: center; color: var(--t2v-muted); font-size: 13px; }
+.t2v-dots { margin-right: 8px; }
+.t2v-dots i { display: inline-block; width: 6px; height: 6px; margin-right: 4px; background: var(--t2v-muted); animation: t2v-pulse 1s infinite ease-in-out; }
+.t2v-dots i:nth-child(2) { animation-delay: 0.15s; }
+.t2v-dots i:nth-child(3) { animation-delay: 0.3s; }
+
+.t2v-tool { margin: 0 0 8px 0; border: 1px solid var(--t2v-line); border-left: 3px solid var(--t2v-muted); background: var(--t2v-surface); font-size: 13px; }
+.t2v-tool[data-state='denied'] { border-left-color: var(--t2v-danger); }
+.t2v-tool-running { display: flex; align-items: center; padding: 6px 10px; color: var(--t2v-muted); }
+.t2v-spin { flex: 0 0 auto; margin-right: 8px; animation: t2v-rotate 0.8s linear infinite; }
+.t2v-tool-activity { flex: 1 1 auto; min-width: 0; }
+.t2v-tool-elapsed { margin-left: 8px; font-variant-numeric: tabular-nums; }
+.t2v-tool-head { display: flex; align-items: center; width: 100%; padding: 6px 10px; border: 0; background: transparent; text-align: left; cursor: pointer; }
+.t2v-chevron { flex: 0 0 auto; margin-right: 6px; transition: transform 0.15s; }
+.t2v-chevron-open { transform: rotate(90deg); }
+.t2v-tool-verb { margin-right: 6px; font-weight: 600; }
+.t2v-tool-note { margin: 0; padding: 0 10px 6px 10px; color: var(--t2v-muted); }
+.t2v-tool-body { padding: 0 10px 8px 10px; }
+.t2v-tool pre { margin: 8px 0 0 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+
+.t2v-actions { display: flex; flex-wrap: wrap; align-items: center; }
+.t2v-actions > * { margin: 8px 8px 0 0; }
+.t2v-actions > .t2v-push-right { margin-left: auto; margin-right: 0; }
+.t2v-error { margin: 4px 0 0 0; padding: 10px 12px; border: 1px solid var(--t2v-danger); background: var(--t2v-danger-bg); }
+.t2v-error-text { margin: 0; color: var(--t2v-danger); }
+.t2v-msg-actions { display: flex; margin-top: 4px; }
+.t2v-msg-actions > * + * { margin-left: 2px; }
+
+/* ── Composer ── */
+
+.t2v-footer { position: sticky; bottom: 0; flex: 0 0 auto; margin-top: auto; padding: 8px 0 12px 0; background: var(--t2v-bg); }
+.t2v-scroll { display: flex; margin: 0 auto 8px auto; border-color: var(--t2v-line); background: var(--t2v-surface); }
+.t2v-scroll:disabled { visibility: hidden; }
+.t2v-notice { display: flex; align-items: center; margin: 0 0 8px 0; padding: 6px 10px; border: 1px solid var(--t2v-line); background: var(--t2v-surface); font-size: 13px; }
+.t2v-notice-text { flex: 1 1 auto; min-width: 0; margin-right: 8px; }
+.t2v-composer { padding: 8px; border: 1px solid var(--t2v-fg); border-radius: var(--t2v-radius); background: var(--t2v-surface); }
+.t2v-composer-row { display: flex; align-items: flex-end; }
+.t2v-input { flex: 1 1 auto; min-width: 0; max-height: 160px; margin: 0 8px 0 0; padding: 6px 4px; border: 0; background: transparent; resize: none; }
+.t2v-send { display: inline-flex; align-items: center; justify-content: center; flex: 0 0 auto; width: 32px; height: 32px; padding: 0; border: 1px solid var(--t2v-fg); border-radius: var(--t2v-radius); background: var(--t2v-accent); color: #021C25; cursor: pointer; }
+.t2v-stop { background: var(--t2v-surface); color: var(--t2v-fg); }
+.t2v-footnote { margin: 8px 0 0 0; font-size: 12px; color: var(--t2v-muted); text-align: center; }
+
+/* ── Account ── */
+
+.t2v-form > * { margin-top: 0; margin-bottom: 0; }
+.t2v-form > * + * { margin-top: 12px; }
+.t2v-form-error { color: var(--t2v-danger); }
+.t2v-reason { padding: 10px 12px; border-left: 3px solid var(--t2v-accent); background: var(--t2v-surface); }
+.t2v-stack > * { margin-top: 0; margin-bottom: 0; }
+.t2v-stack > * + * { margin-top: 6px; }
+.t2v-view-title { margin: 0; font-size: 16px; font-weight: 600; }
+
+/* ── Approval card ── */
+
+.t2v-approval { margin: 0 0 12px 0; padding: 12px; border: 1px solid var(--t2v-accent); background: var(--t2v-surface); font-size: 13px; }
+.t2v-approval > * { margin-top: 0; margin-bottom: 0; }
+.t2v-approval > * + * { margin-top: 10px; }
+.t2v-approval code { padding: 1px 4px; background: var(--t2v-surface); font: 13px/1.4 var(--t2v-mono); }
+/* Bounded and internally scrollable: an approval's own arguments are as untrusted as
+   their length — a deeply nested or very long value must not push the tool name and the
+   decision buttons off screen. Viewport-relative (a
+   fixed 220px was still 472-490px tall inside a 439px-available 320x480 window, pushing
+   the tool name under the header) with a small min-height so it never collapses to
+   nothing on a very short viewport either. */
+.t2v-approval pre { margin: 8px 0 0 0; max-height: 18vh; min-height: 48px; overflow: auto; padding: 8px 12px; background: var(--t2v-code-bg); color: var(--t2v-code-fg); font: 13px/1.4 var(--t2v-mono); white-space: pre-wrap; overflow-wrap: anywhere; }
+.t2v-approval-head { display: flex; align-items: flex-start; }
+.t2v-approval-icon { flex: 0 0 auto; margin: 2px 8px 0 0; color: var(--t2v-accent); }
+.t2v-approval-text { min-width: 0; }
+.t2v-approval-title { margin: 0; font-weight: 500; }
+.t2v-approval-prompt { display: -webkit-box; margin: 4px 0 0 0; overflow: hidden; color: var(--t2v-muted); font-size: 12px; -webkit-box-orient: vertical; -webkit-line-clamp: 3; }
+/* `display: block` alone stops the clamp (it only applies to a -webkit-box), and a long
+   engine description still gets a bound rather than growing the card without limit. */
+.t2v-approval-prompt-expanded { display: block; max-height: 18vh; min-height: 48px; overflow-y: auto; }
+.t2v-approval-details { max-height: 18vh; min-height: 48px; overflow-y: auto; }
+.t2v-approval-detail { display: flex; }
+.t2v-approval-detail dt { flex: 0 0 auto; min-width: 80px; margin-right: 8px; font-weight: 600; }
+.t2v-approval-detail dd { margin: 0; max-height: 15vh; min-height: 32px; overflow-y: auto; overflow-wrap: anywhere; }
+.t2v-warning { padding: 8px 10px; border: 1px solid var(--t2v-warn-line); background: var(--t2v-warn-bg); font-size: 12px; line-height: 1.45; }
+
+/* ── Settings ── */
+
+.t2v-subtitle { margin: 12px 0 4px 0; font-size: 13px; font-weight: 600; }
+.t2v-skill { display: flex; align-items: flex-start; padding: 8px 0; border-top: 1px solid var(--t2v-line); cursor: pointer; }
+/* Read-only (a platform skill): not a control, so no pointer cursor. */
+.t2v-skill.t2v-skill-static { cursor: default; }
+.t2v-skill input { flex: 0 0 auto; margin: 3px 10px 0 0; }
+/* `overflow-wrap` is inherited, so this also bounds the name and description spans below
+   it: an untrusted skill name or description must wrap, even as one
+   unbroken run of characters, rather than force the view wider than its 480px frame. */
+.t2v-skill-text { display: flex; flex-direction: column; min-width: 0; overflow-wrap: anywhere; }
+.t2v-skill-label { font-size: 11px; letter-spacing: 0.06em; text-transform: uppercase; color: var(--t2v-muted); }
+/* A skill's description, clamped like an approval's prompt (`.t2v-approval-prompt`): an
+   untrusted description of unbounded length (up to 100,000 characters seen
+   in testing) must not grow the view without limit. */
+.t2v-skill-desc { display: -webkit-box; margin: 2px 0 0 0; overflow: hidden; color: var(--t2v-muted); font-size: 12px; -webkit-box-orient: vertical; -webkit-line-clamp: 3; }
+.t2v-skill-desc-expanded { display: block; max-height: 200px; overflow-y: auto; }
+
+/* ── Attachments in the composer ── */
+
+.t2v-attach { margin: 0 6px 2px 0; }
+.t2v-chip-status { margin-left: 6px; color: var(--t2v-muted); }
+.t2v-chip-remove { display: inline-flex; margin-left: 6px; padding: 0; border: 0; background: transparent; color: var(--t2v-muted); cursor: pointer; }
+
+/* ── Provider sign-in ── */
+
+.t2v-providers > * + * { margin-top: 8px; }
+.t2v-provider { display: flex; align-items: center; justify-content: center; }
+.t2v-provider svg { flex: 0 0 auto; margin-right: 8px; }
+.t2v-provider-apple, .t2v-provider-apple:hover, .t2v-provider-apple:disabled:hover { border-color: var(--t2v-fg); background: var(--t2v-fg); color: var(--t2v-bg); }
+.t2v-provider-google:hover { background: var(--t2v-surface); color: var(--t2v-fg); }
+.t2v-divider { display: flex; align-items: center; margin: 12px 0 0; color: var(--t2v-muted); font-size: 12px; }
+.t2v-divider::before, .t2v-divider::after { content: ''; flex: 1 1 auto; border-top: 1px solid var(--t2v-line); }
+.t2v-divider span { padding: 0 8px; }
+.t2v-oauth-line { display: flex; align-items: center; }
+.t2v-oauth-error { display: flex; align-items: baseline; justify-content: space-between; }
+.t2v-oauth-error .t2v-link { flex: 0 0 auto; margin-left: 8px; }
+/* Where focus lands when the control that held it goes (tabIndex -1): visible for a keyboard. */
+.t2v-providers:focus, .t2v-oauth-pending:focus, .t2v-view-title:focus { outline: 2px solid var(--t2v-accent); outline-offset: 2px; }

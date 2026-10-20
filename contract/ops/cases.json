@@ -1,0 +1,188 @@
+{
+  "version": 1,
+  "about": "Op batches and what applying them in order must give: `expect`, or `error: true` when any op does not apply. Python's state._apply_op and the embed page's applyOps both replay every case.",
+  "cases": [
+    {
+      "id": "set_top_level_key",
+      "state": { "isLoading": false, "error": null },
+      "ops": [{ "type": "set", "path": ["isLoading"], "value": true }],
+      "expect": { "isLoading": true, "error": null }
+    },
+    {
+      "id": "set_adds_a_key_at_the_last_step",
+      "state": { "limits": { "demoLimitReached": false } },
+      "ops": [{ "type": "set", "path": ["limits", "anonymousUnavailable"], "value": { "type": "captcha_required" } }],
+      "expect": { "limits": { "demoLimitReached": false, "anonymousUnavailable": { "type": "captcha_required" } } }
+    },
+    {
+      "id": "set_to_null",
+      "state": { "pendingApproval": { "toolCallId": "c1" } },
+      "ops": [{ "type": "set", "path": ["pendingApproval"], "value": null }],
+      "expect": { "pendingApproval": null }
+    },
+    {
+      "id": "set_at_length_appends_a_message",
+      "state": { "messages": [{ "id": "u1", "content": "hi" }] },
+      "ops": [{ "type": "set", "path": ["messages", 1], "value": { "id": "a1", "content": "" } }],
+      "expect": { "messages": [{ "id": "u1", "content": "hi" }, { "id": "a1", "content": "" }] }
+    },
+    {
+      "id": "set_replaces_a_list_item",
+      "state": { "messages": [{ "id": "u1" }, { "id": "a1" }] },
+      "ops": [{ "type": "set", "path": ["messages", 0], "value": { "id": "u2" } }],
+      "expect": { "messages": [{ "id": "u2" }, { "id": "a1" }] }
+    },
+    {
+      "id": "set_at_length_appends_at_depth",
+      "state": { "messages": [{ "id": "a1", "steps": [] }] },
+      "ops": [
+        { "type": "set", "path": ["messages", 0, "steps", 0], "value": { "name": "t", "status": "running" } },
+        { "type": "set", "path": ["messages", 0, "steps", 1], "value": { "name": "u", "status": "running" } }
+      ],
+      "expect": { "messages": [{ "id": "a1", "steps": [{ "name": "t", "status": "running" }, { "name": "u", "status": "running" }] }] }
+    },
+    {
+      "id": "set_keeps_a_proto_key_in_a_value",
+      "about": "A tool's arguments are whatever the agent wrote: `__proto__` is an ordinary key here, and a copy that assigns instead of defining would drop it (and change the copy's prototype), hiding it from the approval card while the host still receives it.",
+      "state": { "pendingApproval": null },
+      "ops": [{ "type": "set", "path": ["pendingApproval"], "value": { "toolCallId": "call-1", "toolName": "load_sample_data", "arguments": { "__proto__": { "admin": true }, "name": "MRHead" } } }],
+      "expect": { "pendingApproval": { "toolCallId": "call-1", "toolName": "load_sample_data", "arguments": { "__proto__": { "admin": true }, "name": "MRHead" } } }
+    },
+    {
+      "id": "steps_first_set_then_append",
+      "state": { "messages": [{ "id": "a1" }] },
+      "ops": [
+        { "type": "set", "path": ["messages", 0, "steps"], "value": [{ "name": "t", "status": "running" }] },
+        { "type": "set", "path": ["messages", 0, "steps", 0, "status"], "value": "used" }
+      ],
+      "expect": { "messages": [{ "id": "a1", "steps": [{ "name": "t", "status": "used" }] }] }
+    },
+    {
+      "id": "append_text",
+      "state": { "messages": [{ "id": "a1", "content": "Hel" }] },
+      "ops": [
+        { "type": "append-text", "path": ["messages", 0, "content"], "value": "lo" },
+        { "type": "append-text", "path": ["messages", 0, "content"], "value": ", 日本語 ✓" }
+      ],
+      "expect": { "messages": [{ "id": "a1", "content": "Hello, 日本語 ✓" }] }
+    },
+    {
+      "id": "a_turn_starts",
+      "state": { "messages": [], "isLoading": false, "error": "old" },
+      "ops": [
+        { "type": "set", "path": ["messages", 0], "value": { "id": "u1", "role": "user", "content": "hi" } },
+        { "type": "set", "path": ["messages", 1], "value": { "id": "a1", "role": "assistant", "content": "", "isStreaming": true } },
+        { "type": "set", "path": ["isLoading"], "value": true },
+        { "type": "set", "path": ["error"], "value": null },
+        { "type": "append-text", "path": ["messages", 1, "content"], "value": "Hello" }
+      ],
+      "expect": {
+        "messages": [
+          { "id": "u1", "role": "user", "content": "hi" },
+          { "id": "a1", "role": "assistant", "content": "Hello", "isStreaming": true }
+        ],
+        "isLoading": true,
+        "error": null
+      }
+    },
+    {
+      "id": "shrink_is_a_whole_list_set",
+      "state": { "messages": [{ "id": "u1" }, { "id": "a1" }, { "id": "u2" }] },
+      "ops": [{ "type": "set", "path": ["messages"], "value": [{ "id": "u1" }] }],
+      "expect": { "messages": [{ "id": "u1" }] }
+    },
+    {
+      "id": "error_empty_path",
+      "state": { "isLoading": false },
+      "ops": [{ "type": "set", "path": [], "value": 1 }],
+      "error": true
+    },
+    {
+      "id": "error_seq_is_never_a_path",
+      "state": { "isLoading": false },
+      "ops": [{ "type": "set", "path": ["seq"], "value": 7 }],
+      "error": true
+    },
+    {
+      "id": "error_missing_intermediate_key",
+      "state": { "isLoading": false },
+      "ops": [{ "type": "set", "path": ["nope", "x"], "value": 1 }],
+      "error": true
+    },
+    {
+      "id": "error_set_past_the_end",
+      "state": { "messages": [] },
+      "ops": [{ "type": "set", "path": ["messages", 1], "value": { "id": "a1" } }],
+      "error": true
+    },
+    {
+      "id": "error_negative_index",
+      "state": { "messages": [{ "id": "a1" }] },
+      "ops": [{ "type": "set", "path": ["messages", -1], "value": { "id": "a2" } }],
+      "error": true
+    },
+    {
+      "id": "error_intermediate_index_out_of_range",
+      "state": { "messages": [{ "id": "a1", "content": "" }] },
+      "ops": [{ "type": "append-text", "path": ["messages", 5, "content"], "value": "x" }],
+      "error": true
+    },
+    {
+      "id": "error_append_text_to_a_missing_key",
+      "state": { "messages": [{ "id": "a1" }] },
+      "ops": [{ "type": "append-text", "path": ["messages", 0, "content"], "value": "x" }],
+      "error": true
+    },
+    {
+      "id": "error_append_text_to_a_number",
+      "state": { "count": 1 },
+      "ops": [{ "type": "append-text", "path": ["count"], "value": "x" }],
+      "error": true
+    },
+    {
+      "id": "error_append_text_of_a_number",
+      "state": { "text": "a" },
+      "ops": [{ "type": "append-text", "path": ["text"], "value": 1 }],
+      "error": true
+    },
+    {
+      "id": "error_string_key_into_a_list",
+      "state": { "messages": [{ "id": "a1", "content": "" }] },
+      "ops": [{ "type": "append-text", "path": ["messages", "0", "content"], "value": "x" }],
+      "error": true
+    },
+    {
+      "id": "error_integer_key_into_a_dict",
+      "state": { "a": 1 },
+      "ops": [{ "type": "set", "path": [0], "value": 2 }],
+      "error": true
+    },
+    {
+      "id": "error_boolean_index",
+      "state": { "messages": [{ "id": "a1" }] },
+      "ops": [{ "type": "set", "path": ["messages", true], "value": { "id": "a2" } }],
+      "error": true
+    },
+    {
+      "id": "error_set_inside_a_scalar",
+      "state": { "isLoading": false },
+      "ops": [{ "type": "set", "path": ["isLoading", "x"], "value": 1 }],
+      "error": true
+    },
+    {
+      "id": "error_unknown_op_type",
+      "state": { "a": 1 },
+      "ops": [{ "type": "delete", "path": ["a"], "value": null }],
+      "error": true
+    },
+    {
+      "id": "error_second_op_fails",
+      "state": { "messages": [] },
+      "ops": [
+        { "type": "set", "path": ["messages", 0], "value": { "id": "u1" } },
+        { "type": "append-text", "path": ["messages", 1, "content"], "value": "x" }
+      ],
+      "error": true
+    }
+  ]
+}

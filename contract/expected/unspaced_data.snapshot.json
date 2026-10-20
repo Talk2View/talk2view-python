@@ -1,0 +1,9 @@
+{
+  "messages": [
+    { "role": "user", "content": "Say hello" },
+    { "role": "assistant", "content": "Hello world", "isStreaming": false }
+  ],
+  "error": null,
+  "threadId": "thread_contract",
+  "pendingApproval": null
+}

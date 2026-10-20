@@ -1,0 +1,3 @@
+# Byte-exact engine output: never normalise line endings or treat as mergeable text.
+sse/*.sse -text
+http/*.json -text

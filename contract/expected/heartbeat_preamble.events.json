@@ -1,0 +1,8 @@
+{
+  "phases": [
+    [
+      { "type": "text", "content": "Hi" },
+      { "type": "done", "threadId": "thread_contract" }
+    ]
+  ]
+}

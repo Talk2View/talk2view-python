@@ -1,0 +1,23 @@
+{
+  "phases": [
+    [
+      {
+        "type": "approval_required",
+        "toolName": "gmail_send_email",
+        "toolCallId": "call_contract_2",
+        "arguments": { "to": "alex@example.com", "subject": "Scan results" },
+        "description": "Send an email to alex@example.com",
+        "kind": "engine",
+        "details": [
+          { "label": "To", "value": "alex@example.com" },
+          { "label": "Subject", "value": "Scan results" }
+        ]
+      }
+    ],
+    [
+      { "type": "approval_result", "toolName": "gmail_send_email", "decision": "once" },
+      { "type": "text", "content": "Sent." },
+      { "type": "done", "threadId": "thread_contract" }
+    ]
+  ]
+}

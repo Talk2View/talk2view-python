@@ -1,0 +1,24 @@
+{
+  "messages": [
+    { "role": "user", "content": "Switch to the four-up layout" },
+    {
+      "role": "assistant",
+      "content": "Switching the layout. ",
+      "isStreaming": false,
+      "plan": "- [ ] Switch the layout",
+      "steps": [
+        {
+          "name": "set_layout",
+          "status": "used",
+          "args": { "layout": "four-up" },
+          "source": "client",
+          "toolCallId": "call_contract_1"
+        }
+      ]
+    },
+    { "role": "assistant", "content": "Done.", "isStreaming": false }
+  ],
+  "error": null,
+  "threadId": "thread_contract",
+  "pendingApproval": null
+}

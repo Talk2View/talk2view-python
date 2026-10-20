@@ -1,0 +1,54 @@
+# Dependency vulnerability scanning: pip-audit on the SDK's Python dependencies and npm
+# audit on the chat page's runtime dependencies (they are bundled into the wheel). Runs on
+# pull requests, pushes to main, and weekly (Monday 06:00 UTC) to catch advisories
+# disclosed against dependencies that have not changed.
+
+name: Security
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  schedule:
+    - cron: "0 6 * * 1"
+
+permissions:
+  contents: read
+
+jobs:
+  pip-audit:
+    name: pip-audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.13"
+
+      - name: Install dependencies
+        run: uv sync --all-extras --frozen
+
+      - name: Audit dependencies
+        # Suppresses only the IDs triaged in pip-audit-ignore.txt, warns once the triage
+        # is past its revisit date, and retries a transient advisory-service error.
+        run: bash .github/scripts/pip-audit-gate.sh
+
+  npm-audit:
+    name: npm audit (chat page)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: embed
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "22"
+
+      - name: Audit the dependencies bundled into the page
+        run: npm audit --omit=dev --audit-level=high

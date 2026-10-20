@@ -1,0 +1,35 @@
+{
+  "messages": [
+    { "role": "user", "content": "Draw a red cube" },
+    {
+      "role": "assistant",
+      "content": "",
+      "isStreaming": false,
+      "steps": [
+        {
+          "name": "generate_image",
+          "status": "used",
+          "args": { "prompt": "a red cube" },
+          "source": "platform",
+          "toolCallId": "call_contract_3",
+          "display": {
+            "kind": "image",
+            "attachment_id": "att_contract_1",
+            "image": "/v1/attachments/att_contract_1/content",
+            "filename": "generated.png",
+            "mime_type": "image/png",
+            "width": 1024,
+            "height": 1024,
+            "prompt": "a red cube",
+            "model": "contract-image-model",
+            "source_image_id": null
+          }
+        }
+      ]
+    },
+    { "role": "assistant", "content": "Here is your image.", "isStreaming": false }
+  ],
+  "error": null,
+  "threadId": "thread_contract",
+  "pendingApproval": null
+}

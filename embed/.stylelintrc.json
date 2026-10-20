@@ -1,0 +1,28 @@
+{
+  "rules": {
+    "property-disallowed-list": [
+      ["gap", "row-gap", "column-gap", "grid-gap", "inset", "inset-block", "inset-inline", "aspect-ratio", "container", "container-type", "container-name", "scrollbar-gutter", "accent-color", "text-underline-offset", "text-decoration-thickness", "content-visibility"],
+      { "message": "Not on Chromium 83: use margins, top/right/bottom/left, or another rule" }
+    ],
+    "selector-pseudo-class-disallowed-list": [
+      ["is", "where", "has", "focus-visible", "focus-within"],
+      { "message": "Not on Chromium 83: use plain :focus and plain selectors" }
+    ],
+    "at-rule-disallowed-list": [
+      ["layer", "container", "property"],
+      { "message": "Not on Chromium 83" }
+    ],
+    "function-disallowed-list": [
+      ["oklch", "oklab", "color-mix", "lch", "lab"],
+      { "message": "Not on Chromium 83: write colours as hex" }
+    ],
+    "unit-disallowed-list": [
+      ["dvh", "svh", "lvh", "dvw", "svw", "lvw", "cqw", "cqh"],
+      { "message": "Not on Chromium 83" }
+    ],
+    "declaration-property-value-disallowed-list": [
+      { "overflow": ["clip"], "overflow-x": ["clip"], "overflow-y": ["clip"] },
+      { "message": "overflow: clip is Chromium 90+" }
+    ]
+  }
+}

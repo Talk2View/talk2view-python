@@ -1,0 +1,9 @@
+{
+  "body": {
+    "error": {
+      "message": "tool_call_id does not match the pending tool call. The session has moved on to a different interrupt; this result was not applied.",
+      "type": "tool_call_id_mismatch"
+    }
+  },
+  "status": 409
+}
