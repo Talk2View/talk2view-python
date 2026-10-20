@@ -1,0 +1,68 @@
+{
+  "version": 1,
+  "session": {
+    "session_id": "ses_contract",
+    "thread_id": "thread_contract",
+    "model": "contract-model"
+  },
+  "pythonOnlyStepKeys": ["toolCallId", "source", "display"],
+  "fixtures": [
+    {
+      "id": "text_stop",
+      "sdks": ["python", "ts"],
+      "prompt": "Say hello",
+      "streams": ["text_stop.sse"]
+    },
+    {
+      "id": "client_tool_interrupt",
+      "sdks": ["python", "ts"],
+      "prompt": "Switch to the four-up layout",
+      "tools": { "set_layout": "layout set" },
+      "streams": ["client_tool_interrupt.sse", "client_tool_interrupt.resume.sse"],
+      "resumeBodies": [
+        { "tool_call_id": "call_contract_1", "result": "layout set", "is_error": false }
+      ]
+    },
+    {
+      "id": "engine_approval",
+      "sdks": ["python"],
+      "prompt": "Email the scan results to Alex",
+      "capabilities": { "approval": true },
+      "approve": "once",
+      "streams": ["engine_approval.sse", "engine_approval.resume.sse"],
+      "resumeBodies": [{ "tool_call_id": "call_contract_2", "approved": true }]
+    },
+    {
+      "id": "error_chunk",
+      "sdks": ["python", "ts"],
+      "prompt": "Trigger an upstream failure",
+      "streams": ["error_chunk.sse"]
+    },
+    {
+      "id": "heartbeat_preamble",
+      "sdks": ["python", "ts"],
+      "prompt": "Slow first token",
+      "streams": ["heartbeat_preamble.sse"]
+    },
+    {
+      "id": "tool_events_image",
+      "sdks": ["python"],
+      "prompt": "Draw a red cube",
+      "capabilities": { "tool_events": true, "image_generation": true },
+      "streams": ["tool_events_image.sse"]
+    },
+    {
+      "id": "unspaced_data",
+      "sdks": ["python", "ts"],
+      "prompt": "Say hello",
+      "streams": ["unspaced_data.sse"]
+    }
+  ],
+  "http": [
+    { "file": "authentication_error_401.json", "pythonClass": "AuthenticationError", "tsClass": "AuthenticationError", "sessionGone": false },
+    { "file": "partner_key_error_401.json", "pythonClass": "PartnerKeyError", "tsClass": "PartnerKeyError", "sessionGone": false },
+    { "file": "session_not_found_404.json", "pythonClass": "SessionError", "tsClass": "SessionError", "sessionGone": true },
+    { "file": "not_found_404.json", "pythonClass": "T2VError", "tsClass": "T2VError", "sessionGone": true },
+    { "file": "tool_call_id_mismatch_409.json", "pythonClass": "T2VError", "tsClass": "T2VError", "sessionGone": false }
+  ]
+}

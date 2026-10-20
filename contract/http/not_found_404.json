@@ -1,0 +1,9 @@
+{
+  "body": {
+    "error": {
+      "message": "Session not found",
+      "type": "not_found"
+    }
+  },
+  "status": 404
+}

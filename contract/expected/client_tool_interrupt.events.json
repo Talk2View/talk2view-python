@@ -1,0 +1,17 @@
+{
+  "phases": [
+    [
+      { "type": "status", "status": "thinking", "message": "Planning the layout change" },
+      { "type": "todos", "content": "- [ ] Switch the layout" },
+      { "type": "text", "content": "Switching the layout. " },
+      {
+        "type": "tool_call",
+        "toolName": "set_layout",
+        "toolCallId": "call_contract_1",
+        "arguments": { "layout": "four-up" }
+      },
+      { "type": "text", "content": "Done." },
+      { "type": "done", "threadId": "thread_contract" }
+    ]
+  ]
+}

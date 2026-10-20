@@ -1,0 +1,63 @@
+--- a/src/assistant-ui/convert.ts
++++ b/src/assistant-ui/convert.ts
+@@ -6,7 +6,7 @@
+  * unit-tested without React or a runtime.
+  */
+ import type { ThreadMessageLike, ToolCallMessagePart } from '@assistant-ui/react';
+-import type { Attachment, DisplayMessage, HumanDecision, PendingApproval, ToolStep } from '../types.js';
++import type { ApprovalDetail, Attachment, DisplayMessage, HumanDecision, PendingApproval, ToolStep } from '../types.js';
+ 
+ /** What a message needs to know about the thread around it. */
+ export interface ConvertContext {
+@@ -34,6 +34,17 @@
+   { id: APPROVAL_OPTION_IDS.deny, kind: 'reject-once', label: 'Deny' },
+ ];
+ 
++/** An engine approval is allowed or denied per call: nothing remembers "always" for one. */
++const ENGINE_APPROVAL_OPTIONS: ToolApproval['options'] = APPROVAL_OPTIONS.filter(
++  (option) => option.id !== APPROVAL_OPTION_IDS.always,
++);
++
++/** What an approval part carries besides assistant-ui's own fields (`part.artifact.approval`). */
++export interface ApprovalArtifact {
++  kind: 'client' | 'engine';
++  details: ApprovalDetail[];
++}
++
+ /** Stable id for a completed step: steps carry no id of their own. */
+ export function stepToolCallId(messageId: string, index: number): string {
+   return `${messageId}:step:${index}`;
+@@ -50,11 +61,21 @@
+     ...(step.status === 'running'
+       ? {}
+       : { result: step.result ?? (denied ? 'Denied by the user' : ''), isError: denied }),
++    ...(step.display ? { artifact: { display: step.display } } : {}),
+   };
+ }
+ 
+-/** The approval gate assistant-ui draws for a tool call that needs a decision. */
++/**
++ * The approval gate assistant-ui draws for a tool call that needs a decision. Anything
++ * but a client approval (fail closed) is offered allow or deny only. A `kind` or
++ * `details` the SDK set travels in `artifact.approval` (`ApprovalArtifact`).
++ */
+ export function approvalPart(approval: PendingApproval): ThreadPart {
++  const client = approval.kind === undefined || approval.kind === 'client';
++  const artifact: { approval: ApprovalArtifact } | null =
++    approval.kind !== undefined || approval.details !== undefined
++      ? { approval: { kind: client ? 'client' : 'engine', details: approval.details ?? [] } }
++      : null;
+   return {
+     type: 'tool-call',
+     toolCallId: approval.toolCallId,
+@@ -66,8 +87,9 @@
+       display: 'decision',
+       // A reason may accompany the decision; the SDK forwards it as feedback.
+       allowFreeform: true,
+-      options: APPROVAL_OPTIONS,
++      options: client ? APPROVAL_OPTIONS : ENGINE_APPROVAL_OPTIONS,
+     },
++    ...(artifact ? { artifact } : {}),
+   };
+ }
+ 

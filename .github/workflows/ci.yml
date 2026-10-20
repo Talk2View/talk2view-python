@@ -1,0 +1,159 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Lint, type check & test (Python ${{ matrix.python }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.10", "3.13"] # 3.10 is the floor (requires-python); 3.13 the dev interpreter
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: ${{ matrix.python }}
+
+      - name: Install dependencies
+        run: uv sync --all-extras --frozen --python ${{ matrix.python }}
+
+      - name: Lint
+        run: uv run ruff check src/ tests/ scripts/
+
+      - name: Type check
+        run: uv run mypy src/
+
+      - name: Test
+        run: uv run pytest -v --cov --cov-report=term-missing
+
+  package:
+    name: Build the wheel and sdist (with the chat page)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: embed/package-lock.json
+
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+
+      - name: Build the chat page into src/talk2view/ui/static/
+        working-directory: embed
+        run: npm ci --no-audit --no-fund && npm run build
+
+      - name: Build (the sdist, then the wheel from it)
+        run: uv build
+
+      - name: The wheel and sdist carry the chat page
+        run: python3 scripts/check_wheel_assets.py dist/*.whl dist/*.tar.gz
+
+      - name: Metadata renders on PyPI
+        run: uvx twine check --strict dist/*
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: dist
+          path: dist/
+
+  install:
+    name: Install the wheel (${{ matrix.os }}, Python ${{ matrix.python }})
+    needs: package
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        python: ["3.10", "3.14"]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: ${{ matrix.python }}
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: dist
+          path: dist/
+
+      - name: Install into a clean environment and import it
+        shell: bash
+        run: |
+          python -m venv "$RUNNER_TEMP/venv"
+          if [ -x "$RUNNER_TEMP/venv/Scripts/python.exe" ]; then py="$RUNNER_TEMP/venv/Scripts/python.exe"; else py="$RUNNER_TEMP/venv/bin/python"; fi
+          "$py" -m pip install --quiet dist/*.whl
+          # Outside the checkout, so the import cannot pick up src/.
+          cd "$RUNNER_TEMP"
+          "$py" "$GITHUB_WORKSPACE/scripts/smoke_installed.py"
+
+  embed:
+    name: Chat page — lint, test & end to end
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: embed
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: embed/package-lock.json
+
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.13"
+
+      - name: Install dependencies
+        run: npm ci --no-audit --no-fund
+
+      - name: Vendored TS SDK files match the public talk2view-typescript repository
+        # No token: the repository is public. A network failure only warns.
+        run: node scripts/check-vendored-sdk.mjs
+
+      - name: The Python SDK (the e2e backend runs the real UIServer)
+        working-directory: .
+        run: uv sync --all-extras --frozen
+
+      - name: Type check
+        run: npm run typecheck
+
+      - name: Unit tests
+        run: npm test
+
+      - name: CSS for Chromium 83 (stylelint, doiuse)
+        run: npm run lint:css
+
+      - name: Python beside the page (the SDK's ruff config; the judge's tests)
+        run: |
+          uv run --project .. ruff check --config ../pyproject.toml e2e/ guard/
+          (cd guard && python3 -m unittest test_guard_judge)
+
+      - name: Build the page and the guard page (each checked by check-dist)
+        run: |
+          npm run build
+          npm run build:guard
+
+      - name: End to end against the real UIServer
+        run: |
+          npx playwright install --with-deps chromium
+          npm run test:e2e

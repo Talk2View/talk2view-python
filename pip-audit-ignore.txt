@@ -1,0 +1,9 @@
+# pip-audit ignore allowlist — talk2view
+#
+# Advisory IDs listed here are suppressed by the Security workflow
+# (.github/scripts/pip-audit-gate.sh). It is empty: the locked dependencies have no
+# known advisories. Prefer upgrading in uv.lock to listing an ID. If one must be
+# listed, add a dated "Revisit by YYYY-MM-DD." line to this header and a note per ID.
+#
+# Format: one advisory ID per line. Text after '#' is a note; the workflow reads only
+# the first whitespace-delimited token on each non-comment line.

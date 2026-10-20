@@ -1,0 +1,50 @@
+{
+  "name": "@talk2view/sdk-embed",
+  "private": true,
+  "version": "0.0.0",
+  "description": "The Talk2View chat page the Python SDK's UIServer serves (built for Chromium 83).",
+  "license": "MIT",
+  "type": "module",
+  "scripts": {
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "test": "vitest run",
+    "build": "tsc --noEmit -p tsconfig.json && vite build && node scripts/check-dist.mjs ../src/talk2view/ui/static",
+    "build:guard": "tsc --noEmit -p tsconfig.json && vite build --mode guard && node scripts/check-dist.mjs dist-guard",
+    "lint:css": "stylelint \"src/**/*.css\" && node scripts/check-css.mjs src/styles/app.css",
+    "test:e2e": "playwright test"
+  },
+  "dependencies": {
+    "@assistant-ui/react": "0.15.20",
+    "@fontsource-variable/space-grotesk": "5.3.0",
+    "core-js": "3.50.0",
+    "dompurify": "3.4.16",
+    "lucide-react": "1.8.0",
+    "marked": "15.0.12",
+    "react": "19.3.0",
+    "react-dom": "19.3.0"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.60.0",
+    "@types/node": "22.18.8",
+    "@types/react": "19.3.0",
+    "@types/react-dom": "19.3.0",
+    "@vitejs/plugin-react": "4.7.0",
+    "doiuse": "6.0.6",
+    "stylelint": "17.15.0",
+    "typescript": "5.9.3",
+    "vite": "6.4.3",
+    "vitest": "4.1.11"
+  },
+  "overrides": {
+    "@assistant-ui/core": "0.3.19",
+    "@assistant-ui/store": "0.3.13",
+    "@assistant-ui/tap": "0.9.17",
+    "assistant-cloud": "0.2.1",
+    "assistant-stream": "0.3.43",
+    "radix-ui": "1.6.7",
+    "react-textarea-autosize": "8.5.9",
+    "safe-content-frame": "0.0.30",
+    "zod": "4.6.5",
+    "zustand": "5.0.15"
+  }
+}

@@ -9,3 +9,16 @@ build/
 .ruff_cache/
 .pytest_cache/
 .DS_Store
+.coverage
+coverage.xml
+
+# The chat page, built by embed/ (npm run build). Never committed: hatch `artifacts`
+# (pyproject.toml) carries it into wheels and sdists anyway.
+/src/talk2view/ui/static/
+
+# embed/
+node_modules/
+embed/dist-guard/
+embed/test-results/
+embed/playwright-report/
+embed/guard-out/

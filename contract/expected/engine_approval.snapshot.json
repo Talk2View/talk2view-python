@@ -1,0 +1,23 @@
+{
+  "messages": [
+    { "role": "user", "content": "Email the scan results to Alex" },
+    {
+      "role": "assistant",
+      "content": "",
+      "isStreaming": false,
+      "steps": [
+        {
+          "name": "gmail_send_email",
+          "status": "used",
+          "args": { "to": "alex@example.com", "subject": "Scan results" },
+          "source": "platform",
+          "toolCallId": "call_contract_2"
+        }
+      ]
+    },
+    { "role": "assistant", "content": "Sent.", "isStreaming": false }
+  ],
+  "error": null,
+  "threadId": "thread_contract",
+  "pendingApproval": null
+}

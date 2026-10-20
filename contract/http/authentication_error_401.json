@@ -1,0 +1,9 @@
+{
+  "body": {
+    "error": {
+      "message": "Invalid or expired token",
+      "type": "authentication_error"
+    }
+  },
+  "status": 401
+}

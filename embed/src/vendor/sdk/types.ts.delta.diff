@@ -1,0 +1,36 @@
+--- a/src/types.ts
++++ b/src/types.ts
+@@ -275,6 +275,24 @@
+   toolName: string;
+   arguments: Record<string, unknown>;
+   description: string;
++  /**
++   * Who asked. `'client'` (or absent): an SDK-side permission check on a client tool,
++   * answered with once / always / deny. `'engine'`: an engine-enforced approval of a
++   * platform tool (ADR 0004), answered with allow or deny only. Set by the Python SDK
++   * today; the TS client does not request engine approvals yet.
++   */
++  kind?: 'client' | 'engine';
++  /** The engine's label/value summary of an engine approval. */
++  details?: ApprovalDetail[];
++}
++
++/**
++ * One line of an engine approval's summary. `label` and `value` are engine-supplied
++ * text, not markup — render them as plain text, never as HTML.
++ */
++export interface ApprovalDetail {
++  label: string;
++  value: string;
+ }
+ 
+ export interface HumanDecision {
+@@ -464,6 +482,8 @@
+   status: 'used' | 'denied' | 'running';
+   args?: Record<string, unknown>;
+   result?: string;
++  /** A tool event's render-safe `display` (e.g. ImageToolDisplay). Set by the Python SDK today. */
++  display?: Record<string, unknown>;
+ }
+ 
+ export interface DisplayMessage {
