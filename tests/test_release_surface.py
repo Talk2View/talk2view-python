@@ -1,4 +1,4 @@
-"""0.2.0 release surface: version, MIT licence, public exports, README/CHANGELOG sections."""
+"""Release surface: version, MIT licence, public exports, README/CHANGELOG sections."""
 
 from __future__ import annotations
 
@@ -11,14 +11,14 @@ import talk2view
 PACKAGE = Path(__file__).resolve().parents[1]
 
 
-def test_version_is_0_2_0_everywhere() -> None:
-    assert talk2view.__version__ == "0.2.0"
-    assert importlib.metadata.version("talk2view") == "0.2.0"
+def test_version_is_the_same_everywhere() -> None:
+    assert talk2view.__version__ == "0.3.0"
+    assert importlib.metadata.version("talk2view") == "0.3.0"
     pyproject = (PACKAGE / "pyproject.toml").read_text(encoding="utf-8")
-    assert 'version = "0.2.0"' in pyproject
+    assert 'version = "0.3.0"' in pyproject
     from talk2view.client import SDK_VERSION
 
-    assert SDK_VERSION == "0.2.0"
+    assert SDK_VERSION == "0.3.0"
 
 
 def test_mit_licence_matches_the_typescript_sdk() -> None:

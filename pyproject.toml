@@ -6,7 +6,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "talk2view"
-version = "0.2.0"
+version = "0.3.0"
 description = "Python SDK for the Talk2View Platform — add AI-powered natural language control to any application."
 readme = "README.md"
 license = "MIT"

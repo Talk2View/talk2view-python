@@ -5,6 +5,12 @@ based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## Unreleased
 
+## [0.3.0] - 2026-10-21
+
+The first release of the SDK on PyPI. The earlier `talk2view` uploads, 0.2.0b1 and
+0.2.0b2, were placeholders that reserved the name, and 0.2.0 was never published to
+PyPI, so everything below and under 0.2.0 is new to anyone installing from PyPI.
+
 ### Added
 
 - **Errors carry `request_id` and `retry_after`.** `request_id` is the engine's id for
