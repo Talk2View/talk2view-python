@@ -1,6 +1,6 @@
 --- a/src/types.ts
 +++ b/src/types.ts
-@@ -275,6 +275,24 @@
+@@ -284,6 +284,24 @@
    toolName: string;
    arguments: Record<string, unknown>;
    description: string;
@@ -25,7 +25,7 @@
  }
  
  export interface HumanDecision {
-@@ -464,6 +482,8 @@
+@@ -475,6 +493,8 @@
    status: 'used' | 'denied' | 'running';
    args?: Record<string, unknown>;
    result?: string;
