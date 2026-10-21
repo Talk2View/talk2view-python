@@ -37,7 +37,8 @@ CONSOLIDATE_MIN_CHANGES = 10
 class MemoryEntry:
     """A short statement about the user, sent with every turn. Times are ISO 8601 text;
     ``valid_until`` is a ``YYYY-MM-DD`` date. ``locked`` is set once the user has edited
-    the entry by hand: changes the engine proposes never touch a locked entry."""
+    the entry by hand: changes the engine proposes never touch a locked entry. ``hidden_at``
+    is when the entry was removed or forgotten: it is kept, hidden, through the undo window."""
 
     id: str
     topic: str
@@ -48,12 +49,14 @@ class MemoryEntry:
     source: str
     locked: bool
     source_conversation_id: Optional[str]
+    hidden_at: Optional[str] = None
 
 
 @dataclass(frozen=True)
 class Fact:
     """A self-contained statement drawn from a conversation, with its dates made absolute;
-    found by search. ``superseded_by`` names the newer fact that replaced it."""
+    found by search. ``superseded_by`` names the newer fact that replaced it. ``hidden_at``
+    is when the fact was forgotten: it is kept, hidden, through the undo window."""
 
     id: str
     text: str
@@ -65,6 +68,7 @@ class Fact:
     superseded_by: Optional[str]
     superseded_at: Optional[str]
     source: str
+    hidden_at: Optional[str] = None
 
 
 @dataclass(frozen=True)

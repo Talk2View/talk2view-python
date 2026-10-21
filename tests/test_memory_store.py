@@ -1,5 +1,6 @@
 """MemoryStore core: the file's permissions, the backend choice (FTS5 detection and its
-fallbacks), the schema, entries and facts, the conversation log, the index text and threads.
+fallbacks), the schema and its index kinds, entries and facts, the conversation log, what
+deleting leaves in the file, the index text and threads.
 
 Every test that takes ``backend`` runs on each real backend: stdlib ``sqlite3`` (FTS5),
 ``scan`` (plain index tables) and ``apsw`` when it is installed (Python 3.11+)."""
@@ -7,6 +8,7 @@ Every test that takes ``backend`` runs on each real backend: stdlib ``sqlite3`` 
 from __future__ import annotations
 
 import importlib.util
+import logging
 import os
 import sqlite3
 import stat
@@ -14,6 +16,7 @@ import sys
 import threading
 import unicodedata
 from contextlib import closing
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterator, List, Optional, Tuple
@@ -333,7 +336,9 @@ def test_switching_index_kind_rebuilds_the_index(tmp_path: Path, fts5_backend: s
         memory = MemoryStore(path, backend=backend)  # type: ignore[arg-type]
         try:
             kind = "scan" if backend == "scan" else "fts5"
-            assert _meta(path)["index_kind"] == kind
+            # Read through the store: closing a connection of a second SQLite library (stdlib
+            # beside apsw) on an open file deletes the WAL from under the first.
+            assert memory._query("SELECT value FROM meta WHERE key = 'index_kind'") == [(kind,)]
             memory._insert_fact(_fact("f{}".format(step), "Said " + words[step] + "."))
             memory.record_round("c1", "Say " + words[step], "OK.", at=T0)
             for earlier, word in enumerate(words[: step + 1]):
@@ -361,10 +366,11 @@ def test_scan_leaves_the_fts5_tables_alone(tmp_path: Path, monkeypatch: pytest.M
     module: fts5"). So scan, opening a file an FTS5 store wrote, must never name one. An
     authorizer that refuses them stands in for that SQLite."""
     path = tmp_path / "u1.sqlite3"
+    word = "quokkazanzibar"  # only chat c1 holds it
     with_fts5 = MemoryStore(path, backend="sqlite3")
     try:
         with_fts5._insert_fact(_fact("f1", "Has a dog called Rex."))
-        with_fts5.record_round("c1", "Hello", "Hi.", at=T0)
+        with_fts5.record_round("c1", "My locker code is " + word, "Noted.", at=T0)
     finally:
         with_fts5.close()
 
@@ -394,15 +400,19 @@ def test_scan_leaves_the_fts5_tables_alone(tmp_path: Path, monkeypatch: pytest.M
     finally:
         scan.close()
     assert refused == []
+    # Scan cannot open the FTS5 tables, so their stale copy still holds the deleted chat...
+    assert word.encode() in path.read_bytes()
 
-    # Back on FTS5, its stale tables are refilled: the chat deleted meanwhile is gone.
+    # ...until FTS5 takes the file back: it refills its tables and scrubs the file.
     monkeypatch.undo()
     back = MemoryStore(path, backend="sqlite3")
     try:
         assert [fact_id for fact_id, _ in _indexed_facts(back)] == ["f1", "f2"]
         assert _found(back, "tom") == ([("f2",)], [])
-        assert _found(back, "hello") == ([], [])
+        assert _found(back, word) == ([], [])
         assert _indexed_rounds(back) == []
+        for name in (path.name, path.name + "-wal"):
+            assert word.encode() not in (path.parent / name).read_bytes(), name
     finally:
         back.close()
 
@@ -497,9 +507,20 @@ def test_hidden_entries_and_facts_are_left_out(store: MemoryStore) -> None:
             ("2026-10-21T10:00:00Z", "b1", "f2"),
         )
     assert store.entries() == [kept]
-    assert store.entries(include_hidden=True) == [kept, hidden]
+    assert store.entries(include_hidden=True) == [
+        kept,
+        replace(hidden, hidden_at="2026-10-21T10:00:00Z"),
+    ]
     assert store.facts() == [fact]
     assert store.facts(include_superseded=True) == [fact]
+
+    # An entry or fact inserted already hidden stays hidden.
+    born_hidden = _entry("e3", "Had a hamster.", hidden_at="2026-10-21T09:00:00Z")
+    store._insert_entry(born_hidden)
+    store._insert_fact(_fact("f3", "The hamster was Bob.", hidden_at="2026-10-21T09:00:00Z"))
+    assert store.entries() == [kept]
+    assert store.entries(include_hidden=True)[2] == born_hidden
+    assert store.facts() == [fact]
 
 
 def test_a_failed_write_rolls_back_the_whole_transaction(store: MemoryStore) -> None:
@@ -597,6 +618,70 @@ def test_delete_conversation_removes_rounds_and_summary_keeps_facts(store: Memor
     assert store.facts() == [fact]
     assert store.entries() == [entry]
     store.delete_conversation("c1")  # deleting again is a no-op
+
+
+def test_deleting_a_conversation_leaves_none_of_its_text_in_the_files(store: MemoryStore) -> None:
+    """Spec §7.1: deleting a chat deletes its text from the file, not just from view.
+    secure_delete zeros what SQLite frees, and ``_scrub`` merges FTS5's segments and
+    truncates the WAL, so a word only the deleted chat held is in neither file afterwards."""
+    word = "quokkazanzibar"  # no other text holds it, and no other term starts with its q
+    store.record_round("c1", "My locker code is " + word, "Noted.", at=T0, title="Locker " + word)
+    store.set_summary("c1", "Locker " + word, "The user's locker code is " + word + ".")
+    store.record_round("c2", "Hello", "Hi.", at=T0)
+    files = [store.path, store.path.with_name(store.path.name + "-wal")]
+    # Set on every backend, whatever the SQLite build's default (3.12's stdlib has it on).
+    assert store._query("PRAGMA secure_delete") == [(1,)]
+    assert any(word.encode() in path.read_bytes() for path in files)
+    if store.backend != "scan":
+        # FTS5 stores the term whole, so the byte scan also covers the index's segments.
+        blocks = store._query("SELECT block FROM rounds_index_data")
+        assert any(word.encode() in bytes(block) for (block,) in blocks)
+
+    store.delete_conversation("c1")
+
+    for path in files:
+        assert not path.exists() or word.encode() not in path.read_bytes(), path.name
+    assert _found(store, word) == ([], [])
+    assert store.rounds("c2") == [(1, "Hello", "Hi.", "2026-10-21T10:00:00Z")]
+
+
+def test_scrub_clears_a_deleted_fact_from_the_files(store: MemoryStore) -> None:
+    """The facts index is scrubbed too, as purge and forget will need."""
+    word = "quokkazanzibar"
+    store._insert_fact(_fact("f1", "The locker code is " + word + "."))
+    store._insert_fact(_fact("f2", "Has a dog."))
+    files = [store.path, store.path.with_name(store.path.name + "-wal")]
+    assert any(word.encode() in path.read_bytes() for path in files)
+    with store._write():  # deleted as purging a fact will delete it
+        store._db.execute("DELETE FROM facts WHERE id = 'f1'")
+        if store.backend == "scan":
+            store._db.execute("DELETE FROM facts_scan WHERE fact_id = 'f1'")
+        else:
+            store._db.execute("DELETE FROM facts_index WHERE fact_id = 'f1'")
+    store._scrub()
+    for path in files:
+        assert not path.exists() or word.encode() not in path.read_bytes(), path.name
+    assert [fact_id for fact_id, _ in _indexed_facts(store)] == ["f2"]
+
+
+def test_scrub_warns_when_another_connection_keeps_the_wal(
+    store: MemoryStore, backend: str, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A checkpoint cannot truncate the WAL while another connection reads from it. The
+    scrub says so rather than failing silently; the text goes at a later checkpoint."""
+    store.record_round("c1", "Hello", "Hi.", at=T0)
+    store._db.execute("PRAGMA busy_timeout = 0")  # give up at once, not after 5 s
+    reader = MemoryStore(store.path, backend=backend)  # type: ignore[arg-type]
+    try:
+        reader._db.execute("BEGIN")
+        reader._db.execute("SELECT count(*) FROM rounds")  # its read transaction stays open
+        with caplog.at_level(logging.WARNING, logger="talk2view.memory"):
+            store.delete_conversation("c1")
+        reader._db.execute("COMMIT")
+    finally:
+        reader.close()
+    assert "deleted text" in caplog.text
+    assert store.rounds("c1") == []  # the delete itself went through
 
 
 def test_incognito_conversation_records_nothing(store: MemoryStore) -> None:

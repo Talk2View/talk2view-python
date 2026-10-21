@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import contextlib
 import importlib
+import logging
 import os
 import sqlite3
 import threading
@@ -43,6 +44,8 @@ from typing import (
 from ..storage import _DIR_MODE, _FILE_MODE, _POSIX_PERMISSIONS
 from .models import SUMMARY_TEXT_MAX, SUMMARY_TITLE_MAX, ConversationRecord, Fact, MemoryEntry
 from .text import normalise_dedupe, normalise_for_index
+
+logger = logging.getLogger("talk2view.memory")
 
 Backend = Literal["sqlite3", "apsw", "scan"]
 _BACKENDS: Tuple[Backend, ...] = ("sqlite3", "apsw", "scan")
@@ -224,6 +227,7 @@ class _Index:
     insert_fact: str
     insert_round: str
     delete_rounds: str  # of one conversation
+    optimize: Tuple[str, ...]  # run by _scrub
     drop_other: Tuple[str, ...]  # run once this kind's index is rebuilt
 
 
@@ -240,6 +244,11 @@ _FTS5_INDEX = _Index(
     insert_fact="INSERT INTO facts_index (fact_id, seg_text) VALUES (?, ?)",
     insert_round="INSERT INTO rounds_index (conversation_id, idx, seg_text) VALUES (?, ?, ?)",
     delete_rounds="DELETE FROM rounds_index WHERE conversation_id = ?",
+    # Merge each index into one segment: the merge leaves out the deleted rows' tokens.
+    optimize=(
+        "INSERT INTO facts_index (facts_index) VALUES ('optimize')",
+        "INSERT INTO rounds_index (rounds_index) VALUES ('optimize')",
+    ),
     drop_other=("DROP TABLE IF EXISTS facts_scan", "DROP TABLE IF EXISTS rounds_scan"),
 )
 
@@ -254,6 +263,7 @@ _SCAN_INDEX = _Index(
     insert_fact="INSERT INTO facts_scan (fact_id, seg_text) VALUES (?, ?)",
     insert_round="INSERT INTO rounds_scan (conversation_id, idx, seg_text) VALUES (?, ?, ?)",
     delete_rounds="DELETE FROM rounds_scan WHERE conversation_id = ?",
+    optimize=(),  # plain tables keep nothing of a deleted row
     # Scan cannot open FTS5 tables, so it leaves them. They go stale until an FTS5 store's
     # rebuild clears and refills them.
     drop_other=(),
@@ -294,6 +304,7 @@ def _entry_from_row(row: Sequence[Any]) -> MemoryEntry:
         source=row[6],
         locked=bool(row[7]),
         source_conversation_id=row[8],
+        hidden_at=row[9],
     )
 
 
@@ -309,6 +320,7 @@ def _fact_from_row(row: Sequence[Any]) -> Fact:
         superseded_by=row[7],
         superseded_at=row[8],
         source=row[9],
+        hidden_at=row[10],
     )
 
 
@@ -378,7 +390,7 @@ class MemoryStore:
         still in their undo window) only with ``include_hidden``."""
         rows = self._query(
             "SELECT id, topic, text, created_at, updated_at, valid_until, source, locked,"
-            " source_conversation_id FROM entries"
+            " source_conversation_id, hidden_at FROM entries"
             " WHERE hidden_at IS NULL OR ? ORDER BY rowid",
             (int(include_hidden),),
         )
@@ -389,7 +401,7 @@ class MemoryStore:
         superseded only with ``include_superseded``."""
         rows = self._query(
             "SELECT id, text, topic, recorded_at, occurred_at, valid_until, conversation_id,"
-            " superseded_by, superseded_at, source FROM facts"
+            " superseded_by, superseded_at, source, hidden_at FROM facts"
             " WHERE hidden_at IS NULL AND (superseded_by IS NULL OR ?) ORDER BY rowid",
             (int(include_superseded),),
         )
@@ -400,8 +412,8 @@ class MemoryStore:
         with self._write():
             self._db.execute(
                 "INSERT INTO entries (id, topic, text, norm_text, created_at, updated_at,"
-                " valid_until, source, locked, source_conversation_id)"
-                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                " valid_until, source, locked, source_conversation_id, hidden_at)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     entry.id,
                     entry.topic,
@@ -413,6 +425,7 @@ class MemoryStore:
                     entry.source,
                     int(entry.locked),
                     entry.source_conversation_id,
+                    entry.hidden_at,
                 ),
             )
 
@@ -421,8 +434,8 @@ class MemoryStore:
         with self._write():
             self._db.execute(
                 "INSERT INTO facts (id, text, topic, recorded_at, occurred_at, valid_until,"
-                " conversation_id, superseded_by, superseded_at, source)"
-                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                " conversation_id, superseded_by, superseded_at, source, hidden_at)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     fact.id,
                     fact.text,
@@ -434,6 +447,7 @@ class MemoryStore:
                     fact.superseded_by,
                     fact.superseded_at,
                     fact.source,
+                    fact.hidden_at,
                 ),
             )
             self._db.execute(self._index.insert_fact, (fact.id, normalise_for_index(fact.text)))
@@ -548,11 +562,13 @@ class MemoryStore:
 
     def delete_conversation(self, conversation_id: str) -> None:
         """Delete a conversation's record, rounds and summary, as when the user deletes the
-        chat. Facts and entries drawn from it stay until the user deletes them."""
+        chat, and scrub the file of their text. Facts and entries drawn from it stay until the
+        user deletes them."""
         with self._write():
             self._db.execute(self._index.delete_rounds, (conversation_id,))
             # Its rounds go with it: ON DELETE CASCADE.
             self._db.execute("DELETE FROM conversations WHERE id = ?", (conversation_id,))
+        self._scrub()
 
     def unextracted(self, *, idle_for_s: Optional[float] = None) -> List[ConversationRecord]:
         """Conversations with rounds extraction has not seen, least recently active first.
@@ -587,6 +603,9 @@ class MemoryStore:
 
     def _create_schema(self) -> None:
         self._db.execute("PRAGMA busy_timeout = 5000")  # sqlite3's default; apsw's is 0
+        # Zero what SQLite frees, so deleted text is not left in the file (see _scrub). It is
+        # off unless SQLite was built with it on.
+        self._db.execute("PRAGMA secure_delete = ON")
         # These two only take effect outside a transaction.
         self._db.execute("PRAGMA journal_mode = WAL")
         self._db.execute("PRAGMA foreign_keys = ON")
@@ -598,8 +617,12 @@ class MemoryStore:
                 _META_DEFAULTS + (("index_kind", self._index.kind),),
             )
             recorded = self._db.execute("SELECT value FROM meta WHERE key = 'index_kind'")
-            if recorded != [(self._index.kind,)]:
+            rebuilt = recorded != [(self._index.kind,)]
+            if rebuilt:
                 self._rebuild_index()
+        if rebuilt:
+            # The cleared index's segments still hold its old text, deleted rows' included.
+            self._scrub()
 
     def _rebuild_index(self) -> None:
         """Fill this store's kind of index afresh from ``facts`` and ``rounds``, in the
@@ -625,6 +648,24 @@ class MemoryStore:
         for statement in self._index.drop_other:
             self._db.execute(statement)
         self._db.execute("UPDATE meta SET value = ? WHERE key = 'index_kind'", (self._index.kind,))
+
+    def _scrub(self) -> None:
+        """Clear deleted text out of the file, after the write that deleted it has committed:
+        every method that deletes the user's text calls this. ``secure_delete`` zeros what
+        SQLite frees, but FTS5 keeps a deleted row's tokens until its segments merge, and the
+        WAL keeps old page images until it is truncated. So merge each FTS5 index into one
+        segment, then checkpoint the WAL into the file and truncate it. A checkpoint fails
+        inside a transaction, so this never runs inside ``_write``."""
+        with self._lock:
+            with self._write():
+                for statement in self._index.optimize:
+                    self._db.execute(statement)
+            busy = self._db.execute("PRAGMA wal_checkpoint(TRUNCATE)")[0][0]
+        if busy:
+            logger.warning(
+                "Memory: another connection is reading the store, so deleted text stays in"
+                " its WAL file until a later checkpoint"
+            )
 
     def _query(self, sql: str, params: Sequence[Any] = ()) -> List[Tuple[Any, ...]]:
         with self._lock:
