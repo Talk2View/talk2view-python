@@ -1,0 +1,133 @@
+"""The memory store's records, topics and caps (spec §7.1).
+
+Every character cap counts Unicode code points (``code_points``), the unit the engine and
+every other client's store use too.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Any, Dict, List, Literal, Optional
+
+from .text import code_points
+
+TOPICS = ("identity", "work", "people", "preferences", "ongoing", "instructions")
+
+# ── caps (code points, or counts) ──
+ENTRY_MAX = 40
+ENTRY_TEXT_MAX = 300
+ENTRIES_CHARS_MAX = 6000
+FACT_TEXT_MAX = 400
+RECENT_MAX = 8
+RECENT_CHARS_MAX = 3000
+RECALLED_MAX = 4
+RECALLED_CHARS_MAX = 4000
+RESULT_CHARS_MAX = 8000
+SUMMARY_TITLE_MAX = 120
+SUMMARY_TEXT_MAX = 600
+
+# ── timing (seconds) ──
+UNDO_WINDOW_S = 30
+IDLE_EXTRACT_S = 600
+CONSOLIDATE_EVERY_S = 7 * 86400
+CONSOLIDATE_MIN_CHANGES = 10
+
+
+@dataclass(frozen=True)
+class MemoryEntry:
+    """A short statement about the user, sent with every turn. Times are ISO 8601 text;
+    ``valid_until`` is a ``YYYY-MM-DD`` date. ``locked`` is set once the user has edited
+    the entry by hand: changes the engine proposes never touch a locked entry."""
+
+    id: str
+    topic: str
+    text: str
+    created_at: str
+    updated_at: str
+    valid_until: Optional[str]
+    source: str
+    locked: bool
+    source_conversation_id: Optional[str]
+
+
+@dataclass(frozen=True)
+class Fact:
+    """A self-contained statement drawn from a conversation, with its dates made absolute;
+    found by search. ``superseded_by`` names the newer fact that replaced it."""
+
+    id: str
+    text: str
+    topic: str
+    recorded_at: str
+    occurred_at: Optional[str]
+    valid_until: Optional[str]
+    conversation_id: Optional[str]
+    superseded_by: Optional[str]
+    superseded_at: Optional[str]
+    source: str
+
+
+@dataclass(frozen=True)
+class ConversationRecord:
+    """The store's own record of a conversation (its rounds come from
+    ``MemoryStore.rounds``). ``extracted_through`` is the last round extraction has seen;
+    an ``incognito`` conversation's rounds are never written."""
+
+    id: str
+    title: Optional[str]
+    started_at: str
+    last_active_at: str
+    summary_title: Optional[str]
+    summary_text: Optional[str]
+    extracted_through: int
+    incognito: bool
+
+
+@dataclass(frozen=True)
+class SearchHit:
+    """One result of a memory search: a fact, or an excerpt of a round."""
+
+    kind: Literal["fact", "excerpt"]
+    date: str
+    conversation: str
+    text: str
+    score: float
+    ref: str
+
+
+@dataclass(frozen=True)
+class AppliedBatch:
+    """One batch of memory changes as applied: what was applied, what was dropped, and what
+    was removed, kept so the batch can be undone."""
+
+    id: str
+    applied: List[Dict[str, Any]]
+    dropped: List[str]
+    removed_entries: List[MemoryEntry]
+    removed_facts: List[Fact]
+
+
+__all__ = [
+    "CONSOLIDATE_EVERY_S",
+    "CONSOLIDATE_MIN_CHANGES",
+    "ENTRIES_CHARS_MAX",
+    "ENTRY_MAX",
+    "ENTRY_TEXT_MAX",
+    "FACT_TEXT_MAX",
+    "IDLE_EXTRACT_S",
+    "RECALLED_CHARS_MAX",
+    "RECALLED_MAX",
+    "RECENT_CHARS_MAX",
+    "RECENT_MAX",
+    "RESULT_CHARS_MAX",
+    "SUMMARY_TEXT_MAX",
+    "SUMMARY_TITLE_MAX",
+    "TOPICS",
+    "UNDO_WINDOW_S",
+    "AppliedBatch",
+    "ConversationRecord",
+    "Fact",
+    "MemoryEntry",
+    "SearchHit",
+    "code_points",
+]
