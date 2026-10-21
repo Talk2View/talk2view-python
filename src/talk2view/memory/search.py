@@ -420,8 +420,9 @@ def fuse(
 def strong_match(tokens: Sequence[str], terms: Sequence[str]) -> bool:
     """Whether a text with the index tokens ``tokens`` matches enough of ``terms`` to be
     pre-selected: PRESELECT_MIN_TERMS (2) ``matched_units`` (R75), in every script. A CJK
-    or Thai bigram is one unit (R63), so a two-character word alone is not enough, as one
-    word of the query or of the text is not, however many words it pairs with."""
+    or Thai bigram is one unit (R63), so a two-character CJK or Thai run (one bigram) alone
+    is not enough, as one word of the query or of the text is not, however many words it
+    pairs with."""
     return matched_units(tokens, terms) >= PRESELECT_MIN_TERMS
 
 

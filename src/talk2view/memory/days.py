@@ -54,16 +54,19 @@ def today(moment: datetime, timezone: Optional[str]) -> date:
 
 
 def day(timestamp: str, timezone: Optional[str]) -> str:
-    """The user's day at ``timestamp``, a time as the store writes it, as YYYY-MM-DD. One
-    that isn't such a time, or whose day can't be worked out (year 1 or 9999 in a zone that
-    leaves the range), gives its first ten characters: its UTC day."""
-    if len(timestamp) != 20 or not timestamp.endswith("Z"):
-        return timestamp[:10]
-    try:
-        moment = datetime.fromisoformat(timestamp[:-1]).replace(tzinfo=_UTC)
-        return local(moment, timezone).date().isoformat()
-    except (ValueError, OverflowError, OSError):
-        return timestamp[:10]
+    """The user's day at ``timestamp``, a time in UTC ending in Z as the store writes it, as
+    YYYY-MM-DD. A time with fractional seconds is read too (on Python 3.10, with three or
+    six digits of them). Text that isn't such a time, or one whose day can't be worked out
+    (year 1 or 9999 in a zone that leaves the range), gives its first ten characters: for a
+    time in UTC, its UTC day."""
+    if timestamp.endswith("Z"):
+        try:
+            moment = datetime.fromisoformat(timestamp[:-1])
+            if moment.tzinfo is None:  # an offset as well as the Z is no time in UTC
+                return local(moment.replace(tzinfo=_UTC), timezone).date().isoformat()
+        except (ValueError, OverflowError, OSError):
+            pass
+    return timestamp[:10]
 
 
 def bounds(

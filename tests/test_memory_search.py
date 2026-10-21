@@ -489,15 +489,15 @@ def test_superseded_facts_excluded_unless_nothing_else(store: MemoryStore) -> No
 
 def test_date_filter_applies_to_both_corpora(store: MemoryStore) -> None:
     """The filter takes the day, in the user's timezone, a fact was recorded or a round
-    said, both ends included. The user here is on UTC (R64's tests try other zones)."""
-    _need_zones("UTC")
+    said, both ends included. The user here gives no zone, so the system's stands in, which
+    these tests pin to UTC; that needs no tz data (R64's tests try other zones)."""
     _know(store, "f1", "Took a kayak lesson.", recorded_at="2026-10-10T23:30:00Z")
     _know(store, "f2", "Entered a kayak race.", recorded_at="2026-10-20T00:10:00Z")
     _say(store, "c1", "Kayak lesson today.", days_ago=11)  # 2026-10-10
     _say(store, "c2", "Kayak race today.", days_ago=1)  # 2026-10-20
 
     def found(from_date: Optional[str] = None, to_date: Optional[str] = None) -> List[str]:
-        hits = store.search("kayak", from_date=from_date, to_date=to_date, timezone="UTC")
+        hits = store.search("kayak", from_date=from_date, to_date=to_date)
         return sorted(_refs(hits))
 
     assert found() == ["f1", "f2", "r:c1:1", "r:c2:1"]
@@ -505,7 +505,7 @@ def test_date_filter_applies_to_both_corpora(store: MemoryStore) -> None:
     assert found(to_date="2026-10-10") == ["f1", "r:c1:1"]
     assert found(from_date="2026-10-20", to_date="2026-10-20") == ["f2", "r:c2:1"]
     assert found(from_date="2026-10-11", to_date="2026-10-19") == []
-    hits = store.search("kayak", from_date="2026-10-20", timezone="UTC")
+    hits = store.search("kayak", from_date="2026-10-20")
     assert {hit.date for hit in hits} == {"2026-10-20"}
     for bad in ("2026-10-2", "20/10/2026", "2026-10-20T00:00:00Z", ""):
         with pytest.raises(ValueError, match="from_date must be a YYYY-MM-DD date"):
@@ -1573,6 +1573,34 @@ def test_day_bounds_read_impossible_and_far_dates_as_the_text_compares() -> None
     ]
     assert days.day("9999-12-31T23:00:00Z", SYDNEY) == "9999-12-31"
     assert days.day("2026-11-10", SYDNEY) == "2026-11-10"
+
+
+def test_a_day_the_clocks_change_runs_from_its_midnight_to_the_next() -> None:
+    """Re-review Minor 2: a day's bounds are its own midnight and the next day's, each at
+    the offset it has, never a midnight plus 24 hours. So in Sydney the day the clocks go
+    forward is 23 hours long, and the day they go back is 25."""
+    _need_zones(SYDNEY)
+    assert days.bounds("2026-10-04", "2026-10-04", SYDNEY) == (
+        "2026-10-03T14:00:00Z",  # midnight at UTC+10
+        "2026-10-04T13:00:00Z",  # the next midnight, at UTC+11
+    )
+    assert days.bounds("2026-04-05", "2026-04-05", SYDNEY) == (
+        "2026-04-04T13:00:00Z",  # midnight at UTC+11
+        "2026-04-05T14:00:00Z",  # the next midnight, at UTC+10
+    )
+
+
+def test_a_time_with_fractional_seconds_is_dated_by_the_users_day() -> None:
+    """Re-review Minor 3: ``days.day`` reads any time in UTC that ends in Z, whatever its
+    width, so a writer that keeps fractional seconds still dates by the user's day. Only
+    text that isn't such a time gives its first ten characters."""
+    _need_zones(SYDNEY)
+    assert days.day("2026-11-10T20:00:00.123456Z", SYDNEY) == "2026-11-11"
+    assert days.day("2026-11-10T20:00:00.123Z", SYDNEY) == "2026-11-11"
+    assert days.day("2026-11-10T20:00Z", SYDNEY) == "2026-11-11"
+    # No Z, an hour no clock shows, and an offset as well as the Z.
+    for text in ("2026-11-10T20:00:00", "2026-11-10T25:00:00Z", "2026-11-10T20:00:00-10:00Z"):
+        assert days.day(text, SYDNEY) == "2026-11-10", text
 
 
 # ── incognito (R44) ──
