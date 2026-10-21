@@ -1437,6 +1437,44 @@ def test_search_and_the_payload_pass_over_an_incognito_conversation(store: Memor
     assert len(json.loads(store.search_result_json(WORD))["results"]) == 1
 
 
+def test_writes_for_an_incognito_conversation_are_dropped(store: MemoryStore) -> None:
+    """Review Minor 8: an extraction already on its way when its chat turns incognito writes
+    nothing back. A summary, an extraction mark, facts drawn from the chat and a round of it
+    are each dropped, under the flag alone too, as an older build leaves it. Another
+    conversation, and facts drawn from none, are written as before."""
+    _say(store, "c1", "Planning a kayak trip.", "Sounds fun.", title="Trip")
+    _say(store, "c2", "Planning a ski trip.", "Sounds cold.", title="Skiing")
+    _say(store, "c3", "Planning a surf trip.", "Sounds wet.", title="Surf")
+    store.set_incognito("c1", True)
+    with store._write():  # the flag alone, the rounds left in place
+        store._db.execute("UPDATE conversations SET incognito = 1 WHERE id = 'c3'")
+    revision = store.revision()
+    kayak = [{"text": "Plans a kayak trip.", "topic": "ongoing"}]
+    for conversation_id in ("c1", "c3"):
+        before, rounds = _conversation(store, conversation_id), store.rounds(conversation_id)
+        store.set_summary(conversation_id, "Kayak trip", "Planned a kayak trip.")
+        store.mark_extracted(conversation_id, 1)
+        assert store.add_facts(kayak, conversation_id=conversation_id, source="said") == []
+        assert store.record_round(conversation_id, "Booked it.", "Great.") == 0
+        assert _conversation(store, conversation_id) == before
+        assert store.rounds(conversation_id) == rounds
+    assert store.facts() == [] and store.revision() == revision
+
+    store.set_summary("c2", "Ski trip", "Planned a ski trip.")
+    store.mark_extracted("c2", 1)
+    ski = [{"text": "Plans a ski trip.", "topic": "ongoing"}]
+    [drawn] = store.add_facts(ski, conversation_id="c2", source="said")
+    [loose] = store.add_facts(kayak, conversation_id=None, source="said")
+    assert store.record_round("c2", "Booked it.", "Great.") == 2
+    record = _conversation(store, "c2")
+    assert (record.summary_title, record.summary_text, record.extracted_through) == (
+        "Ski trip",
+        "Planned a ski trip.",
+        1,
+    )
+    assert sorted(fact.id for fact in store.facts()) == sorted([drawn.id, loose.id])
+
+
 # ── forget (R56, R57) ──
 
 

@@ -982,12 +982,19 @@ class MemoryStore:
         a visible fact not yet superseded gets ``superseded_by`` and ``superseded_at``;
         other ids are ignored. As the engine does, a fact is dropped without a topic in
         TOPICS or text of 1 to FACT_TEXT_MAX (400) code points, and a date that isn't
-        YYYY-MM-DD is left out."""
+        YYYY-MM-DD is left out.
+
+        Nothing is recorded for a conversation marked incognito: an extraction already on
+        its way when the chat turned incognito writes nothing back (review Minor 8)."""
         if source not in _SOURCES:
             raise ValueError("source must be one of " + ", ".join(_SOURCES))
         now = _timestamp(self._clock())
         recorded: List[Fact] = []
         with self._write():
+            if conversation_id is not None and self._db.execute(
+                "SELECT 1 FROM conversations WHERE id = ? AND incognito != 0", (conversation_id,)
+            ):
+                return recorded
             for item in facts:
                 if not isinstance(item, dict):
                     continue
@@ -1320,20 +1327,23 @@ class MemoryStore:
     def set_summary(self, conversation_id: str, title: str, text: str) -> None:
         """Store extraction's summary of a conversation, cut to ``SUMMARY_TITLE_MAX`` (120)
         and ``SUMMARY_TEXT_MAX`` (600) code points. A conversation with no record is left
-        without one."""
+        without one, and one marked incognito keeps none: an extraction already on its way
+        when the chat turned incognito writes nothing back (review Minor 8)."""
         with self._write():
             self._db.execute(
-                "UPDATE conversations SET summary_title = ?, summary_text = ? WHERE id = ?",
+                "UPDATE conversations SET summary_title = ?, summary_text = ?"
+                " WHERE id = ? AND incognito = 0",
                 (title[:SUMMARY_TITLE_MAX], text[:SUMMARY_TEXT_MAX], conversation_id),
             )
 
     def mark_extracted(self, conversation_id: str, through: int) -> None:
         """Record that extraction has seen the conversation's rounds up to index
-        ``through``. It never moves back."""
+        ``through``. It never moves back, and stays put for a conversation marked
+        incognito (review Minor 8)."""
         with self._write():
             self._db.execute(
                 "UPDATE conversations SET extracted_through = max(extracted_through, ?)"
-                " WHERE id = ?",
+                " WHERE id = ? AND incognito = 0",
                 (through, conversation_id),
             )
 
