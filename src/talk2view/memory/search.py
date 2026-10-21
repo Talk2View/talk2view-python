@@ -311,13 +311,21 @@ def conversation_title(title: Optional[str], summary_title: Optional[str]) -> st
     return ""
 
 
+_USER_LABEL = "User: "
+_ASSISTANT_LABEL = "Assistant: "
+
+
 def round_text(user_text: str, assistant_text: str) -> str:
     """A round as a search hit shows it, saying who said what."""
+    return _labelled(user_text, assistant_text, _USER_LABEL, _ASSISTANT_LABEL)
+
+
+def _labelled(user_text: str, assistant_text: str, user_label: str, assistant_label: str) -> str:
     parts = []
     if user_text:
-        parts.append("User: " + user_text)
+        parts.append(user_label + user_text)
     if assistant_text:
-        parts.append("Assistant: " + assistant_text)
+        parts.append(assistant_label + assistant_text)
     return "\n".join(parts)
 
 
@@ -340,15 +348,24 @@ def first_match(text: str, terms: Sequence[str]) -> Optional[Tuple[int, int]]:
     return None
 
 
-def excerpt(text: str, terms: Sequence[str], *, width: int = EXCERPT_WIDTH) -> str:
+def excerpt(
+    text: str,
+    terms: Sequence[str],
+    *,
+    width: int = EXCERPT_WIDTH,
+    find_in: Optional[str] = None,
+) -> str:
     """``text`` whole when it is at most ``width`` code points; else ``width`` of them
     around the first place a term occurs, half before it (the start of the text when none
     does). A cut that falls inside a word moves inward to the nearest whitespace between it
     and the match, when there is any, and each end that was cut gets an ellipsis (U+2026),
-    so the excerpt is at most ``width`` + 2 code points."""
+    so the excerpt is at most ``width`` + 2 code points.
+
+    ``find_in``, text of the same length, is where to look for the term instead of
+    ``text``: ``round_hit`` passes the round's text with its labels blanked."""
     if len(text) <= width:
         return text
-    found = first_match(text, terms)
+    found = first_match(text if find_in is None else find_in, terms)
     begin, finish = found if found is not None else (0, 0)
     start = max(0, min(begin - width // 2, len(text) - width))
     end = start + width
@@ -382,12 +399,14 @@ def round_hit(
     terms: Sequence[str],
 ) -> SearchHit:
     """A round as a search result: an ``excerpt`` of its ``round_text``, dated the day it
-    was said."""
+    was said. The excerpt is centred on a term in what was said, never in a label: "use"
+    begins "User"."""
+    said = _labelled(user_text, assistant_text, " " * len(_USER_LABEL), " " * len(_ASSISTANT_LABEL))
     return SearchHit(
         kind="excerpt",
         date=at[:10],
         conversation=title,
-        text=excerpt(round_text(user_text, assistant_text), terms),
+        text=excerpt(round_text(user_text, assistant_text), terms, find_in=said),
         score=score,
         ref=ref,
     )

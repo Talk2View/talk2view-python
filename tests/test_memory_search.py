@@ -468,6 +468,14 @@ def test_a_round_hit_is_an_excerpt_saying_who_said_what(store: MemoryStore) -> N
     )
 
 
+def test_an_excerpt_centres_on_what_was_said_not_its_labels(store: MemoryStore) -> None:
+    """A round hit's labels ("User: ", "Assistant: ") are not what was said, so a term
+    that begins one, such as "use", is looked for in the round's own text only."""
+    _say(store, "c1", " ".join(_words(150)) + " Then I use the kayak.", "Fine.", title="Notes")
+    [hit] = store.search("use")
+    assert hit.text.startswith(ELLIPSIS) and "I use the kayak." in hit.text
+
+
 # ── the search_memory result (§8.4) ──
 
 
