@@ -5,6 +5,32 @@ based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## Unreleased
 
+### Added
+
+- **On-device memory.** `Talk2View(memory_path=...)` gives the assistant a memory of the
+  end-user that lives only on their device: one SQLite file per user (a guest too), `0600`
+  in a directory made `0700`. `t2v.memory` is the signed-in user's `T2VMemory`, and
+  `t2v.memory.store` its `MemoryStore`; both are in `talk2view.memory`, with `MemoryEntry`,
+  `Fact` and `SearchHit`. Each turn sends the user's entries, recent conversations and
+  recalled passages as its `memory` field, the agent's `search_memory` calls are answered
+  from the store, its `memory` events are applied to it, and each finished round is
+  recorded in the store's log. Extraction and consolidation run on a background thread
+  (`run_due()` before every turn, a new conversation on `clear_session()`,
+  `start_background()` for a host that can sit idle) and never hold up a chat. A failed
+  call is silent: one log line, then a cooldown of 60 s that doubles up to an hour.
+  Incognito conversations and a pause switch send nothing, a guest's memory makes no
+  engine call, and the user can export (`store.export_markdown()`, `store.export_json()`),
+  import (`t2v.memory.import_text()`) and reset (`store.reset()`) their memory. The engine
+  keeps no memory content, and there is no sync. See "On-device memory" in the README.
+  Without `memory_path` nothing changes: no flag, no `memory` field, no handler.
+- `Capabilities.memory` and `Capabilities.memory_search`, which `memory_path` sets; the
+  `memory` chat event (`ChatEvent.type == "memory"`, with `tool_call_id` and
+  `memory_ops`); and `T2VSession.send_message(memory=...)`, which sends the turn's memory
+  field on `/messages` and on every `/resume`.
+- The `memory` extra, `pip install 'talk2view[memory]'`: `apsw`, which bundles a SQLite
+  with FTS5, on Python 3.11 and newer, for a host whose `sqlite3` lacks FTS5. Without
+  either, the store keeps its search index in plain tables (`store.backend == "scan"`).
+
 ## [0.3.0] - 2026-10-21
 
 The first release of the SDK on PyPI. The earlier `talk2view` uploads, 0.2.0b1 and

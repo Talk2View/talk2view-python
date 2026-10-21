@@ -46,6 +46,7 @@ lines and the missing `[DONE]` after an interrupt or approval chunk are the cont
 
 Event normalisation (both suites): TS `ChatEvent` key names (`toolName`, `toolCallId`, `threadId`,
 `errorType`), `undefined`/`None` fields dropped, `todos` text under `content`. Python-only events
-add `kind`/`details` (engine approval) and `{"type": "tool_event", "event": "tool_start" | "tool_end", …}`.
+add `kind`/`details` (engine approval), `{"type": "tool_event", "event": "tool_start" | "tool_end", …}`
+and `{"type": "memory", "toolCallId", "ops"}`.
 `manifest.pythonOnlyStepKeys` lists the `ToolStep` keys the TS suite strips from an expected
 snapshot before comparing.
