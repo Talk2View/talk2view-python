@@ -1,0 +1,9 @@
+{
+  "messages": [
+    { "role": "user", "content": "Remember that I prefer metric units" },
+    { "role": "assistant", "content": "Noted. ", "isStreaming": false }
+  ],
+  "error": null,
+  "threadId": "thread_contract",
+  "pendingApproval": null
+}

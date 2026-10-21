@@ -37,6 +37,7 @@ lines and the missing `[DONE]` after an interrupt or approval chunk are the cont
 | `error_chunk` | text, then an `error` chunk whose message is mirrored into `delta.content` |
 | `heartbeat_preamble` | the `: t2v stream open` comment and empty-delta heartbeat chunks around one text delta |
 | `tool_events_image` | `tool_start` / heartbeat / `tool_end` with an image `display` — Python only until the TS follow-up |
+| `memory_event` | a text delta, a non-terminal `memory` chunk with two ops, stop, `[DONE]` — Python only until the TS phase |
 | `unspaced_data` | `text_stop` with `data:` and no space (legal per the EventStream spec; the engine never emits it, so this one is derived) |
 
 Event normalisation (both suites): TS `ChatEvent` key names (`toolName`, `toolCallId`, `threadId`,
