@@ -6,7 +6,8 @@ consolidate.
 Nothing here holds up a chat. The engine's memory calls run on one background thread
 (``worker.py``; ``inline=True`` runs them in the caller, for tests and the eval), their
 bodies are built by ``bodies.py``, and every failure is silent: one log line naming the
-status or the exception's class, never memory text, and a later trigger tries again.
+status or the exception's class, never memory text, and a later trigger tries again once
+the failure's cooldown has run.
 """
 
 from __future__ import annotations
@@ -35,13 +36,19 @@ logger = logging.getLogger("talk2view.memory")
 # One engine memory call can take about 120 s: a 60 s model call, then one retry when the
 # model's reply can't be parsed. The calls run in the background, so wait longer than that.
 CALL_TIMEOUT_S = 180.0
+# R81: after a failed engine memory call, the triggers start no other for COOLDOWN_S, twice
+# as long after each further failure in a row, at most COOLDOWN_MAX_S.
+COOLDOWN_S = 60.0
+COOLDOWN_MAX_S = 3600.0
 # search_memory's arguments (spec §8.4).
 SEARCH_LIMIT = 8
 QUERY_MIN = 2
 QUERY_MAX = 200
 
+#: search_memory's answer when nothing is found, or nothing may be.
+NO_RESULTS = result_json([])
+
 _MODES = ("conversation", "import")
-_NO_RESULTS = result_json([])
 
 # The clients whose partner has memory off: the engine answered 403 memory_disabled. No
 # extraction or consolidation goes out through them again in this process.
@@ -80,9 +87,13 @@ class T2VMemory:
     CALL_TIMEOUT_S, so ``run_due`` and ``new_conversation`` queue them on one background
     daemon thread and return at once, unless ``inline=True`` (tests and the eval: they run
     in the caller, in order). A call that fails returns False and logs one line, with the
-    status or the exception's class and never memory text; a later trigger tries again. A
-    guest (``is_anonymous()`` true) makes none: the engine refuses them to guests. After a
-    403 ``memory_disabled`` none goes out through this client again in this process.
+    status or the exception's class and never memory text. The triggers then cool down
+    (R81): they start no engine call for COOLDOWN_S, twice as long after each further
+    failure in a row, at most COOLDOWN_MAX_S and never less than the engine's
+    ``Retry-After``; a call that succeeds ends the cooldown. It runs on ``clock``, or on the
+    ``now`` given to ``run_due``. A guest (``is_anonymous()`` true) makes no call: the
+    engine refuses them to guests. After a 403 ``memory_disabled`` none goes out through
+    this client again in this process.
 
     Thread-safe. ``close`` stops it and closes the store.
     """
@@ -114,6 +125,10 @@ class T2VMemory:
         # it (one that left entries over the caps, say).
         self._settled_revision: Optional[int] = None
         self._parked: Optional[_Turn] = None  # the turn an approval paused
+        # R81: the cooldown the last failure in a row set, before any Retry-After (0 after
+        # a success), and the time until which the triggers start no engine call.
+        self._backoff_s = 0.0
+        self._cooldown_until: Optional[datetime] = None
         self._worker = Worker(inline=inline)
         self._ticker: Optional[Ticker] = None
         self._ticker_lock = threading.Lock()
@@ -142,36 +157,45 @@ class T2VMemory:
     @incognito.setter
     def incognito(self, value: bool) -> None:
         with self._lock:
-            self._incognito = bool(value)
-            if self._closed:
-                return
-            try:
-                self.store.set_incognito(self.conversation_id, self._incognito)
-            except Exception as error:
-                logger.warning("Memory: marking the chat incognito failed (%s)", _name(error))
+            self._mark_incognito(bool(value))
 
     def new_conversation(self, *, incognito: bool = False) -> str:
         """End the conversation in progress and start another, incognito or not; returns its
-        id. The one that ended is queued for extraction (spec §7.4), never waited for."""
+        id. The new one is switched to and marked in one step, so no turn ever finds it
+        unmarked. The one that ended is queued for extraction (spec §7.4), never waited
+        for."""
         with self._lock:
             previous = self.conversation_id
-            self.conversation_id = uuid.uuid4().hex
-            self._incognito = False
+            self.conversation_id = current = uuid.uuid4().hex
             self._parked = None
-        if incognito:
-            self.incognito = True
+            self._incognito = False
+            if incognito:
+                self._mark_incognito(True)
         self._queue_extraction(previous)
-        return self.conversation_id
+        return current
+
+    def _mark_incognito(self, value: bool) -> None:
+        """Under the lock: make the current conversation incognito, or not, here and in the
+        store. When the store fails (logged), the flag holds all the same: an incognito
+        conversation sends and keeps nothing either way."""
+        self._incognito = value
+        if self._closed:
+            return
+        try:
+            self.store.set_incognito(self.conversation_id, value)
+        except Exception as error:
+            logger.warning("Memory: marking the chat incognito failed (%s)", _name(error))
 
     def close(self) -> None:
         """Stop: no more engine calls, events, rounds or searches, and the store is closed.
         It never waits for a call in flight: that call's result is dropped, and its
         conversation is extracted again at the next launch."""
-        self.stop_background()
-        with self._lock:
+        with self._ticker_lock:  # as start_background reads it: no timer starts after this
             if self._closed:
                 return
             self._closed = True
+        self.stop_background()
+        with self._lock:
             self._worker.stop()
             self.store.close()
 
@@ -208,14 +232,14 @@ class T2VMemory:
         context already. A null argument counts as left out (A7): ``limit`` is 8 by default
         and kept within 1 to 20 (R40), and ``query`` is cut to 200 code points. A malformed
         argument gets a short ``{"error": ...}`` result that never quotes memory; nothing
-        raises. Paused, incognito or closed, nothing is found."""
+        raises. Paused, incognito or closed, nothing is found (NO_RESULTS)."""
         problem, query, from_date, to_date, limit = _search_arguments(args)
         if problem is not None:
             return json.dumps({"error": problem})
         with self._lock:
             try:
                 if self._closed or self._incognito or self.store.paused:
-                    return _NO_RESULTS
+                    return NO_RESULTS
                 return self.store.search_result_json(
                     query,
                     from_date=from_date,
@@ -330,8 +354,10 @@ class T2VMemory:
         - Consolidation, when the store says it is due (``needs_consolidation``) or an import
           wants one, unless memory hasn't changed since the last one.
 
-        Nothing but the purge while memory is paused, for a guest, or once the partner has
-        memory off."""
+        Nothing but the purge while memory is paused, for a guest, once the partner has
+        memory off, or while a failed call's cooldown runs at ``now`` (R81). A call it
+        queues that fails starts the next cooldown at ``now`` when given, so a simulated
+        clock never mixes with the real one."""
         try:
             return self._run_due(now)
         except Exception as error:
@@ -347,7 +373,7 @@ class T2VMemory:
         moment = _utc(now if now is not None else self._clock())
         cutoff = _timestamp(moment - timedelta(seconds=IDLE_EXTRACT_S))
         with self._lock:
-            if self._closed or self.store.paused:
+            if self._closed or self.store.paused or self._cooling(moment):
                 return []
             launch, self._launched = not self._launched, True
             idle = [
@@ -355,10 +381,11 @@ class T2VMemory:
                 for record in self.store.unextracted()
                 if launch or record.last_active_at <= cutoff
             ]
-        due = [key for key in map(self._queue_extract, idle) if key is not None]
+        due = [key for key in (self._queue_extract(cid, now) for cid in idle) if key is not None]
         with self._lock:
             consolidate = not self._closed and self._consolidation_due()
-        if consolidate and self._worker.run("consolidate", self._consolidate_safely):
+        job = functools.partial(self._consolidate_safely, now)
+        if consolidate and self._worker.run("consolidate", job):
             due.append("consolidate")
         return due
 
@@ -367,6 +394,10 @@ class T2VMemory:
         if self._import_pending:
             return True
         return self.store.revision() != self._settled_revision and self.store.needs_consolidation()
+
+    def _cooling(self, moment: datetime) -> bool:
+        """Under the lock: whether a failed call's cooldown still runs at ``moment``."""
+        return self._cooldown_until is not None and moment < self._cooldown_until
 
     def wait_idle(self, timeout: Optional[float] = None) -> bool:
         """Wait for the background thread to run everything queued: True once it has, False
@@ -377,7 +408,7 @@ class T2VMemory:
         """Call ``run_due`` every ``interval_s`` seconds on a daemon thread until
         ``stop_background`` or ``close``, for a host with no loop of its own to call it from.
         Off by default: ``Talk2View.chat`` calls ``run_due`` before every turn. Calling it
-        while it runs does nothing."""
+        while it runs, or once closed, does nothing."""
         if interval_s <= 0:
             raise ValueError("interval_s must be more than 0")
         with self._ticker_lock:
@@ -393,22 +424,23 @@ class T2VMemory:
             ticker.stop()
 
     def _queue_extraction(self, conversation_id: str) -> None:
-        """Queue the extraction of the conversation that just ended (new_conversation)."""
+        """Queue the extraction of the conversation that just ended (new_conversation),
+        unless a failed call's cooldown runs: run_due extracts it once that is over."""
         try:
             with self._lock:
-                if self._closed or self.store.paused:
+                if self._closed or self.store.paused or self._cooling(_utc(self._clock())):
                     return
                 record = self.store.conversation(conversation_id)
             if record is not None and not record.incognito and self._may_call():
-                self._queue_extract(conversation_id)
+                self._queue_extract(conversation_id, None)
         except Exception as error:
             logger.warning("Memory: queueing an extraction failed (%s)", _name(error))
 
-    def _queue_extract(self, conversation_id: str) -> Optional[str]:
+    def _queue_extract(self, conversation_id: str, since: Optional[datetime]) -> Optional[str]:
         """Queue the conversation's extraction: its key, or None when one is queued or
-        running already."""
+        running already. ``since`` is for its cooldown, as in ``_call``."""
         key = "extract:" + conversation_id
-        job = functools.partial(self._extract_safely, conversation_id, "conversation")
+        job = functools.partial(self._extract_safely, conversation_id, "conversation", since)
         return key if self._worker.run(key, job) else None
 
     def _purge(self) -> None:
@@ -426,8 +458,10 @@ class T2VMemory:
         except Exception:
             return False
 
-    def _today(self) -> str:
-        return days.today(_utc(self._clock()), self.timezone).isoformat()
+    def _today(self, timezone: Optional[str]) -> str:
+        """The user's today in ``timezone``: a call passes the zone it began with, so its
+        today, its ``timezone`` field and the days its facts expire on agree."""
+        return days.today(_utc(self._clock()), timezone).isoformat()
 
     # ── engine calls ──
 
@@ -439,6 +473,7 @@ class T2VMemory:
         nothing new from the user to send. False when the call failed (logged) or is
         refused (a guest, the partner's memory off, memory paused), when the conversation
         is unknown or incognito, or while another extraction of it is queued or running.
+        It goes out during a failed call's cooldown too, and its outcome updates it.
 
         A result that arrives once the conversation has turned incognito is applied
         without its entry ops (the store drops the rest), and one that arrives once memory
@@ -453,16 +488,19 @@ class T2VMemory:
         finally:
             self._worker.release(key)
 
-    def _extract_safely(self, conversation_id: str, mode: str) -> bool:
+    def _extract_safely(
+        self, conversation_id: str, mode: str, since: Optional[datetime] = None
+    ) -> bool:
         try:
-            return self._extract(conversation_id, mode)
+            return self._extract(conversation_id, mode, since)
         except Exception as error:
             logger.warning("Memory: extraction failed (%s)", _name(error))
             return False
 
-    def _extract(self, conversation_id: str, mode: str) -> bool:
+    def _extract(self, conversation_id: str, mode: str, since: Optional[datetime]) -> bool:
         if not self._may_call():
             return False
+        timezone = self.timezone  # the request's, all through
         with self._lock:
             if self._closed or self.store.paused:
                 return False
@@ -470,24 +508,21 @@ class T2VMemory:
             if record is None or record.incognito:
                 return False
             body, through = bodies.extract_body(
-                self.store, record, mode=mode, today=self._today(), timezone=self.timezone
+                self.store, record, mode=mode, today=self._today(timezone), timezone=timezone
             )
             if body is None:
                 if through > record.extracted_through:
                     self.store.mark_extracted(record.id, through)
                 return True
-        data = self._call("extraction", "/v1/memory/extract", body)
+        data = self._call("extraction", "/v1/memory/extract", body, _extraction_answer, since)
         return data is not None and self._apply_extraction(data, record.id, through, mode)
 
     def _apply_extraction(
         self, data: Dict[str, Any], conversation_id: Optional[str], through: int, mode: str
     ) -> bool:
-        """Apply an extract answer to the conversation, or with ``conversation_id`` None (an
-        import) to none."""
-        summary, facts, ops = data.get("summary"), data.get("facts"), data.get("entry_ops")
-        if not isinstance(facts, list) or not isinstance(ops, list):
-            logger.warning("Memory: extraction failed (malformed answer)")
-            return False
+        """Apply an extract answer (its shape checked by ``_extraction_answer``) to the
+        conversation, or with ``conversation_id`` None (an import) to none."""
+        summary, facts, ops = data.get("summary"), data["facts"], data["entry_ops"]
         source = "imported" if mode == "import" else "inferred"
         with self._lock:
             if self._closed or self.store.paused:
@@ -522,7 +557,8 @@ class T2VMemory:
         while the call ran, which leaves consolidation due (logged with counts). True when
         applied. False when the call failed (logged) or is refused (a guest, the partner's
         memory off, memory paused), when the result wasn't applied, or while another
-        consolidation is queued or running."""
+        consolidation is queued or running. It goes out during a failed call's cooldown
+        too, and its outcome updates it."""
         if not self._worker.claim("consolidate"):
             return False
         try:
@@ -530,14 +566,14 @@ class T2VMemory:
         finally:
             self._worker.release("consolidate")
 
-    def _consolidate_safely(self) -> bool:
+    def _consolidate_safely(self, since: Optional[datetime] = None) -> bool:
         try:
-            return self._consolidate()
+            return self._consolidate(since)
         except Exception as error:
             logger.warning("Memory: consolidation failed (%s)", _name(error))
             return False
 
-    def _consolidate(self) -> bool:
+    def _consolidate(self, since: Optional[datetime]) -> bool:
         if not self._may_call():
             return False
         timezone = self.timezone  # the request's: its today, and the days facts expire on
@@ -545,17 +581,14 @@ class T2VMemory:
             if self._closed or self.store.paused:
                 return False
             snapshot = self.store.consolidation_snapshot()
-        body = bodies.consolidate_body(snapshot, today=self._today(), timezone=timezone)
-        data = self._call("consolidation", "/v1/memory/consolidate", body)
+        body = bodies.consolidate_body(snapshot, today=self._today(timezone), timezone=timezone)
+        data = self._call(
+            "consolidation", "/v1/memory/consolidate", body, _consolidation_answer, since
+        )
         if data is None:
             return False
-        entries = data.get("entries")
+        entries = data["entries"]
         merges, expiries = data.get("merge_facts", []), data.get("expire_facts", [])
-        if not (
-            isinstance(entries, list) and isinstance(merges, list) and isinstance(expiries, list)
-        ):
-            logger.warning("Memory: consolidation failed (malformed answer)")
-            return False
         with self._lock:
             if self._closed or self.store.paused:
                 return False
@@ -588,7 +621,8 @@ class T2VMemory:
         consolidation follows (queued, unless inline). True when applied. False when the
         call failed (logged) or is refused (a guest, the partner's memory off, memory
         paused), and for text that is blank or longer than bodies.EXTRACT_CHARS_MAX
-        (200,000) code points."""
+        (200,000) code points. It goes out during a failed call's cooldown too, and its
+        outcome updates it."""
         try:
             return self._import(text)
         except Exception as error:
@@ -607,6 +641,7 @@ class T2VMemory:
             return False
         if not self._may_call():
             return False
+        timezone = self.timezone  # the request's, all through
         with self._lock:
             if self._closed or self.store.paused:
                 return False
@@ -615,10 +650,10 @@ class T2VMemory:
                 uuid.uuid4().hex,
                 text,
                 now=_timestamp(self._clock()),
-                today=self._today(),
-                timezone=self.timezone,
+                today=self._today(timezone),
+                timezone=timezone,
             )
-        data = self._call("import", "/v1/memory/extract", body)
+        data = self._call("import", "/v1/memory/extract", body, _extraction_answer, None)
         if data is None or not self._apply_extraction(data, None, 0, "import"):
             return False
         with self._lock:
@@ -626,28 +661,82 @@ class T2VMemory:
         self._worker.run("consolidate", self._consolidate_safely)
         return True
 
-    def _call(self, what: str, endpoint: str, body: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-        """POST ``body`` to an engine memory route: its JSON answer, or None when the call
-        failed, logged in one line with the status and the error type, or the exception's
-        class, never its message, which could quote the request. Nothing is logged once
-        closed: a call cut off by the close is no failure."""
+    def _call(
+        self,
+        what: str,
+        endpoint: str,
+        body: Dict[str, Any],
+        well_formed: Callable[[Dict[str, Any]], bool],
+        since: Optional[datetime],
+    ) -> Optional[Dict[str, Any]]:
+        """POST ``body`` to an engine memory route: its JSON answer, or None.
+
+        Once closed, None at once and nothing sent (R82): the body may hold the memory of a
+        user who has just signed out. A failure (an error, a timeout, or an answer that is
+        no JSON object or that ``well_formed`` refuses) logs one line with the status and
+        the error type, or the exception's class, never its message, which could quote the
+        request, and starts the cooldown, or lengthens it (R81), from ``since``, the ``now``
+        run_due was given, or else the clock's time; a 403 ``memory_disabled`` turns memory
+        calls off instead. A success ends the cooldown. A call the close cut off changes
+        nothing and logs nothing."""
+        if self._closed:
+            return None
         try:
             data = self._client.request(endpoint, method="POST", body=body, timeout=CALL_TIMEOUT_S)
         except T2VError as error:
             if error.type == "memory_disabled":
                 with _partner_memory_off_lock:
                     _partner_memory_off.add(self._client)
-            if not self._closed:
-                logger.warning("Memory: %s failed (%s)", what, _failure(error))
-            return None
+            else:
+                self._back_off(since, error.retry_after)
+            problem = _failure(error)
         except Exception as error:
+            self._back_off(since)
+            problem = _name(error)
+        else:
+            if isinstance(data, dict) and well_formed(data):
+                self._recovered()
+                return data
+            self._back_off(since)
+            problem = "malformed answer"
+        if not self._closed:
+            logger.warning("Memory: %s failed (%s)", what, problem)
+        return None
+
+    def _back_off(self, since: Optional[datetime], retry_after: Optional[int] = None) -> None:
+        """R81: a call failed, so start the cooldown at ``since`` (None: the clock's time
+        now), or lengthen it: COOLDOWN_S after the first failure in a row, twice the last
+        after each further one, at most COOLDOWN_MAX_S, and never less than
+        ``retry_after`` seconds, capped the same. Nothing once closed."""
+        with self._lock:
+            if self._closed:
+                return
+            if self._backoff_s:
+                self._backoff_s = min(self._backoff_s * 2, COOLDOWN_MAX_S)
+            else:
+                self._backoff_s = COOLDOWN_S
+            wait = min(max(self._backoff_s, retry_after or 0), COOLDOWN_MAX_S)
+            start = _utc(since if since is not None else self._clock())
+            self._cooldown_until = start + timedelta(seconds=wait)
+
+    def _recovered(self) -> None:
+        """R81: a call succeeded, so any cooldown ends."""
+        with self._lock:
             if not self._closed:
-                logger.warning("Memory: %s failed (%s)", what, _name(error))
-            return None
-        if not isinstance(data, dict):
-            logger.warning("Memory: %s failed (malformed answer)", what)
-            return None
-        return data
+                self._backoff_s, self._cooldown_until = 0.0, None
+
+
+def _extraction_answer(data: Dict[str, Any]) -> bool:
+    """Whether an extract answer can be applied: its facts and its entry ops are lists."""
+    return isinstance(data.get("facts"), list) and isinstance(data.get("entry_ops"), list)
+
+
+def _consolidation_answer(data: Dict[str, Any]) -> bool:
+    """Whether a consolidate answer can be applied: its entries are a list, and so are its
+    fact merges and expiries when it has them."""
+    return isinstance(data.get("entries"), list) and all(
+        isinstance(data.get(key, []), list) for key in ("merge_facts", "expire_facts")
+    )
 
 
 def _search_arguments(
@@ -692,4 +781,4 @@ def _reasons(dropped: List[str]) -> str:
     return " (" + ", ".join(sorted(set(dropped))) + ")" if dropped else ""
 
 
-__all__ = ["T2VMemory"]
+__all__ = ["NO_RESULTS", "T2VMemory"]

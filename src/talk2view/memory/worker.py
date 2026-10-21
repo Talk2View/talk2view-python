@@ -21,7 +21,7 @@ class Worker:
     Each job runs under a key, such as ``"extract:<conversation id>"``, and is refused while
     another under that key is queued or running; ``claim`` and ``release`` hold a key for a
     caller that runs the work itself. A job's exception is logged by its class, never
-    raised."""
+    raised; a BaseException ends the job's thread, and a new one runs the jobs left."""
 
     def __init__(self, *, inline: bool = False) -> None:
         self._inline = inline
@@ -51,9 +51,7 @@ class Worker:
                 self._jobs.append(keyed)
                 if not self._running:
                     self._running = True
-                    threading.Thread(
-                        target=self._drain, name="talk2view-memory", daemon=True
-                    ).start()
+                    self._start()
                 return True
         keyed()
         return True
@@ -83,15 +81,28 @@ class Worker:
             self._stopped = True
             self._jobs.clear()
 
+    def _start(self) -> None:
+        """Under the lock: start the thread that runs the queued jobs."""
+        threading.Thread(target=self._drain, name="talk2view-memory", daemon=True).start()
+
     def _drain(self) -> None:
-        while True:
+        try:
+            while True:
+                with self._changed:
+                    if not self._jobs:
+                        return
+                    job = self._jobs.popleft()
+                job()
+        finally:
+            # Also when a job let a BaseException out (keyed() catches only Exception), which
+            # ends this thread: the jobs left, or queued since the check above, go to a new
+            # thread, so the worker never wedges.
             with self._changed:
-                if not self._jobs:
+                if self._jobs:
+                    self._start()
+                else:
                     self._running = False
                     self._changed.notify_all()
-                    return
-                job = self._jobs.popleft()
-            job()
 
 
 class Ticker:

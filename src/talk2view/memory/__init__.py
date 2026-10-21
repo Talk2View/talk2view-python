@@ -7,7 +7,7 @@ answers the agent's memory searches from its own index. ``T2VMemory`` does that 
 ``Talk2View`` client given ``memory_path``.
 """
 
-from .client import T2VMemory
+from .client import NO_RESULTS, T2VMemory
 from .models import (
     TOPICS,
     AppliedBatch,
@@ -28,6 +28,7 @@ from .text import (
 )
 
 __all__ = [
+    "NO_RESULTS",
     "STOP_WORDS",
     "TOPICS",
     "AppliedBatch",

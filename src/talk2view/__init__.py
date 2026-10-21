@@ -132,13 +132,16 @@ SessionRecoveredCallback = Callable[[str], None]
 AnonymousUnavailableCallback = Callable[[str], None]
 
 
-#: A user id that names its memory file as it is (D22); any other is hashed.
-_MEMORY_FILE_ID = re.compile(r"[A-Za-z0-9_-]{1,128}")
+#: A user id that names its memory file as it is (D22); any other is hashed. Lowercase only,
+#: as the engine's ids are, so two ids that differ only in case never share a file where
+#: the filesystem ignores case (macOS and Windows by default).
+_MEMORY_FILE_ID = re.compile(r"[a-z0-9_-]{1,128}")
 
 
 def _memory_file(user_id: str) -> str:
     """The name of the user's memory file under ``memory_path``: ``<user id>.sqlite3``, or
-    for an id that couldn't name a file safely, the start of its SHA-256."""
+    for an id that couldn't name a file safely on any filesystem, the start of its
+    SHA-256."""
     if _MEMORY_FILE_ID.fullmatch(user_id) is None:
         user_id = hashlib.sha256(user_id.encode("utf-8")).hexdigest()[:32]
     return user_id + ".sqlite3"
@@ -446,7 +449,9 @@ class Talk2View:
             logger.warning("Memory: opening the memory failed (%s)", type(error).__name__)
             memory = None
         if memory is None:
-            return '{"results":[]}'
+            from .memory import NO_RESULTS
+
+            return NO_RESULTS
         return memory.handle_search(arguments)
 
     def _memory_turn(self, message: str) -> Tuple[Optional["T2VMemory"], Optional[Dict[str, Any]]]:

@@ -30,8 +30,9 @@ from talk2view import ChatController, Talk2View, _memory_file
 from talk2view.auth import T2VAuth
 from talk2view.cancel import CancelToken
 from talk2view.client import T2VClient
-from talk2view.memory import MemoryStore, T2VMemory, days
+from talk2view.memory import MemoryStore, T2VMemory, bodies, days
 from talk2view.memory import client as memory_client
+from talk2view.memory.worker import Worker
 from talk2view.storage import MemoryStorage
 from talk2view.types import Capabilities, ChatEvent, Decision
 
@@ -263,6 +264,19 @@ def test_memory_path_builds_a_per_user_store(engine: MemoryCallsEngine, tmp_path
             assert stat.S_IMODE(path.stat().st_mode) == 0o600
     assert _memory_file("u1") == "u1.sqlite3"
     assert re.fullmatch(r"[0-9a-f]{32}\.sqlite3", _memory_file("../not a file name"))
+
+
+def test_ids_that_differ_only_in_case_get_files_of_their_own() -> None:
+    """Where the filesystem ignores case (macOS and Windows by default), User-A and user-a
+    would share a file: only a lowercase id names its file as it is. The engine's ids, a
+    lowercase UUID or anon-<n>, keep their names."""
+    upper, lower = _memory_file("User-A"), _memory_file("user-a")
+
+    assert lower == "user-a.sqlite3"
+    assert re.fullmatch(r"[0-9a-f]{32}\.sqlite3", upper)
+    assert upper.lower() != lower.lower()
+    for engine_id in ("anon-42", "6f1c2d3e-4b5a-4c6d-8e7f-0a1b2c3d4e5f"):
+        assert _memory_file(engine_id) == engine_id + ".sqlite3"
 
 
 def test_capabilities_gain_memory_flags(engine: MemoryCallsEngine, tmp_path: Path) -> None:
@@ -809,6 +823,34 @@ def test_new_conversation_triggers_extraction_of_the_previous(
     assert len(engine.bodies_of("extract")) == 1
 
 
+def test_a_new_incognito_conversation_is_marked_as_it_starts(
+    memory: T2VMemory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """new_conversation(incognito=True) switches to the new conversation and marks it in one
+    step: whoever takes the memory's lock next, a turn on another thread say, never finds
+    the new conversation unmarked."""
+    first = memory.conversation_id
+    lock = memory._lock
+    seen: List[Tuple[str, bool]] = []  # the state each taker of the lock finds
+
+    class Watched:
+        def __enter__(self) -> bool:
+            seen.append((memory.conversation_id, memory.incognito))
+            return lock.__enter__()
+
+        def __exit__(self, *exc: Any) -> None:
+            lock.__exit__(*exc)
+
+    monkeypatch.setattr(memory, "_lock", Watched())
+    second = memory.new_conversation(incognito=True)
+
+    assert seen[0] == (first, False)
+    assert [incognito for conversation, incognito in seen if conversation == second] == [True]
+    monkeypatch.undo()
+    assert memory.turn_payload("hi") == {"status": "incognito"}
+    assert memory.store.record_round(second, "I like tea", "Noted.") == 0  # never kept
+
+
 def test_run_due_at_launch_extracts_unextracted_conversations(
     engine: MemoryCallsEngine, client: T2VClient, tmp_path: Path, clock: FakeClock
 ) -> None:
@@ -936,6 +978,85 @@ def test_memory_disabled_backs_off_for_the_process(
     assert len(engine.calls) == 1
     payload = memory.turn_payload("hi")
     assert payload is not None and payload["status"] == "on"
+
+
+def _rate_limited(retry_after: int) -> Response:
+    """The engine's 429, with a Retry-After header."""
+    return Response(
+        json.dumps({"error": {"type": "rate_limit_exceeded", "message": "slow down"}}),
+        status=429,
+        headers={"Retry-After": str(retry_after)},
+        content_type="application/json",
+    )
+
+
+def test_a_failed_call_cools_run_due_down(
+    engine: MemoryCallsEngine,
+    memory: T2VMemory,
+    clock: FakeClock,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """R81: after a failed call, run_due starts no engine call for 60 s on the injected
+    clock, though it still purges, and logs nothing more; a second failure in a row waits
+    120 s; a success ends the cooldown, so the next failure waits 60 s again."""
+    store = memory.store
+    store.record_round("c1", "I moved to Perth", "Noted.", at=T0 - timedelta(hours=1))
+    failure = (503, "credit_check_unavailable")
+    engine.replies["extract"][:] = [failure, failure]
+
+    with caplog.at_level(logging.INFO, logger="talk2view"):
+        assert memory.run_due() == ["extract:c1"]  # fails at T0
+        store.apply_ops([add("Likes tea")], source="said")
+        store.apply_ops([{"op": "remove", "id": "e1"}], source="said")  # hidden at T0
+        clock.now = T0 + timedelta(seconds=59)
+        assert memory.run_due() == []
+        assert store.entries(include_hidden=True) == []  # purged all the same
+        clock.now = T0 + timedelta(seconds=60)
+        assert memory.run_due() == ["extract:c1"]  # fails again: 120 s from here
+        clock.now = T0 + timedelta(seconds=179)
+        assert memory.run_due() == []
+        clock.now = T0 + timedelta(seconds=180)
+        assert memory.run_due() == ["extract:c1"]  # succeeds
+        assert _conversation_mark(store, "c1") == 1
+
+        store.record_round("c2", "I like tea", "Noted.", at=T0 - timedelta(hours=1))
+        engine.replies["extract"].append(failure)
+        assert memory.run_due() == ["extract:c2"]  # fails: 60 s, not 240 s
+        clock.now = T0 + timedelta(seconds=239)
+        assert memory.run_due() == []
+        clock.now = T0 + timedelta(seconds=240)
+        assert memory.run_due() == ["extract:c2"]
+
+    assert engine.kinds() == ["extract"] * 5
+    failed = (logging.WARNING, "Memory: extraction failed (HTTP 503 credit_check_unavailable)")
+    assert _logged(caplog) == [failed] * 3
+
+
+def test_the_cooldown_stays_within_an_hour_and_honours_retry_after(
+    engine: MemoryCallsEngine, memory: T2VMemory, clock: FakeClock
+) -> None:
+    """R81: direct calls go out during the cooldown, and their failures lengthen it,
+    doubling to at most 3600 s. A Retry-After makes it at least that long, still at most
+    an hour. The cooldown starts at run_due's now when it is given."""
+    store = memory.store
+    store.record_round("c1", "I moved to Perth", "Noted.", at=T0 - timedelta(hours=1))
+    engine.replies["extract"][:] = [(503, "credit_check_unavailable")] * 7
+
+    for _ in range(7):  # 60, 120, 240, 480, 960 and 1920 s, then 3840 s held to 3600
+        assert memory.extract("c1") is False
+    assert len(engine.calls) == 7
+    assert memory.run_due(now=T0 + timedelta(seconds=3599)) == []
+    assert memory.run_due(now=T0 + timedelta(seconds=3600)) == ["extract:c1"]  # succeeds
+
+    later = T0 + timedelta(hours=2)
+    for conversation, retry_after, wait in (("c2", 300, 300), ("c3", 7200, 3600)):
+        store.record_round(conversation, "I like tea", "Noted.", at=T0 - timedelta(hours=1))
+        engine.replies["extract"].append(lambda body, seconds=retry_after: _rate_limited(seconds))
+        assert memory.run_due(now=later) == ["extract:" + conversation]  # fails at later
+        assert memory.run_due(now=later + timedelta(seconds=wait - 1)) == []
+        later += timedelta(seconds=wait)
+        assert memory.run_due(now=later) == ["extract:" + conversation]  # succeeds
+    assert len(engine.calls) == 12
 
 
 def test_a_guest_makes_no_memory_calls(engine: MemoryCallsEngine, tmp_path: Path) -> None:
@@ -1143,6 +1264,30 @@ def test_consolidation_is_dropped_when_memory_changed_meanwhile(
     assert _texts(memory) == ["Likes tea", "Works at Canva"]
 
 
+def test_a_call_keeps_the_zone_it_began_with(
+    engine: MemoryCallsEngine, memory: T2VMemory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A turn may change the zone while a consolidation is being built: the request's
+    today and its timezone both keep the zone the call began with, as its expiries do."""
+    plus_fourteen = timezone(timedelta(hours=14))  # 2026-10-22 there at T0; 21 Oct in UTC
+    monkeypatch.setattr(
+        days, "_named_zone", lambda name: plus_fourteen if name == "Plus/Fourteen" else None
+    )
+    memory.timezone = "Plus/Fourteen"
+    snapshot = memory.store.consolidation_snapshot
+
+    def snapshot_then_switch(**kwargs: Any) -> Any:
+        memory.timezone = None  # a turn elsewhere, in the system's zone (UTC here)
+        return snapshot(**kwargs)
+
+    monkeypatch.setattr(memory.store, "consolidation_snapshot", snapshot_then_switch)
+
+    assert memory.consolidate() is True
+
+    (body,) = engine.bodies_of("consolidate")
+    assert (body["today"], body["timezone"]) == ("2026-10-22", "Plus/Fourteen")
+
+
 def test_consolidation_carries_200_entries_and_reaches_the_rest_later(
     engine: MemoryCallsEngine, memory: T2VMemory, clock: FakeClock
 ) -> None:
@@ -1232,23 +1377,37 @@ def test_import_text_uses_import_mode_and_sensitive_switch(
 
 
 def test_an_import_keeps_its_consolidation_due_until_one_is_applied(
-    engine: MemoryCallsEngine, memory: T2VMemory
+    engine: MemoryCallsEngine,
+    memory: T2VMemory,
+    clock: FakeClock,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """After an import, consolidation is due whatever the schedule, until one is applied;
-    a failed import or consolidation changes nothing, and none goes out while paused."""
+    """After an import, consolidation is due whatever the schedule, until one is applied,
+    once a failed one's cooldown has run; a failed import or consolidation changes nothing,
+    an import's failures are logged as the import's, and none goes out while paused."""
     engine.replies["consolidate"].append((429, "rate_limit_exceeded"))
     assert memory.import_text("I go hiking most Saturdays.") is True
     assert engine.kinds() == ["extract", "consolidate"]
+    assert memory.run_due() == []  # the failed consolidation's cooldown
+    clock.now = T0 + timedelta(seconds=60)
     assert memory.run_due() == ["consolidate"]
     assert memory.run_due() == []
 
-    engine.replies["extract"].append((503, "credit_check_unavailable"))
-    assert memory.import_text("I prefer tea to coffee.") is False
+    engine.replies["extract"][:] = [(503, "credit_check_unavailable"), []]
+    caplog.clear()
+    with caplog.at_level(logging.WARNING, logger="talk2view"):
+        assert memory.import_text("I prefer tea to coffee.") is False
+        assert memory.import_text("I prefer tea to coffee.") is False
+    assert _logged(caplog) == [
+        (logging.WARNING, "Memory: import failed (HTTP 503 credit_check_unavailable)"),
+        (logging.WARNING, "Memory: import failed (malformed answer)"),
+    ]
+    clock.now = T0 + timedelta(hours=1)
     assert memory.run_due() == []
     memory.store.paused = True
     assert memory.import_text("I prefer tea to coffee.") is False
     assert memory.consolidate() is False
-    assert engine.kinds() == ["extract", "consolidate", "consolidate", "extract"]
+    assert engine.kinds() == ["extract", "consolidate", "consolidate", "extract", "extract"]
 
 
 # ── turns through Talk2View ──
@@ -1405,7 +1564,8 @@ def test_controller_clear_starts_a_new_conversation(
 
 def test_chat_never_waits_for_memory_calls(engine: MemoryCallsEngine, tmp_path: Path) -> None:
     """Not inline: the extraction new_conversation() queues takes 2 s, and neither it nor
-    the next chat() waits for it."""
+    the next chat() waits for it. The 1 s bounds prove that without flaking on a busy
+    runner."""
     engine.replies["extract"].append(2.0)
     with _talk2view(engine, tmp_path) as t2v:
         memory = _memory_of(t2v)
@@ -1414,13 +1574,13 @@ def test_chat_never_waits_for_memory_calls(engine: MemoryCallsEngine, tmp_path: 
 
         started = time.monotonic()
         memory.new_conversation()
-        assert time.monotonic() - started < 0.05
+        assert time.monotonic() - started < 1.0
 
         engine.streams[:] = [[_text("ok"), _STOP, DONE]]
         started = time.monotonic()
         events = t2v.chat("hi")
         assert next(events).type == "text"
-        assert time.monotonic() - started < 0.2
+        assert time.monotonic() - started < 1.0
         assert [event.type for event in events] == ["done"]
 
         assert memory.wait_idle(5)
@@ -1473,6 +1633,55 @@ def test_start_background_runs_run_due_and_stops(
         client.close()
 
 
+def test_a_start_racing_close_leaves_no_timer(
+    memory: T2VMemory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A start_background() that lands while close() runs, just after close() stopped the
+    timer, starts none: the memory is closed first."""
+    stop = memory.stop_background
+
+    def stop_then_start() -> None:
+        stop()
+        memory.start_background(interval_s=0.01)
+
+    monkeypatch.setattr(memory, "stop_background", stop_then_start)
+    try:
+        memory.close()
+        assert not any(t.name == "talk2view-memory-timer" for t in threading.enumerate())
+    finally:
+        stop()
+
+
+def test_a_job_raising_a_base_exception_never_wedges_the_worker(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A BaseException out of a job gets past keyed() and ends its thread, but the job
+    queued behind it still runs, the worker takes more, and wait_idle returns."""
+
+    class Halt(BaseException):
+        pass
+
+    escaped: List[Any] = []
+    monkeypatch.setattr(threading, "excepthook", lambda args: escaped.append(args.exc_type))
+    go = threading.Event()
+    ran: List[str] = []
+
+    def halt() -> None:
+        go.wait(5)
+        raise Halt()
+
+    worker = Worker()
+    assert worker.run("a", halt)
+    assert worker.run("b", lambda: ran.append("b"))  # queued behind it
+    go.set()
+    assert worker.wait_idle(5)
+    assert worker.run("a", lambda: ran.append("a"))  # its key was released
+    assert worker.wait_idle(5)
+
+    assert ran == ["b", "a"]
+    assert _eventually(lambda: escaped == [Halt])
+
+
 def test_a_closed_memory_does_nothing(engine: MemoryCallsEngine, memory: T2VMemory) -> None:
     memory.store.record_round("c1", "I moved to Perth", "Noted.")
     memory.close()
@@ -1492,6 +1701,38 @@ def test_a_closed_memory_does_nothing(engine: MemoryCallsEngine, memory: T2VMemo
     assert list(memory.observe_turn("hi", iter(events))) == events
     assert list(memory.observe_approval(iter(events))) == events
     assert engine.calls == []
+
+
+@pytest.mark.parametrize("call", ["extract", "consolidate", "import"])
+def test_nothing_goes_out_once_closed(
+    engine: MemoryCallsEngine,
+    memory: T2VMemory,
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+    call: str,
+) -> None:
+    """R82: closed once its body is built (the user signed out, say), a call sends nothing
+    and logs nothing: the body holds the memory of a user who has gone."""
+    memory.store.record_round("c1", "I moved to Perth", "Noted.")
+    name = {"extract": "extract_body", "consolidate": "consolidate_body", "import": "import_body"}
+    build = getattr(bodies, name[call])
+
+    def build_then_close(*args: Any, **kwargs: Any) -> Any:
+        built = build(*args, **kwargs)
+        memory.close()
+        return built
+
+    monkeypatch.setattr(bodies, name[call], build_then_close)
+    with caplog.at_level(logging.DEBUG, logger="talk2view"):
+        if call == "extract":
+            assert memory.extract("c1") is False
+        elif call == "consolidate":
+            assert memory.consolidate() is False
+        else:
+            assert memory.import_text("I like tea.") is False
+
+    assert engine.calls == []
+    assert _logged(caplog) == []
 
 
 def test_store_failures_never_raise(
