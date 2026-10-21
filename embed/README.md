@@ -45,6 +45,33 @@ Try it by hand against the scripted controller, no engine: `npm run build`, then
 | `guard/` | The guard's Slicer driver and judge (`.github/workflows/embed-guard.yml`) |
 | `e2e/` | Playwright specs and `backend.py`, the real UIServer they run against |
 
+## Theming
+
+The page's colours are the TypeScript chat's tokens (`chat.src.css` in
+Talk2View/talk2view-typescript) under the `--t2v-` prefix: `--t2v-background`,
+`--t2v-foreground`, `--t2v-primary`, `--t2v-muted` (a surface: the user's bubble),
+`--t2v-muted-foreground` (quiet text), `--t2v-border`, `--t2v-destructive`, `--t2v-radius`,
+the composer's `--t2v-composer-radius/-bg/-padding`, and the brand hexes `--t2v-teal` …
+`--t2v-amber`. A host sets any of them through `Theme(tokens={...})`; `mode="dark"` picks
+the dark palette (`html[data-theme='dark']`).
+
+`npm run check:tokens` (`scripts/check-token-parity.mjs`, run in CI) diffs the values in
+`src/styles/app.css` against the public repository's `main`, so the two chats cannot
+drift apart without CI saying so. Tokens TS has no name for — the font stack and the
+`rgba()` opacity variants Tailwind would write as `color-mix` — are the page's own.
+
+### Parity with the TS chat
+
+Beyond the tokens, the page's own CSS matches the TS chat's drawn look: the header, the
+welcome and the openers, the user bubble and composer, tool rows (the "N tool calls"
+group, the shimmer), the approval card's colours and buttons, code blocks (a language
+label, per-block copy) and Markdown typography, and the reply actions (a 3 s "copied"
+tick, Refresh). `e2e/looks.spec.ts` checks every one of these as computed styles, in both
+palettes, against the real page — never a screenshot compared by eye. What is
+deliberately different: no shiki syntax highlighting (code blocks stay plain-text), no
+"Export as Markdown" (TS's own is a Base UI menu this page has no primitive for), and the
+text size setting, which is this page's own addition with nothing to match in TS.
+
 ## Where the TS SDK code comes from
 
 The page imports four files of the TypeScript SDK, never its React components (Tailwind v4

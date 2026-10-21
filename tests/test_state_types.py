@@ -86,6 +86,7 @@ class TestFactories:
             "registered": [],
             "available": False,
             "needsSessionReset": False,
+            "store": {"writable": False, "canOpenFolder": False},
         }
 
     def test_factories_return_fresh_objects(self) -> None:

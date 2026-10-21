@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Iterator
 
 import pytest
@@ -44,3 +45,15 @@ def account_engine(fake_engine_server: HTTPServer) -> Iterator[AccountEngine]:
         if fake.config_gate is not None:
             fake.config_gate.set()
         fake.stop()
+
+
+@pytest.fixture
+def bundled_dir(tmp_path: Path) -> str:
+    """A read-only bundled skills folder holding one ``ct-window-presets/SKILL.md``, as
+    ``T2VSkills.use_store``'s ``bundled`` takes (see ``test_skills_store_integration.py``)."""
+    folder = tmp_path / "bundled"
+    (folder / "ct-window-presets").mkdir(parents=True, exist_ok=True)
+    (folder / "ct-window-presets" / "SKILL.md").write_text(
+        "---\nname: ct-window-presets\ndescription: CT presets. Use for CT windows.\n---\nB\n"
+    )
+    return str(folder)

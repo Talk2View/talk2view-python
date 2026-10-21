@@ -51,6 +51,7 @@ def reset_state(n: int) -> SkillsState:
         "registered": ["s{}".format(n)],  # varies, so most calls record an op
         "available": True,
         "needsSessionReset": True,
+        "store": {"writable": False, "canOpenFolder": False},
     }
 
 

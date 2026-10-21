@@ -777,3 +777,87 @@ class TestDescriptionAndReRegister:
         client.request.assert_called_once_with(
             "/v1/tools/register", method="POST", body=first_body
         )
+
+
+# ── add_builtin's host-wins guard, allow_always, get_description/registered
+#    reading builtins too ───────────────────────────────────────────────────────────────
+
+
+def _builtin_schema(name: str = "save_skill") -> ClientToolSchema:
+    return ClientToolSchema(
+        name=name,
+        description="A builtin the SDK itself provides.",
+        parameters={"type": "object", "properties": {}, "required": []},
+    )
+
+
+class TestBuiltins:
+    def test_add_builtin_installs_handler_permission_and_description(self) -> None:
+        tools = T2VTools(MagicMock())
+
+        tools.add_builtin(_builtin_schema(), lambda **kw: "ok", permission=True)
+
+        assert tools.has_handler("save_skill")
+        result, is_error = tools.execute_tool_call("save_skill", {})
+        assert (result, is_error) == ("ok", False)
+        assert tools.get_description("save_skill") == "A builtin the SDK itself provides."
+        assert any(s.name == "save_skill" for s in tools.get_registered())
+
+    def test_a_host_handler_registered_first_is_never_displaced(self) -> None:
+        """The 3D Slicer extension's own order: register_from_functions()/handle() runs before
+        UIServer's add_builtin(). The host's handler and permission must survive."""
+        tools = T2VTools(MagicMock())
+        tools.handle("save_skill", lambda **kw: "host ran", permission=False)
+
+        tools.add_builtin(_builtin_schema(), lambda **kw: "builtin ran", permission=True)
+
+        result, is_error = tools.execute_tool_call("save_skill", {})
+        assert (result, is_error) == ("host ran", False)
+        assert tools.check_permission("save_skill", {}).action == "allow"  # host's, unasked
+
+    def test_a_host_schema_registered_first_still_wins_on_the_wire(self) -> None:
+        sent = []
+
+        class Client:
+            def request(self, path, method="GET", body=None):
+                sent.append(body["tools"][0])
+                return {"registered": [], "count": 0}
+
+        tools = T2VTools(Client())
+        host_schema = ClientToolSchema(name="save_skill", description="host's own tool")
+        tools.register([host_schema])
+
+        tools.add_builtin(_builtin_schema(), lambda **kw: "ok", permission=True)
+        tools.re_register()
+
+        assert [t["description"] for t in sent] == ["host's own tool", "host's own tool"]
+
+    def test_re_adding_a_builtin_updates_its_own_handler(self) -> None:
+        """A guard against a host's own name must not also block a builtin from updating
+        itself (e.g. UIServer built twice for two accounts)."""
+        tools = T2VTools(MagicMock())
+        tools.add_builtin(_builtin_schema(), lambda **kw: "first", permission=True)
+
+        tools.add_builtin(_builtin_schema(), lambda **kw: "second", permission=True)
+
+        result, _ = tools.execute_tool_call("save_skill", {})
+        assert result == "second"
+
+    def test_allows_always_true_by_default_false_when_disallowed(self) -> None:
+        tools = T2VTools(MagicMock())
+        tools.handle("normal_tool", lambda: "ok", permission=True)
+        tools.add_builtin(_builtin_schema(), lambda **kw: "ok", permission=True,
+                           allow_always=False)
+
+        assert tools.allows_always("normal_tool") is True
+        assert tools.allows_always("save_skill") is False
+        assert tools.allows_always("unknown_tool") is True  # never restricted at all
+
+    def test_allow_always_has_no_effect_when_the_host_already_owns_the_name(self) -> None:
+        tools = T2VTools(MagicMock())
+        tools.handle("save_skill", lambda **kw: "host ran", permission=True)
+
+        tools.add_builtin(_builtin_schema(), lambda **kw: "builtin ran", permission=True,
+                           allow_always=False)
+
+        assert tools.allows_always("save_skill") is True  # the host's own tool, not the SDK's

@@ -130,6 +130,10 @@ jobs:
         # No token: the repository is public. A network failure only warns.
         run: node scripts/check-vendored-sdk.mjs
 
+      - name: The page's theme tokens match the public TS chat stylesheet
+        # No token: the repository is public. A network failure only warns.
+        run: node scripts/check-token-parity.mjs
+
       - name: The Python SDK (the e2e backend runs the real UIServer)
         working-directory: .
         run: uv sync --all-extras --frozen

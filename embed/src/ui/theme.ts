@@ -1,7 +1,13 @@
 import type { FontSize, ThemeSlice } from '../wire';
 
-/** Font sizes the Settings view offers (`preferences.fontSize`). */
-export const FONT_SIZES: Record<FontSize, string> = { small: '13px', medium: '15px', large: '17px' };
+/**
+ * Font sizes the Settings view offers (`preferences.fontSize`).
+ * Medium is now TS's own 16px base (thread.aui.tsx:539's un-classed text, the browser
+ * default) rather than a smaller 15px — the reply (`.aui-assistant-message-content`,
+ * app.css) inherits this instead of a fixed literal, so Text size now reaches the one
+ * text it exists for, and the user bubble moves with it too.
+ */
+export const FONT_SIZES: Record<FontSize, string> = { small: '14px', medium: '16px', large: '18px' };
 
 let applied: string[] = [];
 

@@ -11,7 +11,7 @@ import re
 import secrets
 import threading
 import time
-from typing import Any, Callable, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 from urllib.parse import SplitResult, urlsplit, urlunsplit
 
 from ._loopback import LoopbackListener
@@ -254,11 +254,18 @@ class T2VAuth:
         self._notify_listeners(response.user)
         return response.user
 
-    def start_anonymous(self, captcha_token: Optional[str] = None) -> User:
+    def start_anonymous(
+        self, captcha_token: Optional[str] = None, *, warm: bool = False
+    ) -> User:
         """Start an anonymous demo session (no account). Requires partner configuration:
         anonymous access must be enabled for the partner key, and unless the partner has
         turned the captcha requirement off, a Cloudflare Turnstile token must be passed —
         a native desktop host cannot obtain one by itself.
+
+        ``warm=True`` only when the end-user's message is already on its way: the engine
+        then starts minting the guest's key during the sign-in, as ``warm_up()`` would
+        (keys are minted lazily, and only on intent). An engine without the
+        field ignores it.
 
         Raises ``AnonymousUnavailableError`` (``type`` = ``captcha_required``,
         ``captcha_invalid``, ``captcha_unavailable``, ``anonymous_access_disabled`` or
@@ -266,7 +273,7 @@ class T2VAuth:
         help; any other refusal (``anonymous_unavailable`` 503, ``anonymous_error`` 400)
         is a plain ``T2VError`` and may succeed on a retry.
         """
-        user = self._start_anonymous_session(captcha_token)
+        user = self._start_anonymous_session(captcha_token, warm=warm)
         self._notify_listeners(user)
         return user
 
@@ -514,12 +521,15 @@ class T2VAuth:
         captcha_token: Optional[str] = None,
         *,
         store: Optional[Callable[[TokenResponse], None]] = None,
+        warm: bool = False,
     ) -> User:
         """``start_anonymous`` without notifying the auth-state listeners: the
         caller does that (``Talk2View.ensure_session`` first releases the
         callers waiting on it). ``store`` replaces ``_store_tokens`` for the
         validated answer (``Talk2View`` refuses to store once it is closed)."""
-        body = {"captcha_token": captcha_token} if captcha_token else {}
+        body: Dict[str, Any] = {"captcha_token": captcha_token} if captcha_token else {}
+        if warm:
+            body["warm"] = True
         try:
             data = self._client.request(
                 "/v1/auth/anonymous", method="POST", body=body, requires_auth=False

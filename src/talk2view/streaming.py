@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from typing import Any, Dict, Iterator, List, Optional
+from typing import Any, Dict, Iterable, Iterator, List, Optional
 
 import httpx
 
@@ -177,8 +177,14 @@ def parse_sse_stream(response: httpx.Response) -> Iterator[ChatCompletionChunk]:
     """
     # iter_text() decodes incrementally, so a multi-byte character split
     # across two network reads is reassembled rather than corrupted.
+    yield from parse_sse_text(response.iter_text())
+
+
+def parse_sse_text(texts: Iterable[str]) -> Iterator[ChatCompletionChunk]:
+    """:func:`parse_sse_stream` over already-decoded text. It stops at ``[DONE]`` without
+    closing ``texts``, so a caller holding that iterator can read the body to its end."""
     buffer = ""
-    for text in response.iter_text():
+    for text in texts:
         buffer += text
         lines = buffer.split("\n")
         buffer = lines.pop()  # Keep incomplete last line

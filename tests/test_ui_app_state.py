@@ -83,20 +83,23 @@ def test_attach_seeds_every_slice_signed_out(t2v: Talk2View) -> None:
         assert state(hub) == {
             "theme": {"mode": "dark", "tokens": {}},
             "capabilities": {"audio": False, "oauth": False, "oauthProviders": [],
-                             "clipboard": False},
+                             "clipboard": False, "skillImport": False},
             "results": [],
             "config": None,
             "models": {"list": [], "selected": None},
+            "audioModels": {"list": [], "state": "loading"},
             "auth": {"user": None, "isAuthenticated": False, "isAnonymous": False,
                      "oauthPending": None, "oauthError": None},
             "preferences": {},
             "options": {
-                "welcome": {"heading": None, "suggestions": []},
+                "welcome": {"heading": None, "subheading": None, "suggestions": []},
                 "features": {"dictation": True, "attachments": True, "settings": True,
-                             "account": True, "threadList": True, "providerSignIn": True},
+                             "account": True, "threadList": True, "providerSignIn": True,
+                             "skills": True},
                 "allowAnonymous": True,
                 "resetPasswordUrl": None,
                 "footer": None,
+                "appName": None,
             },
             "tools": {},
             "limits": {"demoLimitReached": False, "anonymousUnavailable": None},
@@ -746,3 +749,85 @@ def test_the_controller_exposes_its_talk2view(t2v: Talk2View) -> None:
         assert controller.t2v is t2v
     finally:
         controller.close()
+
+
+def test_capabilities_audio_follows_the_host_and_audio_models_load_signed_in(
+    t2v: Talk2View, account_engine: AccountEngine
+) -> None:
+    hub = EventHub()
+    app = AppState(t2v, GenericHost(), audio=True)
+    app.attach(hub)
+    try:
+        assert state(hub)["capabilities"]["audio"] is True
+        # "loading" before anyone is signed in: not "ready" with nothing yet.
+        assert state(hub)["audioModels"] == {"list": [], "state": "loading"}
+        t2v.auth.login("ana@example.com", "pw")
+        assert wait_for(lambda: state(hub)["audioModels"]["list"] != [])
+        assert state(hub)["audioModels"]["list"] == [
+            {"id": "scribe_v2", "name": "Scribe v2", "supported_languages": ["en", "vi"],
+             "description": "Fast"},
+            {"id": "faster-whisper-base", "name": None, "supported_languages": None,
+             "description": None},
+        ]
+        assert state(hub)["audioModels"]["state"] == "ready"
+        app.select_stt_model("scribe_v2")
+        app.select_stt_language("vi")
+        assert wait_for(lambda: state(hub)["preferences"].get("sttLanguage") == "vi")
+        assert state(hub)["preferences"]["sttModel"] == "scribe_v2"
+        app.select_stt_model(None)
+        app.select_stt_language(None)
+        assert wait_for(
+            lambda: "sttModel" not in state(hub)["preferences"]
+            and "sttLanguage" not in state(hub)["preferences"]
+        )
+        t2v.auth.logout()
+        # Signed out again: emptied AND put back to "loading", not left "ready" with an
+        # empty list — a partner's real empty catalogue and "nobody has asked yet" must
+        # never look the same.
+        assert wait_for(lambda: state(hub)["audioModels"] == {"list": [], "state": "loading"})
+    finally:
+        app.detach()
+
+
+def test_audio_models_state_is_ready_even_when_the_list_comes_back_empty(
+    t2v: Talk2View, account_engine: AccountEngine
+) -> None:
+    """A partner with no voice models configured at all: "ready", never stuck "loading"."""
+    account_engine.audio_models = []
+    hub = EventHub()
+    app = AppState(t2v, GenericHost(), audio=True)
+    app.attach(hub)
+    try:
+        t2v.auth.login("ana@example.com", "pw")
+        assert wait_for(lambda: state(hub)["audioModels"]["state"] == "ready")
+        assert state(hub)["audioModels"]["list"] == []
+    finally:
+        app.detach()
+
+
+def test_audio_models_state_is_error_when_the_list_could_not_be_read(
+    t2v: Talk2View, account_engine: AccountEngine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A failed read is not "loading" either — the page needs to say so."""
+
+    def _boom() -> List[Any]:
+        raise RuntimeError("the voice catalogue is unreachable")
+
+    monkeypatch.setattr(t2v.voice, "list_models", _boom)
+    hub = EventHub()
+    app = AppState(t2v, GenericHost(), audio=True)
+    app.attach(hub)
+    try:
+        t2v.auth.login("ana@example.com", "pw")
+        assert wait_for(lambda: state(hub)["audioModels"]["state"] == "error")
+        assert state(hub)["audioModels"]["list"] == []
+    finally:
+        app.detach()
+
+
+def test_capabilities_audio_is_false_without_capture(t2v: Talk2View) -> None:
+    hub, app = attached(t2v)
+    try:
+        assert state(hub)["capabilities"]["audio"] is False
+    finally:
+        app.detach()

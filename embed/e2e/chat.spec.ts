@@ -8,7 +8,7 @@ test.describe('the thread and the composer (FakeController)', () => {
     await expect(page.getByRole('heading', { name: 'Ask about your scene' })).toBeVisible();
     await expect(page.getByText('Answers can be wrong. Check them before you act.')).toBeVisible();
     expect(page.url()).not.toContain('#t=');
-    await expect(page.locator('h1')).toHaveText('Chat'); // the frame is the h1…
+    await expect(page.locator('h1')).toHaveText('New chat'); // the frame is the h1…
     await expect(page.locator('h2.t2v-welcome-heading')).toBeVisible(); // …the welcome the h2 under it
 
     await sendMessage(page, 'hello');
@@ -158,7 +158,8 @@ test.describe('the thread and the composer (FakeController)', () => {
     await expect(lastReply(page).locator('.t2v-md h2')).toBeVisible();
     await expect(page.getByRole('button', { name: 'Send' })).toBeVisible();
     await lastReply(page).getByRole('link', { name: 'the Slicer docs' }).click();
-    await lastReply(page).getByRole('button', { name: 'Copy' }).click();
+    // exact: the per-code-block "Copy code" button also matches an un-exact 'Copy'.
+    await lastReply(page).getByRole('button', { name: 'Copy', exact: true }).click();
     await expect.poll(() => backend.hostCalls).toEqual([
       { host: 'open_external', value: 'https://slicer.readthedocs.io/en/latest/' },
       { host: 'clipboard_set', value: expect.stringContaining('## Segmentation plan') },
@@ -197,8 +198,10 @@ test.describe('the thread and the composer (FakeController)', () => {
     await page.getByRole('button', { name: 'Stop' }).click(); // denies the waiting approval
     const tool = lastReply(page).locator('.t2v-tool');
     await expect(tool).toHaveAttribute('data-state', 'denied');
-    await expect(tool.locator('.t2v-tool-verb')).toHaveText('Denied');
-    await expect(tool.locator('.t2v-tool-name')).toHaveText('load_sample_data');
+    // "Denied"/"Used" is inline text in the trigger's label, followed by
+    // .t2v-tool-name (a mono chip span, not a plain <b>).
+    await expect(tool.locator('.aui-tool-fallback-trigger')).toHaveText(/^Denied load_sample_data/);
+    await expect(tool.locator('.aui-tool-fallback-trigger .t2v-tool-name')).toHaveText('load_sample_data');
     await tool.locator('.t2v-tool-head').click();
     await expect(tool.locator('.t2v-tool-args')).toHaveText('{\n  "name": "MRHead"\n}');
     await expect(tool.locator('.t2v-tool-result')).toHaveText('Cancelled by the user');
@@ -225,13 +228,13 @@ test.describe('the thread and the composer (FakeController)', () => {
     await page.getByRole('textbox', { name: 'Message' }).fill('a draft never sent');
     await page.evaluate(() => document.querySelector('.t2v-viewport')!.setAttribute('data-kept', 'yes'));
     await account.click();
-    await expect(page.getByRole('heading', { name: 'Sign in' })).toBeVisible();
+    await expect(page.getByRole('heading', { name: 'Welcome to Talk2View' })).toBeVisible();
     await account.click(); // toggles back to the thread
     await expect(page.getByRole('textbox', { name: 'Message' })).toHaveValue('a draft never sent');
     expect(await page.evaluate(() => document.querySelector('.t2v-viewport')?.getAttribute('data-kept'))).toBe('yes');
     // New chat reaches the thread from a view too, not only the toggle above.
     await account.click();
-    await expect(page.getByRole('heading', { name: 'Sign in' })).toBeVisible();
+    await expect(page.getByRole('heading', { name: 'Welcome to Talk2View' })).toBeVisible();
     await page.getByRole('button', { name: 'New chat' }).click();
     await expect(page.getByRole('heading', { name: 'Ask about your scene' })).toBeVisible();
   });
@@ -239,6 +242,37 @@ test.describe('the thread and the composer (FakeController)', () => {
   test('without a token the page says where to open it', async ({ page, backend }) => {
     await page.goto(backend.url.split('#')[0]!);
     await expect(page.getByText('Open this chat from the app it belongs to.')).toBeVisible();
+  });
+
+  test('a turn that ends on tool calls, with no closing reply, stops saying "Working…"', async ({ page, backend }) => {
+    // backend.py's /toolsonly (RecordingController): one tool call lands and sits with the
+    // run still open, then two more land and the run ends without ever adding any text —
+    // the shape _reducer.py's finalize() keeps a trailing segment for (it has steps, even
+    // with no content) rather than drop as it would a truly empty one. Before the fix, the
+    // dots stayed up forever on a message like this: the Empty slot showed them whenever a
+    // message's last part was a tool call, whether or not the turn had actually finished.
+    await page.goto(backend.url);
+    await sendMessage(page, '/toolsonly');
+    const reply = lastReply(page);
+    // While the run is still open, the one finished-so-far tool call is up and the last
+    // message still says it is working.
+    await expect(reply.locator('.t2v-tool')).toHaveCount(1);
+    await expect(reply.locator('.t2v-working')).toBeVisible();
+    // Once the turn ends — three finished tool calls, never any text — nothing says
+    // "Working…" anywhere on the page: no dots, no reserved space, on this message or any
+    // other.
+    await expect(reply.locator('.t2v-tool')).toHaveCount(3);
+    await expect(page.locator('.t2v-working')).toHaveCount(0);
+    // Three adjacent tool calls fold into a "3 tool calls" group (its own spec,
+    // e2e/looks.spec.ts "tool rows"); "Denied"/"Used" is inline in each row's own trigger
+    // label now (followed by .t2v-tool-name, a mono chip span, not a plain <b>).
+    await expect(reply.locator('.aui-tool-fallback-trigger')).toHaveText([
+      /^Used load_sample_data/,
+      /^Used get_scene_context/,
+      /^Used center_views/,
+    ]);
+    // The message is not left as a bare, empty bubble either: it still shows what it did.
+    await expect(reply.locator('.aui-tool-fallback-trigger .t2v-tool-name')).toHaveText(['load_sample_data', 'get_scene_context', 'center_views']);
   });
 });
 
@@ -249,7 +283,7 @@ test.describe('without a host clipboard', () => {
     await page.goto(backend.url);
     await sendMessage(page, 'hello');
     await expect(page.getByRole('button', { name: 'Send' })).toBeVisible();
-    await expect(lastReply(page).getByRole('button', { name: 'Retry' })).toBeVisible();
+    await expect(lastReply(page).getByRole('button', { name: 'Refresh' })).toBeVisible();
     await expect(lastReply(page).getByRole('button', { name: 'Copy' })).toHaveCount(0);
   });
 });
@@ -295,13 +329,17 @@ test.describe('a slow stream', () => {
     await expect(live).not.toContainText('##');
   });
 
-  test('New chat is out of reach while a turn runs', async ({ page, backend }) => {
+  test('New chat stays enabled while a turn runs (thread list on); Stop cancels it', async ({ page, backend }) => {
     await page.goto(backend.url);
     await sendMessage(page, 'hello');
     await expect(page.getByRole('button', { name: 'Stop' })).toBeVisible();
-    // `clear` holds isLoading until the engine session is deleted, so a second New chat
-    // would abandon the first one's run and delete a second session.
-    await expect(page.getByRole('button', { name: 'New chat' })).toBeDisabled();
+    // TS's own New chat is never disabled — threadNew abandons a running
+    // turn the same way a thread switch does (ThreadsState.new_thread/switch both detach,
+    // no cancel), so this page's New chat gets the same rule once a thread list exists
+    // (the default here). The old "disabled while isLoading" guard this test used to
+    // assert is still real, just narrower now: it applies only to newSession, the
+    // no-thread-list path (threads.spec.ts's own "the Chats view with the list off").
+    await expect(page.getByRole('button', { name: 'New chat' })).toBeEnabled();
     await page.getByRole('button', { name: 'Stop' }).click();
     await expect(page.getByRole('button', { name: 'New chat' })).toBeEnabled();
     expect(backend.controllerCalls).toEqual(['send', 'cancel']);
@@ -316,9 +354,8 @@ test.describe('the host theme', () => {
     await expect(page.getByRole('heading', { name: 'Ask about your scene' })).toBeVisible();
     const colours = await page.evaluate(() => {
       const body = getComputedStyle(document.body);
-      const composer = getComputedStyle(document.querySelector('.t2v-composer')!);
-      return { bg: body.backgroundColor, fg: body.color, composer: composer.backgroundColor };
+      return { bg: body.backgroundColor, fg: body.color };
     });
-    expect(colours).toEqual({ bg: 'rgb(2, 28, 37)', fg: 'rgb(242, 240, 236)', composer: 'rgb(10, 42, 53)' });
+    expect(colours).toEqual({ bg: 'rgb(2, 28, 37)', fg: 'rgb(242, 240, 236)' });
   });
 });

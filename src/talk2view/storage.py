@@ -10,7 +10,7 @@ import tempfile
 import threading
 import time
 from pathlib import Path
-from typing import Any, Dict, Optional, Protocol, Union, runtime_checkable
+from typing import Any, Dict, Optional, Protocol, Tuple, Union, runtime_checkable
 
 logger = logging.getLogger("talk2view.storage")
 
@@ -60,15 +60,20 @@ _DIR_MODE = stat.S_IRWXU  # 0700
 
 class _PathState:
     """The lock, cache and load-flag shared by every ``FileStorage`` on one real path, and
-    what is wrong with the file on disk when the next write must move it aside first."""
+    what is wrong with the file on disk when the next write must move it aside first.
 
-    __slots__ = ("lock", "data", "loaded", "unusable")
+    ``stat_key`` is the ``(st_mtime_ns, st_size, st_ino)`` of the bytes ``data`` was last
+    loaded from or written as — ``None`` for "the file did not exist". It is how a cache
+    entry that outlives the write that made it notices a *different* write happened."""
+
+    __slots__ = ("lock", "data", "loaded", "unusable", "stat_key")
 
     def __init__(self) -> None:
         self.lock = threading.Lock()
         self.data: Dict[str, str] = {}
         self.loaded = False
         self.unusable: Optional[str] = None
+        self.stat_key: Optional[Tuple[int, int, int]] = None
 
 
 #: One ``_PathState`` per resolved path, so two ``FileStorage`` instances that name the
@@ -88,6 +93,18 @@ def _state_for(path: Path) -> "_PathState":
             state = _PathState()
             _registry[key] = state
         return state
+
+
+def _stat_key(path: Path) -> Optional[Tuple[int, int, int]]:
+    """This file's identity for cache validation, or ``None`` when it does not exist — a
+    stat of its own, distinct from any real file's key. ``os.replace`` always gives the
+    replaced name a fresh inode, so this changes on every write this class makes, from
+    this instance or any other sharing the path."""
+    try:
+        st = path.stat()
+    except FileNotFoundError:
+        return None
+    return (st.st_mtime_ns, st.st_size, st.st_ino)
 
 
 def _fsync_dir(directory: Path) -> None:
@@ -120,11 +137,17 @@ class FileStorage:
     only; see ``_POSIX_PERMISSIONS``). All calls are serialised by one lock, so threads
     may share an instance.
 
-    The file is read once, on first use; the in-memory dict is the source of truth after
-    that. Two *processes* writing the same file will overwrite each other's keys — give
-    each its own path. Two *instances* in the same process that name the same path (even
-    spelled differently) share that lock and cache, so neither can lose the other's
-    writes.
+    The file is read on first use, and again whenever its ``(mtime, size, inode)`` no
+    longer matches what this cache last loaded or wrote — so a file changed by another
+    process, or by a new ``FileStorage`` opened later in this same process (a relaunched
+    chat's own instance, as ``Runtime._start`` builds one each time), is picked up
+    automatically; nothing here holds a file open or watches it between calls. Two
+    *instances* in the same process that name the same path (even spelled differently)
+    share one lock and one cache, so neither can lose the other's writes. Two *processes*
+    writing at genuinely the same time remain a lost-update race — last writer wins —
+    which is a caller's job to serialise (a single-instance lock such as the 3D Slicer
+    extension's ``ChatLock``); this class only guarantees that a *sequential* handoff, one process's
+    writer finishing before another reads or writes, never loses what was written.
 
     A missing or empty file starts the store empty. A file that exists but cannot be read
     (any ``OSError`` but not-found: a permission error, a Windows sharing violation while
@@ -166,7 +189,7 @@ class FileStorage:
     # ── internals (``self._state.lock`` held) ──
 
     def _load(self) -> Dict[str, str]:
-        if self._state.loaded:
+        if self._state.loaded and _stat_key(self._path) == self._state.stat_key:
             return self._state.data
         try:
             raw = self._path.read_bytes()
@@ -197,6 +220,10 @@ class FileStorage:
         self._state.data = data
         self._state.unusable = unusable
         self._state.loaded = True
+        # Stamped after the read: a write racing this one (another process, outside
+        # this lock) between the stat above and here is rare, and is caught on the very
+        # next call either way — this stamp only needs to describe the bytes just parsed.
+        self._state.stat_key = _stat_key(self._path)
         return data
 
     def _move_aside(self, problem: str) -> None:
@@ -262,3 +289,6 @@ class FileStorage:
             except OSError:
                 pass
             raise
+        # This instance's own write, not just its cache, now matches the file: record it
+        # so this process's next _load skips a stat round-trip's worth of doubt.
+        self._state.stat_key = _stat_key(self._path)

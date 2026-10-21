@@ -5,6 +5,116 @@ based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## Unreleased
 
+### Added
+
+- `T2VAuth.start_anonymous(..., warm=True)`, for a guest started because the end-user's
+  message is on its way: the engine then starts minting the guest's key during the
+  sign-in, and an engine without the field ignores it. `chat()`,
+  `completions()`, `warm_up()` and the chat page's guest start send it; a guest started
+  for a model list, an upload, the voice routes or `ensure_session()` does not.
+- Turn timings (`talk2view.metrics`): `t2v.metrics.on_turn(callback)` hands every
+  `ChatController` turn's `TurnTiming` to the host as it ends: request sent, response
+  headers, first event and first text; per tool call the interrupt, the approval wait,
+  the wait for the host's main thread, the handler's run and the `/resume`; outcome,
+  error type, model and the stream's completion id. No message, reply, argument, result,
+  token or URL is recorded. `ChatController.metrics` is the same hub. The chat page reports
+  its own part (Send to POST, first text op to paint) with the new `metrics` command, for
+  a `send` that carries `timing: true`.
+- `RequestTiming.server_timing`: the engine's `Server-Timing` header on a chat or
+  `/resume` request, parsed into `{metric name: dur ms}` (None when the engine sends
+  none), next to `request_id` (its `X-Request-Id`); both in `as_dict()`.
+  `talk2view.metrics.parse_server_timing()` is the parser.
+- `ChatController.export_conversation()` / `restore_conversation(snapshot)` and
+  `ConversationSnapshot` (TS `exportConversation`/`restoreConversation`): put a
+  conversation aside and back; the next message replays its history into a fresh engine
+  session. `Talk2View.detach_session()` forgets the session without deleting it;
+  `Talk2View.partner_key` is read-only.
+- `talk2view.conversations.ConversationStore`: earlier conversations on the device, the
+  TS `localStorage` shape and caps (50 per identity, 8 identities, 512 KB) over
+  `data_storage`, one bucket per user id.
+- `talk2view.ui.threads.ThreadsState` and the page's Chats view: the `threads` slice and
+  the commands `threadNew`, `threadSwitch`, `threadRename`, `threadDelete`
+  (`ChatFeatures.thread_list`, on by default). New chat keeps the conversation in the
+  list and detaches the engine session; `newSession` still deletes it.
+- `ChatController.follow_identity(callback)` and `exchange_conversation(snapshot, *,
+  epoch, carry=None)`, with `talk2view.IdentityChange`: a list of
+  conversations hears each change of signed-in user with the conversation it took off
+  the screen, exported in the same locked step, and swaps the conversation on screen
+  without a gap in which a message could land unrecorded. `FakeController` has both.
+- `ChatController.on("conversationReplaced", cb)`: a conversation was just put on
+  screen, replacing whatever was there, whichever of `restore_conversation` or a
+  snapshot-carrying `exchange_conversation` did it — not raised for an export-only
+  `exchange_conversation(None, ...)` or one refused for a stale `epoch`. For a host
+  that needs to react to any switch without overriding both methods itself.
+  `FakeController` has it too.
+
+### Changed
+
+- `talk2view.ui` keeps a list of conversations by default (`ChatFeatures(thread_list=True)`,
+  as the TypeScript `<Talk2ViewChat>` does). A host that upgrades without opting out: at
+  `UIServer.start()` the controller gets the newest stored conversation back when it has
+  none on screen; each reply is written, 500 ms after it settles, into the `Talk2View`'s
+  `data_storage` under `t2v_chat_conversations_v1:<partner key>` (up to 512 KB per
+  partner key, one bucket per signed-in user, guests included). With the default
+  `data_storage` that is the token store, so a `FileStorage` there rewrites the token
+  file too: give `Talk2View(data_storage=...)` a store of its own. Call
+  `UIServer.stop()` before quitting; an interpreter exit without it still writes the
+  last change. `ChatFeatures(thread_list=False)` turns all of this off. On read, a
+  stored conversation's title is cut to `MAX_STORED_TITLE` (200, `threadRename`'s own
+  cap) and its messages to the newest `MAX_STORED_MESSAGES` (5000) — a backstop for a
+  hand-edited or corrupt file, not a shape this SDK's own writes approach.
+- Once `POST /v1/sessions` has answered, a new session's tool schemas and skills are
+  sent together instead of one after the other, so a first turn waits for two round
+  trips instead of three: `setup_ms` went from about 2.1 s to about 1.4 s at the
+  owner's latency. They still follow the create, so a session the engine dropped just
+  before it (an eviction, another client's DELETE) cannot leave the new one without
+  them. The skills' `on_change` listeners can now run on the `t2v-register-skills`
+  thread.
+- `talk2view.ui`: a guest started by the page (`startAnonymous`, sent just before the
+  first `send`) has its key warmed at once (`warm_up()`), so the key's mint runs while
+  the turn sets up its session instead of on the turn's first request.
+- A turn's streams now share one connection to the engine. A stream that stopped at
+  `[DONE]` or at a client tool's interrupt used to be closed before the end of its body
+  was read, so it could not be pooled, and every `/resume` paid a new TCP + TLS
+  handshake (about 0.5 s at the owner's latency). The rest of the body is now read
+  (bounded: 1 s, 64 KiB) and the connection pooled only after the stream's cancel has
+  let go of it. A cancelled stream's connection is still dropped, never pooled
+  half-read.
+- An idle connection is kept for 300 s instead of httpx's 5 s, so the first request
+  after a user's think time reuses it too, and every connection sends TCP keepalives
+  (first probe after 60 s, then every 10 s, 3 tries; the options a platform refuses
+  are left out). A connection a NAT or firewall dropped silently is then discarded
+  instead of reused.
+- Chat streams ask for an uncompressed body (`Accept-Encoding: identity`).
+- With a proxy configured (`HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`, or the system's
+  settings, as httpx reads them), the client keeps httpx's default transports so the
+  proxy is still used: those connections get the 300 s expiry but no TCP keepalives.
+- The chat page's theme tokens are now the TypeScript chat's names under `--t2v-`
+  (`--t2v-background`, `--t2v-foreground`, `--t2v-primary`, `--t2v-muted`,
+  `--t2v-muted-foreground`, `--t2v-border`, `--t2v-destructive`, `--t2v-radius`, the
+  composer's three, and the brand hexes `--t2v-teal` … `--t2v-amber`), with the same
+  values, light and dark. The page's earlier names (`--t2v-bg`, `--t2v-fg`,
+  `--t2v-surface`, `--t2v-line`, `--t2v-danger`, …) are gone: a host `Theme` that sent
+  them now sends nothing the page reads. `--t2v-muted` changed meaning: it is a
+  surface (the user's bubble), and `--t2v-muted-foreground` is the quiet text colour.
+- The chat page now uses the TypeScript chat's look: header, welcome heading, message
+  bubbles, composer, tool rows, the approval and error cards, code blocks and the reply's
+  copy/refresh bar all changed shape and spacing to match. A host embedding this page
+  will see the restyle without any code change on their side.
+
+### Fixed
+
+- `FileStorage` re-reads its file when it has changed since this instance last looked
+  (its `(mtime, size, inode)`), instead of trusting its first read for the rest of the
+  process. A relaunched app's own new `FileStorage` on the same path — or another
+  process's write, read after it finished — used to be invisible, and a write from the
+  stale copy could erase what that other write added. Two processes writing at
+  genuinely the same instant remain a lost-update race for a caller to serialise (a
+  single-instance lock); this only fixes the *sequential* case. On a filesystem with
+  second-level mtime and no usable inode (FAT/exFAT) a same-size rewrite within that
+  window could still be missed — not reachable through this class's own atomic writes,
+  only a hand edit made in place.
+
 ## [0.3.0] - 2026-10-21
 
 The first release of the SDK on PyPI. The earlier `talk2view` uploads, 0.2.0b1 and

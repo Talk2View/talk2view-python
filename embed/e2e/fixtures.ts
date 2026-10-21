@@ -33,16 +33,24 @@ export interface Backend {
    * second opener click the controller refused — is visible only here.
    */
   controllerCalls: string[];
+  /** Every turn timing the server delivered (account mode): `TurnTiming.as_dict()`. */
+  turns: Array<Record<string, unknown>>;
+  /** Every `POST /v1/audio/transcriptions` the account engine answered (account mode),
+   * in order: `{model, filename, content_type, size, user, language?}`. */
+  transcriptions: Array<Record<string, unknown>>;
   /** Send backend.py one control line (its `controls`), such as `attachments-off`. */
   control(line: string): void;
 }
 
-/** One line of backend.py's output: the URL, a host call, or a controller call. */
+/** One line of backend.py's output: the URL, a host call, a controller call, a turn timing
+ * or a transcription. */
 interface BackendRecord {
   url?: string;
   host?: HostCall['host'];
   value?: string;
   controller?: string;
+  turn?: Record<string, unknown>;
+  transcription?: Record<string, unknown>;
 }
 
 /** How much of backend.py's stderr a failed test keeps: its last lines, bounded both ways. */
@@ -105,6 +113,8 @@ export const test = base.extend<{ backendArgs: string[]; backend: Backend }>({
 
     const hostCalls: HostCall[] = [];
     const controllerCalls: string[] = [];
+    const turns: Array<Record<string, unknown>> = [];
+    const transcriptions: Array<Record<string, unknown>> = [];
     const url = await new Promise<string>((resolve, reject) => {
       const timer = setTimeout(() => reject(new Error('backend.py printed no URL in 30 s.\n' + log.report())), 30000);
       void closed.then(() => {
@@ -125,10 +135,14 @@ export const test = base.extend<{ backendArgs: string[]; backend: Backend }>({
           hostCalls.push({ host: record.host, value: String(record.value) });
         } else if (record.controller) {
           controllerCalls.push(record.controller);
+        } else if (record.turn) {
+          turns.push(record.turn);
+        } else if (record.transcription) {
+          transcriptions.push(record.transcription);
         }
       });
     });
-    await use({ url, hostCalls, controllerCalls, control: (line) => void child.stdin!.write(line + '\n') });
+    await use({ url, hostCalls, controllerCalls, turns, transcriptions, control: (line) => void child.stdin!.write(line + '\n') });
 
     tearingDown = true;
     child.stdin!.end(); // backend.py stops when stdin closes
@@ -150,8 +164,16 @@ export const test = base.extend<{ backendArgs: string[]; backend: Backend }>({
 
 export { expect };
 
-/** Type into the composer and press Enter, as a person would. */
+/**
+ * Type into the composer and press Enter, as a person would. Waits for Send first
+ * (Composer.tsx renders it only while `!thread.isRunning`, Stop otherwise): a call right
+ * as an earlier turn is ending can otherwise race the composer's re-enable, where
+ * assistant-ui's own Enter handler skips `preventDefault()` while still `isRunning` and
+ * inserts a newline instead of submitting (reproduced at
+ * roughly 13% of runs of one spec before this wait was added).
+ */
 export async function sendMessage(page: Page, text: string): Promise<void> {
+  await expect(page.getByRole('button', { name: 'Send' })).toBeVisible();
   const input = page.getByRole('textbox', { name: 'Message' });
   await input.fill(text);
   await input.press('Enter');
@@ -212,6 +234,24 @@ export async function postToServer(page: Page, url: string, body: Record<string,
     data: body,
   });
   expect(res.status()).toBe(202);
+}
+
+/**
+ * Fill the Account view's sign-in form and press Sign in (the view must already be open).
+ * Moved from account.spec.ts, whose tests also sign in with a wrong password.
+ */
+export async function fillSignIn(page: Page, email: string, password: string): Promise<void> {
+  await page.getByLabel('Email').fill(email);
+  await page.getByLabel('Password').fill(password);
+  await page.getByRole('button', { name: 'Sign in', exact: true }).click();
+}
+
+/** From the thread: open Account, sign in as ana@example.com, and wait to be back on the
+ * thread (account mode). Moved from skills.spec.ts, shared with its "asking the assistant". */
+export async function signIn(page: Page): Promise<void> {
+  await page.getByRole('button', { name: 'Account' }).click();
+  await fillSignIn(page, 'ana@example.com', 'pw');
+  await expect(page.getByRole('heading', { name: 'Ask about your scene' })).toBeVisible();
 }
 
 /** The newest assistant message. */

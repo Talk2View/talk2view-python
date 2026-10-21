@@ -14,10 +14,13 @@ import re
 import threading
 import webbrowser
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, Literal, Mapping, Optional, Protocol
+from typing import TYPE_CHECKING, Any, Callable, Dict, Literal, Mapping, Optional, Protocol
 
 from ..dispatch import QueueDispatcher
 from ..storage import TokenStorage
+
+if TYPE_CHECKING:
+    from ..audio import AudioCapture
 
 __all__ = ["GenericHost", "HostAdapter", "Theme"]
 
@@ -31,8 +34,8 @@ class Theme:
     """The host's look, pushed to the page (``theme`` slice).
 
     ``tokens`` maps ``--t2v-*`` CSS custom properties to values, e.g.
-    ``{"--t2v-bg": "#F2F0EC"}``. Anything else is refused here (``ValueError``), so a host
-    can never hand the page a property outside the chat's own namespace.
+    ``{"--t2v-background": "#F2F0EC"}``. Anything else is refused here (``ValueError``), so
+    a host can never hand the page a property outside the chat's own namespace.
     """
 
     mode: Literal["light", "dark"]
@@ -82,7 +85,13 @@ class HostAdapter(Protocol):
 
     def storage(self) -> Optional[TokenStorage]: ...
 
-    def audio(self) -> Any: ...  # reserved: an AudioCapture, or None
+    def audio(self) -> Optional["AudioCapture"]:
+        """A microphone the chat may record dictation with (``talk2view.audio``), or None:
+        the page then shows no mic button. Called once, synchronously, from
+        ``UIServer.__init__`` -- whatever thread builds the server, often the host's main
+        thread, before ``AppState`` or ``Dictation`` exist to record the answer -- so this
+        must return quickly: a device probe or an import that can be slow belongs in a
+        module-level cache or a one-time init the host runs earlier, not inline here."""
 
 
 class GenericHost:
@@ -154,5 +163,5 @@ class GenericHost:
     def storage(self) -> Optional[TokenStorage]:
         return self._storage
 
-    def audio(self) -> Any:
+    def audio(self) -> Optional["AudioCapture"]:
         return None

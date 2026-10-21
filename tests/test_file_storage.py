@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 import os
 import stat
+import subprocess
+import sys
 import threading
 from pathlib import Path
 
@@ -211,6 +213,44 @@ def test_two_instances_on_the_same_path_lose_nothing_under_concurrency(tmp_path:
     for prefix in ("a", "b"):
         for i in range(per_instance):
             assert fresh.get("{}_{}".format(prefix, i)) == str(i)
+
+
+def test_a_new_instance_sees_a_write_made_by_another_process(tmp_path: Path) -> None:
+    """The process-wide cache (``_registry``, keyed by resolved path, never evicted) must
+    not survive past what the file actually says. Two OS processes, in sequence (never
+    concurrently): this one writes, a child process writes more, then a brand-new
+    ``FileStorage`` in THIS process reads and writes. Before the stat-validated cache
+    the second instance still saw the first instance's
+    stale, already-``loaded`` data — a relaunch of a long-lived app losing every key
+    another process had written since (the 3D Slicer extension's ``conversations.json``, alternating
+    with another Slicer window on the same machine, is exactly this shape)."""
+    path = tmp_path / "auth.json"
+    FileStorage(path).set("k", "A1")  # loads and caches this process's _PathState
+
+    subprocess.run(  # noqa: S603 — fixed interpreter and inline script, no shell
+        [
+            sys.executable,
+            "-c",
+            "import sys\n"
+            "from talk2view.storage import FileStorage\n"
+            "f = FileStorage(sys.argv[1])\n"
+            "f.set('k', 'B2')\n"
+            "f.set('b', 'B1')\n",
+            str(path),
+        ],
+        check=True,
+        timeout=30,
+    )
+
+    # A brand-new instance, but the SAME process as the first FileStorage above, so it
+    # shares that _PathState — already loaded, before the subprocess ever ran.
+    a2 = FileStorage(path)
+    assert a2.get("k") == "B2"  # not the stale "A1" a never-evicted cache would remember
+    assert a2.get("b") == "B1"
+
+    a2.set("x", "A3")
+    on_disk = json.loads(path.read_text(encoding="utf-8"))
+    assert on_disk == {"k": "B2", "b": "B1", "x": "A3"}  # B's keys survive A's write
 
 
 def test_a_dotdot_spelling_of_the_same_path_shares_state(tmp_path: Path) -> None:

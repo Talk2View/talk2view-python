@@ -185,8 +185,10 @@ class JudgeTest(unittest.TestCase):
             probe(record, probe_id)["status"] = "FAIL"
             one_problem(self, record, "probe FAIL: " + probe_id)
         record = good_record()
-        record["page"]["probes"] = [p for p in record["page"]["probes"] if p["id"] != "css:sticky"]
-        one_problem(self, record, "probe missing from the results: css:sticky")
+        record["page"]["probes"] = [
+            p for p in record["page"]["probes"] if p["id"] != "css:composer-row"
+        ]
+        one_problem(self, record, "probe missing from the results: css:composer-row")
         record = good_record()
         record["page"]["probes"] = [
             p for p in record["page"]["probes"] if not p["id"].startswith("api:")
@@ -253,8 +255,8 @@ class JudgeTest(unittest.TestCase):
     def test_a_required_id_must_pass_not_just_be_present(self):
         for status in ("INFO", "SKIP", None):
             record = good_record()
-            probe(record, "css:sticky")["status"] = status
-            one_problem(self, record, "required probe is not PASS: css:sticky")
+            probe(record, "css:composer-row")["status"] = status
+            one_problem(self, record, "required probe is not PASS: css:composer-row")
             record = good_record()
             step(record, "auto:deny")["status"] = status
             one_problem(self, record, "scripted step is not PASS: auto:deny")

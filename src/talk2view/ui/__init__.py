@@ -9,20 +9,24 @@ Nothing in ``talk2view`` imports this package: it is opt-in.
 from __future__ import annotations
 
 from .app_state import AppState
+from .dictation import Dictation
 from .host import GenericHost, HostAdapter, Theme
 from .options import ChatFeatures, ChatOptions, ChatWelcome, ToolPresentation
 from .server import UIServer
 from .static import StaticAssetsMissingError
+from .threads import ThreadsState
 
 __all__ = [
     "AppState",
     "ChatFeatures",
     "ChatOptions",
     "ChatWelcome",
+    "Dictation",
     "ToolPresentation",
     "GenericHost",
     "HostAdapter",
     "StaticAssetsMissingError",
     "Theme",
+    "ThreadsState",
     "UIServer",
 ]

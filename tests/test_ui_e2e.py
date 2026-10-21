@@ -119,6 +119,11 @@ def test_the_real_controller_behind_the_ui_server(account_engine: AccountEngine)
         )
         assert result("o")["ok"] is True
 
+        # The thread list follows the sign-out on its own worker, after logout() returns:
+        # let it finish (and write what the debounce holds, so nothing more is published),
+        # then wait for the page to reach the hub before comparing the two.
+        assert server._threads is not None and server._threads._settle(flush=True)
+        assert page.wait_until(lambda s: s == server._hub.snapshot()["state"])
         state = page.state()
         assert page.error is None
         assert state == server._hub.snapshot()["state"]
@@ -232,6 +237,9 @@ def test_nothing_of_the_previous_account_survives_a_sign_out_or_a_switch(
             and s["messages"] == []
         )
         account_engine.release_slow.set()  # ana's abandoned stream ends: nothing more lands
+        # The thread list follows the sign-in on its own worker, a moment after the chat
+        # empties: once it has, no slice holds ana's titles either.
+        assert server._threads is not None and server._threads._settle(flush=True)
         traces = [
             "ANA-PRIVATE-NOTE", "partial", "ana@example.com", "user-ana", "ana-scan.png",
             scan["id"], "ana-login", "ana-send", "ana-logout",

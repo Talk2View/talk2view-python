@@ -178,6 +178,14 @@ Explicitly create a new session. Returns a `T2VSession`.
 
 Delete the current session and reset conversation history.
 
+#### `t2v.detach_session()`
+
+Forget the current session without deleting it, so the next `chat()` opens a
+fresh one. Unlike `clear_session()`, no `DELETE` goes out: the conversation
+this session belongs to may be one you switch back to, and its turn may still
+be finishing. `t2v.partner_key` is the partner key `Talk2View` was built with
+(read-only).
+
 #### `t2v.upload_attachment(file, filename=None, mime_type=None)`
 
 Upload an image or PDF and pass the returned `Attachment` to
@@ -425,7 +433,8 @@ t2v.tools.handle("my_tool", my_handler_function)
 
 Tools are session-scoped on the engine. `create_session()` re-sends the
 registered schemas, so a new session — including one created by recovery —
-keeps your tools.
+keeps your tools. Once the create has answered, the schemas and the enabled
+skills are sent at the same time, on threads of their own.
 
 Arguments are validated against the registered schema before a handler runs:
 `None` and empty-object placeholders are stripped, string enums are matched
@@ -544,7 +553,8 @@ waits for it and uses its result.
 **Listener callbacks are not auto-marshalled.** `on_auth_state_change`,
 `on_anonymous_unavailable` and `t2v.skills.on_change` can run on any SDK-owned
 thread — a `ChatController` worker, the `t2v-warm-up` daemon, a skills debounce
-timer — not just the thread that registered them. Unlike tool handlers and
+timer, the `t2v-register-skills` and `t2v-register-tools` threads a new session
+re-registers on — not just the thread that registered them. Unlike tool handlers and
 `deliver_on_main` subscribers, these do not go through the dispatcher
 automatically: do any UI work from inside them with `run_on_main(dispatcher, fn)`.
 
@@ -604,6 +614,26 @@ turn would replay, a pending approval and `threadId` are emptied. A kept
 conversation is replayed into the new identity's session on its next turn —
 the demo-to-signup path keeps the demo's chat. No identity ever inherits
 another's "always allow". The send that triggers an anonymous start carries on.
+
+**A list of conversations kept per end-user** (`talk2view.ui.ThreadsState` is
+one) hears identity changes with `follow_identity(callback)` instead of
+reading `t2v.auth` itself: it returns the identity now, and every later change
+reaches `callback` once, in order, as an `IdentityChange` — `epoch`, `user_id`,
+`anonymous`, and `forgotten`, the conversation the change dropped from the
+screen (`None` when one was kept), exported in the same locked step that
+dropped it, so nothing that reached the conversation before the drop is
+missing from it. `exchange_conversation(snapshot, *, epoch, carry=None)`
+exports the outgoing conversation and restores `snapshot` in one locked step
+— `epoch` must be the identity `follow_identity` last reported, or nothing
+happens and `None` comes back (the identity has already moved on, and the
+change reaches `callback` instead); `snapshot=None` only exports. `carry`
+decides whether the conversation now on screen may follow the end-user across
+a sign-in out of a guest session or out of none (`None` leaves it as it is).
+Anything that needs to know a conversation was just replaced, whichever of
+`restore_conversation` or `exchange_conversation` did it — a screenshot or file
+queue that must not land in the thread just switched away from, say — hears
+`on("conversationReplaced", cb)` (below) once for either, rather than overriding
+both methods itself.
 
 #### State: `snapshot()` and `subscribe()`
 
@@ -682,9 +712,12 @@ run.
 | `edit(message_id, text)` | Drops that user message and everything after it, then sends `text`. | `ValueError` (no *user* message has that id), `ControllerBusyError`, `ControllerClosedError` |
 | `clear()` | Resets the conversation and deletes the engine session on the executor. Allowed while busy: a run in flight is abandoned and a pending approval dropped. `isLoading` stays `True` until the DELETE returns. | `ControllerClosedError` |
 | `clear_error()` | Sets `error` back to `None`. | — |
+| `export_conversation()` | Everything needed to put this conversation back later — the messages, the replay history, `threadId`, `marks` — as a `ConversationSnapshot`. Take one before switching away. | — |
+| `restore_conversation(snapshot)` | Puts `snapshot` on screen, replacing whatever is there. Allowed while busy, like `clear()`: a run in flight is abandoned. The engine session is detached, not deleted. A `snapshot` that fails validation (a bad message id, an attachment shaped wrong) is a no-op, logged. | `ControllerClosedError` |
 | `wait_idle(timeout=None)` | Blocks until no run is active. A pending approval counts as idle: no thread waits on it. Idle can be reported while that approval's paused response is still being closed — the run is over, but a `t2v-chat` thread may take a moment more to unwind. | — |
 | `close()` | Abandons any run (its cancel token is cancelled), drops subscribers and listeners. Does not close the `Talk2View`. | — |
 | `on("demoLimitReached", cb)` | A one-shot notice, not chat state: the anonymous demo budget ran out (`DEMO_LIMIT_REACHED`). Returns an unsubscribe. | — |
+| `on("conversationReplaced", cb)` | A conversation was just put on screen, replacing whatever was there — `restore_conversation` or a snapshot-carrying `exchange_conversation`, either one; not raised for an export-only `exchange_conversation(None, ...)` or one refused for a stale `epoch`, since nothing was replaced. For a host that needs to know a switch happened without caring which method caused it — the 3D Slicer extension's screenshot follow-up guard drops what it was queued for on this, not by overriding either method. Returns an unsubscribe. | — |
 
 An approval never parks a thread: the worker returns with `pendingApproval`
 set, `isLoading` `False` and the assistant message still `isStreaming` (so the
@@ -757,6 +790,49 @@ controller.subscribe(redraw_panel, deliver_on_main=True)
 For any other host, use `QueueDispatcher` and drain it from your own loop with
 `pump()`, or `TimerPumpDispatcher(start_timer)` with a timer of your own.
 
+#### Turn timings (`t2v.metrics`)
+
+When a chat "feels slow", `t2v.metrics` says which step is: every turn a
+`ChatController` runs ends in one `TurnTiming`, handed to each `on_turn`
+listener. Marks are milliseconds since the turn started.
+
+```python
+import json
+
+def log_turn(timing):
+    print(json.dumps(timing.as_dict()))       # plain data, JSON-ready
+    print(timing.time_to_first_text_ms, timing.engine_wait_ms)
+    for tool in timing.tools:
+        print(tool.name, tool.main_thread_wait_ms, tool.run_ms, tool.resume_ms)
+
+off = t2v.metrics.on_turn(log_turn)           # off() stops it
+t2v.metrics.recent()                          # the last 50 turns
+```
+
+- `request`: the turn's POST: `sent_ms`, `headers_ms` (TTFB), `first_event_ms`,
+  `first_text_ms`; `setup_ms` is the time before it was sent (session, sign-in,
+  skills) and `engine_wait_ms` the engine and the model up to the first event.
+- `tools`: per call, the interrupt, `approval_wait_ms` (the end-user's time, left
+  out of `total_ms`), `main_thread_wait_ms` (the handler posted to your main thread
+  until it started there), `run_ms`, and the `/resume` (`resume_ms`, sent to its
+  first event). `before_ms + main_thread_wait_ms + run_ms + after_ms + resume_ms`
+  is `total_ms`.
+- `outcome` (`done`, `error`, `cancelled`, `abandoned`), `error_type`, `model`,
+  counts, and `request.completion_id` (the stream's `chatcmpl-...` id) to find the
+  turn in the engine's logs.
+- The engine's own account of each streamed request (the turn's, and each tool's
+  `resume`), when it sends one: `request_id` (its `X-Request-Id` header) and
+  `server_timing`, its `Server-Timing` header as `{metric name: dur ms}`, or None.
+  The metric names are the engine's; only names and durations are kept.
+- `ui`: the chat page's part, for a turn sent from it (see the UI server).
+
+Nothing the end-user or the model said is kept: no message or reply text, no tool
+arguments or results, no tokens, no URLs. A listener runs on the thread that ends
+the turn, never under a controller lock: usually the chat worker, but a turn that
+`clear()`, a sign-out or `close()` dropped ends on the caller's thread, which can
+be your main thread. One that raises is logged and ignored. Keep it quick, and
+post UI work to your main thread.
+
 The controller is the model behind the SDK's own chat UI: the localhost UI
 server (`talk2view.ui`, below) serves the bundled chat page and forwards the
 controller's state over SSE, so a host that embeds that page never touches
@@ -788,7 +864,7 @@ A host with a toolkit writes its own `HostAdapter` (`post`, `is_main_thread`,
 `show`, `open_external`, `clipboard_set`, `theme`, `storage`, `audio`, plus
 `supports_clipboard = True` when its clipboard works): 3D Slicer's adapter
 shows the URL in a `qSlicerWebWidget` and drains `post()` with a `qt.QTimer`.
-`server.set_theme(Theme(mode="dark", tokens={"--t2v-bg": "#021C25"}))`
+`server.set_theme(Theme(mode="dark", tokens={"--t2v-background": "#021C25"}))`
 restyles the page live. `UIServer(..., on_skills_list=rescan)` lets the host
 rescan its skill folders when the page opens the skills list.
 
@@ -825,6 +901,22 @@ session behind the page's sign-in gate. `UIServer` also raises `ValueError` if
 with none, such as `FakeController`, plus an `app=` over a real `Talk2View` is
 fine). A host that passes its own `app=AppState(...)` gives the options to
 that `AppState` instead.
+
+**Chat history.** With `ChatFeatures(thread_list=True)`, the default (as in
+the TypeScript `<Talk2ViewChat>`), the page keeps earlier conversations on
+this device: New chat, switch, rename and delete. They are stored in the
+`Talk2View`'s `data_storage` under `t2v_chat_conversations_v1:<partner key>`,
+one bucket per signed-in user (guests included), up to 512 KB in all, and
+written 500 ms after a reply settles. At `start()`, a controller with nothing
+on screen gets the newest stored conversation back. `data_storage` defaults to
+the token store, so give `Talk2View(data_storage=FileStorage(...))` a file of
+its own rather than rewrite the tokens on every reply. Call `server.stop()`
+before quitting: it writes what is pending (an interpreter exit without it
+does too). `ChatFeatures(thread_list=False)` turns the list and the writes off.
+On read, a stored conversation's title is cut to 200 characters (the same cap
+`threadRename` itself is held to) and its messages to the newest 5000 — a
+backstop for a hand-edited or corrupt file, not a shape this SDK's own writes
+approach at any realistic size.
 
 **Guests.** The page's `limits` slice says when a guest was turned away: the
 demo allowance ran out, or the engine refused a guest session (with its
@@ -865,6 +957,13 @@ engine rejects signs out too), start guest sessions and change preferences,
 so the host's own `t2v.auth.on_auth_state_change` and
 `t2v.preferences.on_change` listeners can run on them too: a toolkit host
 marshals their UI work to its main thread.
+
+**Turn timings.** The page sends `send` with `timing: true` and, once that
+turn is over, one `metrics` command: Send to the command's POST, and the first
+text op to it painted. The server adds how long the command waited for the
+router and how long the first text took to reach the page, and holds that
+turn's `TurnTiming` until the report arrives (three seconds at most), so
+`t2v.metrics` listeners see the whole path in `timing.ui`.
 
 **The page.** The chat page is built from `embed/` and shipped in
 the wheel. A git checkout does not have it until it is built: `UIServer`
@@ -951,15 +1050,27 @@ A `TokenStorage` that keeps one JSON object in a file only the user can read
 (`0600`; a directory `FileStorage` has to create is made `0700`, and an existing one is
 left as it is; on Windows the permission calls are skipped and the file inherits the
 profile's ACL). Writes are atomic — temp file, `fsync`, `os.replace` — and
-thread-safe. Two `FileStorage` instances on the same path in one process share the same
-lock and cache; two separate *processes* writing the same file still overwrite each
-other's keys, so give each process its own path.
+thread-safe. Two `FileStorage` instances on the same path in one process (even spelled
+differently — a symlink, a `..`) share the same lock and cache, so neither can lose the
+other's writes.
 
-**One process per token file.** A `FileStorage` reads its file once and then
-trusts its memory. So a sign-out in one process is not seen by another process
-using the same file, a later write there can bring the cleared tokens back, and
-both would spend the same rotating refresh token. The TypeScript SDK's
-cross-tab sign-out has no desktop counterpart yet.
+**Re-reads when the file changes underneath it.** Each call checks the file's
+`(mtime, size, inode)` against what this instance's cache last loaded or wrote, and
+re-reads when it differs — so a *new* `FileStorage` opened later in the same process (a
+relaunched chat's own instance) or a file changed by *another process since this one last
+looked* picks up that change automatically, instead of serving a stale copy forever. Two
+processes writing at genuinely the same instant remain a lost-update race — last writer
+wins — which is a caller's job to serialise (a single-instance lock, such as a file lock
+of your own); this class only guarantees that a *sequential* handoff, one process's writer
+finishing before another reads or writes, never loses what was written. (Before this
+became automatic, a sign-out in one process was invisible to another using the same file
+until it reopened the file itself; the TypeScript SDK's cross-tab sign-out still has no
+desktop counterpart.) On a filesystem with second-level mtime resolution and no usable
+inode (FAT/exFAT, including a USB drive or an old Windows profile — not a concern on
+APFS, ext4, NTFS or a normal Windows install) a same-size rewrite within that one-second
+window could be missed; nothing in this class's own writes can produce that on its own,
+since `os.replace` always gives the file a fresh identity, only a hand edit made in place
+outside it could.
 
 A file that exists but cannot be read right now (a permission error, a Windows sharing
 violation while an antivirus scans it) makes `get`/`set`/`delete` raise that `OSError`,

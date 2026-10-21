@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { PageStore, resultOf } from '../src/store';
+import { NOTICE_ACTION_MS, PAINT_WAIT_MS, PageStore, resultOf } from '../src/store';
 import { EMPTY_STATE, type PageState } from '../src/wire';
 import { FakeServer, json, settle, sse } from './fake-server';
 
@@ -117,7 +117,7 @@ describe('PageStore', () => {
     await settle();
     expect(server.commands()).toEqual([
       { id: 'c-1', type: 'startAnonymous' },
-      { id: 'c-2', type: 'send', text: 'hello', attachmentIds: [] },
+      { id: 'c-2', type: 'send', text: 'hello', attachmentIds: [], timing: true },
     ]);
   });
 
@@ -385,6 +385,74 @@ describe('PageStore', () => {
     expect(store.get().notice).toBeNull();
   });
 
+  it('a notice can carry one action (Undo) that lasts NOTICE_ACTION_MS, then the notice goes', async () => {
+    vi.useFakeTimers();
+    try {
+      const onClick = vi.fn();
+      store.showNotice('Deleted a-b.', { label: 'Undo', onClick });
+      flushes.splice(0).forEach((flush) => flush());
+      expect(store.get().notice).toBe('Deleted a-b.');
+      expect(store.get().noticeAction?.label).toBe('Undo');
+      store.get().noticeAction!.onClick();
+      expect(onClick).toHaveBeenCalledTimes(1);
+      vi.advanceTimersByTime(NOTICE_ACTION_MS - 1);
+      flushes.splice(0).forEach((flush) => flush());
+      expect(store.get().notice).toBe('Deleted a-b.');
+      vi.advanceTimersByTime(1);
+      flushes.splice(0).forEach((flush) => flush());
+      expect(store.get().notice).toBeNull();
+      expect(store.get().noticeAction).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('a later notice replaces the action, and its expiry never clears that later notice', async () => {
+    vi.useFakeTimers();
+    try {
+      store.showNotice('Deleted a-b.', { label: 'Undo', onClick: () => undefined });
+      store.showNotice('Something else.');
+      flushes.splice(0).forEach((flush) => flush());
+      expect(store.get().noticeAction).toBeNull();
+      vi.advanceTimersByTime(NOTICE_ACTION_MS);
+      flushes.splice(0).forEach((flush) => flush());
+      expect(store.get().notice).toBe('Something else.');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('a failed result replaces an Undo notice without keeping its action', async () => {
+    store.start();
+    await settle();
+    await deliver(sse('snapshot', { seq: 1, state: state() }));
+    store.showNotice('Deleted a-b.', { label: 'Undo', onClick: () => undefined });
+    store.command({ type: 'selectModel', modelId: 'm-x' }); // c-1
+    const results = [{ id: 'c-1', type: 'selectModel', ok: false, error: { type: 'unknown_model', message: 'Nope.' } }];
+    await deliver(sse('ops', { seq: 2, base: 1, ops: [{ type: 'set', path: ['results'], value: results }] }));
+    expect(store.get().notice).toBe('Nope.');
+    expect(store.get().noticeAction).toBeNull();
+  });
+
+  it('a stale threadSwitch (unknown_thread) refreshes quietly; any other thread failure still shows a notice', async () => {
+    store.start();
+    await settle();
+    await deliver(sse('snapshot', { seq: 1, state: state() }));
+    store.command({ type: 'threadSwitch', threadId: 'gone' }); // c-1: a row the list still
+    // showed for a moment after the server had already dropped it (module doc: "the
+    // threads slice ... can arrive after other slices") — not a real failure.
+    store.command({ type: 'threadRename', threadId: 't-1', title: 'x' }); // c-2: a genuine
+    // failure on a different thread command, to prove this is not a blanket quiet.
+    const results = [
+      { id: 'c-1', type: 'threadSwitch', ok: false, error: { type: 'unknown_thread', message: 'No chat with id gone.' } },
+      { id: 'c-2', type: 'threadRename', ok: false, error: { type: 'unknown_thread', message: 'No chat with id t-1.' } },
+    ];
+    await deliver(sse('ops', { seq: 2, base: 1, ops: [{ type: 'set', path: ['results'], value: [results[0]] }] }));
+    expect(store.get().notice).toBeNull();
+    await deliver(sse('ops', { seq: 3, base: 2, ops: [{ type: 'set', path: ['results'], value: results }] }));
+    expect(store.get().notice).toBe('That chat is gone. Open Chats to pick another.');
+  });
+
   it('clears the notice when the identity changes, but not when signed out becomes a guest', async () => {
     store.start();
     await settle();
@@ -565,6 +633,124 @@ describe('PageStore', () => {
       await settle();
       controller.abort();
       await expect(answer).resolves.toMatchObject({ ok: false, status: 0, type: 'network_error' });
+    });
+  });
+
+  describe('turn timings', () => {
+    let perf: number;
+    let frames: Array<() => void>;
+    const user = { id: 'msg_1_1', role: 'user', content: 'hello', timestamp: 't' };
+    const reply = (content: string) => ({ id: 'msg_2_1', role: 'assistant', content, timestamp: 't', isStreaming: true });
+    const signedIn = state({ auth: { ...ana, oauthPending: null, oauthError: null } });
+
+    beforeEach(() => {
+      perf = 100;
+      frames = [];
+      store = new PageStore('tok', {
+        env: server.env(),
+        schedule: (flush) => flushes.push(flush),
+        newId: () => 'c-' + String(++ids),
+        now: () => clock,
+        perf: () => perf,
+        frame: (fn) => frames.push(fn),
+      });
+    });
+
+    /** Run the animation frames queued so far (not the ones they queue). */
+    function tick(): void {
+      frames.splice(0).forEach((fn) => fn());
+    }
+
+    const metrics = () => server.commands().filter((c) => c.type === 'metrics');
+
+    it('reports Send to POST and the first text to its paint, once the turn is over', async () => {
+      store.start();
+      await settle();
+      await deliver(sse('snapshot', { seq: 1, state: signedIn }));
+      store.send('hello');
+      perf = 104.25; // the POST goes out
+      await settle();
+      expect(server.commands().at(-1)).toMatchObject({ type: 'send', timing: true });
+      await deliver(
+        sse('ops', { seq: 2, base: 1, ops: [{ type: 'set', path: ['messages'], value: [user, reply('')] }, { type: 'set', path: ['isLoading'], value: true }] }),
+      );
+      perf = 900;
+      clock = 1790000000123;
+      await deliver(set(3, 2, ['messages', 1, 'content'], 'Hi'));
+      expect(frames).toHaveLength(1);
+      await deliver(set(4, 3, ['isLoading'], false));
+      expect(metrics()).toEqual([]); // not painted yet
+      perf = 910;
+      tick(); // the frame that renders it
+      expect(metrics()).toEqual([]);
+      perf = 925.5;
+      tick(); // after the paint
+      await settle();
+      expect(metrics()).toEqual([
+        { id: 'c-2', type: 'metrics', messageId: 'msg_1_1', sendToPostMs: 4.3, firstOpToPaintMs: 25.5, firstOpAtMs: 1790000000123 },
+      ]);
+      // One report per turn: later states change nothing.
+      await deliver(set(5, 4, ['error'], null));
+      await new Promise((resolve) => setTimeout(resolve, PAINT_WAIT_MS + 50));
+      expect(metrics()).toHaveLength(1);
+    });
+
+    it('reports a turn with no text at its end, and waits out an approval', async () => {
+      store.start();
+      await settle();
+      await deliver(sse('snapshot', { seq: 1, state: signedIn }));
+      store.send('delete it');
+      await settle();
+      await deliver(
+        sse('ops', { seq: 2, base: 1, ops: [{ type: 'set', path: ['messages'], value: [user, reply('')] }, { type: 'set', path: ['isLoading'], value: true }] }),
+      );
+      const card = { toolCallId: 't', toolName: 'delete_volume', arguments: {}, description: '' };
+      await deliver(
+        sse('ops', { seq: 3, base: 2, ops: [{ type: 'set', path: ['pendingApproval'], value: card }, { type: 'set', path: ['isLoading'], value: false }] }),
+      );
+      expect(metrics()).toEqual([]); // paused, not over
+      await deliver(set(4, 3, ['pendingApproval'], null));
+      await settle();
+      expect(metrics()).toEqual([
+        { id: 'c-2', type: 'metrics', messageId: 'msg_1_1', sendToPostMs: 0, firstOpToPaintMs: null, firstOpAtMs: null },
+      ]);
+      expect(frames).toEqual([]);
+    });
+
+    it('reports without the paint when no frame runs (a hidden web view)', async () => {
+      store.start();
+      await settle();
+      await deliver(sse('snapshot', { seq: 1, state: signedIn }));
+      store.send('hello');
+      await settle();
+      await deliver(
+        sse('ops', { seq: 2, base: 1, ops: [{ type: 'set', path: ['messages'], value: [user, reply('Hi')] }, { type: 'set', path: ['isLoading'], value: false }] }),
+      );
+      expect(metrics()).toEqual([]);
+      await new Promise((resolve) => setTimeout(resolve, PAINT_WAIT_MS + 50));
+      expect(metrics()).toEqual([
+        { id: 'c-2', type: 'metrics', messageId: 'msg_1_1', sendToPostMs: 0, firstOpToPaintMs: null, firstOpAtMs: 0 },
+      ]);
+      tick();
+      tick();
+      await settle();
+      expect(metrics()).toHaveLength(1);
+    });
+
+    it('times nothing before the first snapshot, and ignores the turns it did not send', async () => {
+      store.send('early');
+      await settle();
+      expect(server.commands()).toEqual([{ id: 'c-1', type: 'send', text: 'early', attachmentIds: [] }]);
+      store.start();
+      await settle();
+      await deliver(sse('snapshot', { seq: 1, state: signedIn }));
+      await deliver(
+        sse('ops', { seq: 2, base: 1, ops: [{ type: 'set', path: ['messages'], value: [user, reply('Hi')] }] }),
+      );
+      tick();
+      tick();
+      await settle();
+      expect(metrics()).toEqual([]);
     });
   });
 

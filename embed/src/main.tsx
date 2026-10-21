@@ -6,6 +6,9 @@ import { createRoot } from 'react-dom/client';
 import { PageStore } from './store';
 import { bootstrapToken } from './transport';
 import { App } from './ui/App';
+import { installFocusVisible } from './ui/focusVisible';
+
+installFocusVisible(); // page-global; needed even for the no-token error state below
 
 const root = createRoot(document.getElementById('root')!);
 const token = bootstrapToken();

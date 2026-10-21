@@ -23,7 +23,17 @@ import pytest
 import talk2view.ui.server as ui_server
 import talk2view.ui.testing as ui_testing
 from talk2view import Talk2View
-from talk2view.ui import AppState, GenericHost, StaticAssetsMissingError, Theme, UIServer
+from talk2view.skill_tool import SAVE_SKILL
+from talk2view.storage import MemoryStorage
+from talk2view.ui import (
+    AppState,
+    ChatFeatures,
+    ChatOptions,
+    GenericHost,
+    StaticAssetsMissingError,
+    Theme,
+    UIServer,
+)
 from talk2view.ui.app_state import _identity
 from talk2view.ui.static import BUILD_INSTRUCTIONS
 from talk2view.ui.testing import FakeController
@@ -37,6 +47,21 @@ PNG = b"\x89PNG\r\n\x1a\n" + bytes(range(256))
 
 def inline(job: Callable[[], None]) -> None:
     job()
+
+
+def command_calls(controller: FakeController) -> List[Any]:
+    """``controller.calls``, minus ``ThreadsState``'s own bookkeeping (``follow_identity``
+    and an ``exchange_conversation`` at ``attach()``, another at ``stop()``, and whatever a
+    thread command exchanges): the thread list is on by default, so every server these tests
+    start makes such calls, and they have nothing to do with the command a test is checking
+    never reached the controller."""
+    housekeeping = (
+        "export_conversation",
+        "restore_conversation",
+        "exchange_conversation",
+        "follow_identity",
+    )
+    return [c for c in controller.calls if c[0] not in housekeeping]
 
 
 class Rig:
@@ -241,6 +266,54 @@ def test_a_second_server_cannot_reuse_a_stopped_servers_app_state(t2v: Talk2View
 def test_a_missing_bundle_is_refused_at_construction(tmp_path: Path) -> None:
     with pytest.raises(StaticAssetsMissingError):
         UIServer(FakeController(), GenericHost(), static_dir=tmp_path)
+
+
+def _bare_t2v() -> Talk2View:
+    # No engine behind this: these tests only check what UIServer wires onto
+    # `t2v.tools` at construction time, never a live chat.
+    return Talk2View("pk_test", storage=MemoryStorage(), base_url="http://127.0.0.1:9")
+
+
+def test_save_skill_installed_when_the_store_is_wired(tmp_path: Path) -> None:
+    t2v = _bare_t2v()
+    controller = FakeController(executor=inline)
+    controller.t2v = t2v
+    server = UIServer(controller, GenericHost(), static_dir=STUB, skills_dir=tmp_path)
+    try:
+        assert SAVE_SKILL in t2v.tools._handlers
+        assert t2v.tools._permissions[SAVE_SKILL] is True
+        # No "always allow" for this tool, ever.
+        assert t2v.tools.allows_always(SAVE_SKILL) is False
+    finally:
+        server.stop()
+        t2v.close()
+
+
+def test_save_skill_absent_when_the_skills_feature_is_off(tmp_path: Path) -> None:
+    t2v = _bare_t2v()
+    controller = FakeController(executor=inline)
+    controller.t2v = t2v
+    server = UIServer(
+        controller, GenericHost(), static_dir=STUB, skills_dir=tmp_path,
+        options=ChatOptions(features=ChatFeatures(skills=False)),
+    )
+    try:
+        assert SAVE_SKILL not in t2v.tools._handlers
+    finally:
+        server.stop()
+        t2v.close()
+
+
+def test_save_skill_absent_without_a_skills_dir() -> None:
+    t2v = _bare_t2v()
+    controller = FakeController(executor=inline)
+    controller.t2v = t2v
+    server = UIServer(controller, GenericHost(), static_dir=STUB, skills_dir=None)
+    try:
+        assert SAVE_SKILL not in t2v.tools._handlers
+    finally:
+        server.stop()
+        t2v.close()
 
 
 def test_show_and_set_theme() -> None:
@@ -467,7 +540,7 @@ def test_a_stopped_server_answers_503_on_a_connection_kept_alive_across_stop(
         command_conn.close()
         upload_conn.close()
     assert answers == [(503, "close", "stopped")] * 2
-    assert made.controller.calls == [] and account_engine.uploads == []
+    assert command_calls(made.controller) == [] and account_engine.uploads == []
     assert [record for record in caplog.records if record.levelno >= logging.ERROR] == []
 
 
@@ -557,7 +630,7 @@ def test_ambiguous_framing_is_refused_and_the_connection_closed(
     ).format(start, rig.port, rig.token)
     head += framing.format(both=len(body) + len(second), second=len(second)) + "\r\n"
     assert statuses(raw(rig.port, (head + body + second).encode())) == [status]
-    assert rig.controller.calls == []
+    assert command_calls(rig.controller) == []
 
 
 SECURITY = {"cache-control": "no-store", "x-content-type-options": "nosniff",
@@ -747,7 +820,7 @@ def test_a_full_command_queue_is_503_queue_full_and_keeps_the_connection() -> No
         }})  # the body was read: the connection stays open for the retry
         gate.set()
         assert [made.result(str(i))["ok"] for i in range(2)] == [True, True]
-        assert [name for name, _ in made.controller.calls] == ["cancel", "cancel"]
+        assert [name for name, _ in command_calls(made.controller)] == ["cancel", "cancel"]
     finally:
         gate.set()
         made.server.stop()
@@ -775,7 +848,7 @@ def test_a_router_halted_by_host_code_answers_503_stopped_not_queue_full(
         assert answer == (503, "close", {"ok": False, "error": {
             "type": "stopped", "message": "This chat has stopped.",
         }})
-        assert [name for name, _ in made.controller.calls] == ["clear_error"]
+        assert [name for name, _ in command_calls(made.controller)] == ["clear_error"]
     finally:
         made.server.stop()
 
@@ -809,6 +882,9 @@ def test_a_chat_batch_the_hub_loses_is_recovered_over_the_wire() -> None:
             timeout=5.0,
         ), "the page never recovered the lost batch"
         assert lost and page.error is None
+        # The thread list publishes on its own worker: settle it, then let the page catch up.
+        assert server._threads is not None and server._threads._settle(flush=True)
+        assert page.wait_until(lambda s: s == hub.snapshot()["state"])
         assert page.state() == hub.snapshot()["state"]
         chat = {k: v for k, v in controller.snapshot().items() if k != "seq"}
         assert {k: page.state()[k] for k in chat} == chat
@@ -858,7 +934,7 @@ def test_a_command_body_json_cannot_carry_is_a_bad_request(rig: Rig, body: bytes
     # JSON.parse on the page has no NaN or Infinity, and deep nesting raises RecursionError.
     status, answer = status_and_json(post_closing(rig, "/command", "application/json", body))
     assert (status, answer["error"]["type"]) == (400, "bad_request")
-    assert rig.controller.calls == []
+    assert command_calls(rig.controller) == []
 
 
 def test_a_command_parse_failure_is_500_and_logs_its_type_only(
@@ -1064,7 +1140,7 @@ def test_upload_then_send_with_the_attachment(
         assert account_engine.uploads[0]["data"] == PNG
         made.command(type="send", text="look", attachmentIds=[attachment["id"]], id="s")
         assert made.result("s")["ok"] is True
-        sent = made.controller.calls[-1][1][1]
+        sent = command_calls(made.controller)[-1][1][1]
         assert [a.id for a in sent] == [attachment["id"]]
     finally:
         made.server.stop()
@@ -1134,7 +1210,7 @@ def test_an_attachment_is_sent_only_by_the_account_that_uploaded_it(t2v: Talk2Vi
             "type": "unknown_attachment",
             "message": missing["message"].replace("ghost", attachment_id),
         }
-        assert made.controller.calls == []
+        assert command_calls(made.controller) == []
         t2v.auth.login("ana@example.com", "pw")
         made.command(type="send", text="look", attachmentIds=[attachment_id], id="as-ana")
         assert made.result("as-ana")["ok"] is True
@@ -1337,3 +1413,85 @@ def test_the_testing_launcher_serves_a_page_until_interrupted() -> None:
         if proc.poll() is None:
             proc.kill()
             proc.wait(10)
+
+
+# ── The thread list ──
+
+
+def snapshot_over_http(url: str) -> Dict[str, Any]:
+    """Connect to ``/events`` and read the state off the very first (snapshot) event."""
+    port = int(url.split("://127.0.0.1:", 1)[1].split("/", 1)[0])
+    token = url.split("#t=", 1)[1]
+    conn = http.client.HTTPConnection("127.0.0.1", port, timeout=10)
+    try:
+        conn.request("GET", "/events", headers={"Authorization": "Bearer " + token})
+        resp = conn.getresponse()
+        event = read_data_event(resp)
+        assert event is not None and event["event"] == "snapshot"
+        state: Dict[str, Any] = json.loads(event["data"])["state"]
+        return state
+    finally:
+        conn.close()
+
+
+def test_the_server_serves_a_threads_slice_when_the_list_is_on() -> None:
+    controller = FakeController(executor=inline, reply="ok")
+    host = GenericHost()
+    server = UIServer(controller, host, static_dir=STUB)
+    url = server.start()
+    try:
+        state = snapshot_over_http(url)
+        assert state["threads"]["currentId"]
+        assert state["threads"]["items"][0]["messageCount"] == 0
+    finally:
+        server.stop()
+        controller.close()
+
+
+def test_the_server_serves_no_threads_slice_when_the_list_is_off() -> None:
+    controller = FakeController(executor=inline, reply="ok")
+    server = UIServer(
+        controller, GenericHost(), static_dir=STUB,
+        options=ChatOptions(features=ChatFeatures(thread_list=False)),
+    )
+    url = server.start()
+    try:
+        assert "threads" not in snapshot_over_http(url)
+    finally:
+        server.stop()
+        controller.close()
+
+
+def test_a_thread_list_that_cannot_seed_its_slice_fails_the_start_cleanly(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import talk2view.ui.threads as ui_threads
+
+    monkeypatch.setattr(ui_threads, "COMMAND_TIMEOUT_S", 0.2)
+    controller = FakeController(executor=inline, reply="ok")
+    server = UIServer(controller, GenericHost(), static_dir=STUB)
+    release = threading.Event()
+    real = controller.exchange_conversation
+
+    def stuck(*args: Any, **kwargs: Any) -> Any:
+        assert release.wait(5.0)
+        return real(*args, **kwargs)
+
+    controller.exchange_conversation = stuck  # type: ignore[method-assign]
+    before = set(threading.enumerate())
+    try:
+        with pytest.raises(TimeoutError):
+            server.start()
+        assert ui_workers(before) == []
+        assert server.port == 0
+        with pytest.raises(RuntimeError):
+            server.url
+    finally:
+        release.set()
+    threads = server._threads
+    assert threads is not None and threads._worker is not None
+    threads._worker.join(5.0)
+    assert not threads._worker.is_alive()
+    assert controller._subscribers == []  # the list let go of the controller too
+    server.stop()
+    controller.close()
