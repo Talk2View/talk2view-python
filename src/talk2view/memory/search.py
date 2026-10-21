@@ -100,10 +100,10 @@ CJK_STOP_BIGRAMS: FrozenSet[str] = frozenset(
 #: Reciprocal rank fusion's k (spec §7.2 step 3).
 RRF_K = 60
 #: Pre-selection's floor (D18). A hit goes with a turn only when its fused score is at least
-#: 1 / (60 + 4), rank 4 or better in its list, and at least PRESELECT_MIN_TERMS distinct
-#: units of its text match (``matched_units``, R74): words that a query word begins, and
-#: CJK or Thai terms (R63). The name is the plan's. Module constants, so the ablation can
-#: tune them.
+#: 1 / (60 + 4), rank 4 or better in its list, and at least PRESELECT_MIN_TERMS units of its
+#: text match (``matched_units``, R75): pairs of a query word and a word of the text it
+#: begins, each word in one pair at most, and CJK or Thai terms (R63). The name is the
+#: plan's. Module constants, so the ablation can tune them.
 PRESELECT_FLOOR = 1 / 64
 PRESELECT_MIN_TERMS = 2
 #: A round excerpt's width in code points, ellipses aside (D19).
@@ -238,16 +238,53 @@ def term_frequency(tokens: Sequence[str], term: str) -> int:
     )
 
 
-def matched_units(tokens: Sequence[str], terms: Sequence[str]) -> Set[str]:
-    """The units of a text with the index tokens ``tokens`` that ``terms`` match, as
-    pre-selection's floor counts them (R74): each distinct token that a word, a prefix term,
-    begins, and each phrase, a CJK or Thai bigram or lone character, that occurs (R63). A
-    token is one unit however many words begin it: "kayak" and "kayaking" both begin
-    "kayaking". No word begins a CJK or Thai token, so a token and a phrase never meet."""
-    words = tuple(term for term in terms if not is_phrase(term))
-    units = {token for token in set(tokens) if token.startswith(words)}
-    units.update(term for term in terms if is_phrase(term) and term_frequency(tokens, term))
-    return units
+def matched_units(tokens: Sequence[str], terms: Sequence[str]) -> int:
+    """How many units of a text with the index tokens ``tokens`` match ``terms``, as
+    pre-selection's floor counts them (R75). Each phrase, a CJK or Thai bigram or lone
+    character, that occurs is one unit (R63). The words, prefix terms, make as many units as
+    a maximum matching pairs them with the text's distinct tokens: a word with a token it
+    begins, each word and each token in one pair at most. So "kayak" and "kayaking" in a
+    query make one unit with a text's "kayaking", "kayak" makes one with a text's "kayak"
+    and "kayaking", and "go golfing" makes two with "going golfing". No word begins a CJK or
+    Thai token, so a pair and a phrase never share one."""
+    words = tuple(dict.fromkeys(term for term in terms if not is_phrase(term)))
+    begun = [token for token in dict.fromkeys(tokens) if token.startswith(words)]
+    edges = [[token for token in begun if token.startswith(word)] for word in words]
+    phrases = dict.fromkeys(term for term in terms if is_phrase(term))
+    return _maximum_matching(edges) + sum(1 for term in phrases if term_frequency(tokens, term))
+
+
+def _maximum_matching(edges: Sequence[Sequence[str]]) -> int:
+    """The size of a maximum matching of a bipartite graph whose left vertex ``i`` joins the
+    right vertices ``edges[i]``. Each left vertex in turn looks, breadth first, for a path
+    to a free right vertex that passes from each taken right vertex to its partner; along
+    it, every pair shifts by one, so one more pair is made and none is lost. A left vertex
+    with no such path has none later either, so one turn each makes the matching maximum
+    (Kuhn's algorithm). The ablation may raise the floor above 2, so it is exact, not
+    greedy."""
+    partner: Dict[str, int] = {}  # each taken right vertex's left one
+    paired: Dict[int, str] = {}  # each taken left vertex's right one
+    for start in range(len(edges)):
+        reached: Dict[str, int] = {}  # each right vertex reached, by way of which left one
+        free: Optional[str] = None
+        queue = [start]
+        for left in queue:  # the queue grows as it is read
+            for right in edges[left]:
+                if right in reached:
+                    continue
+                reached[right] = left
+                if right not in partner:
+                    free = right
+                    break
+                queue.append(partner[right])
+            if free is not None:
+                break
+        while free is not None:  # shift the pairs along the path, back to ``start``
+            left = reached[free]
+            before = paired.get(left)
+            partner[free], paired[left] = left, free
+            free = before
+    return len(paired)
 
 
 def _counter(term: str) -> Callable[[str], int]:
@@ -382,10 +419,10 @@ def fuse(
 
 def strong_match(tokens: Sequence[str], terms: Sequence[str]) -> bool:
     """Whether a text with the index tokens ``tokens`` matches enough of ``terms`` to be
-    pre-selected: PRESELECT_MIN_TERMS (2) distinct ``matched_units`` (R74), in every
-    script. A CJK or Thai bigram is one unit (R63), so a two-character word alone is not
-    enough, as one word of the text is not, however many query words begin it."""
-    return len(matched_units(tokens, terms)) >= PRESELECT_MIN_TERMS
+    pre-selected: PRESELECT_MIN_TERMS (2) ``matched_units`` (R75), in every script. A CJK
+    or Thai bigram is one unit (R63), so a two-character word alone is not enough, as one
+    word of the query or of the text is not, however many words it pairs with."""
+    return matched_units(tokens, terms) >= PRESELECT_MIN_TERMS
 
 
 def preselected(score: float, tokens: Sequence[str], terms: Sequence[str]) -> bool:

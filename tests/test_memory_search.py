@@ -7,6 +7,7 @@ scan backend must find what FTS5 finds, and rank it the same way."""
 from __future__ import annotations
 
 import ast
+import functools
 import inspect
 import itertools
 import json
@@ -23,7 +24,18 @@ from dataclasses import replace
 from datetime import timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, Callable, Dict, Iterator, List, Optional, Sequence, Set, Tuple
+from typing import (
+    Any,
+    Callable,
+    Dict,
+    FrozenSet,
+    Iterator,
+    List,
+    Optional,
+    Sequence,
+    Set,
+    Tuple,
+)
 
 import pytest
 
@@ -765,8 +777,8 @@ def test_search_result_json_limits_and_shape(store: MemoryStore) -> None:
 
 def test_preselection_floor(store: MemoryStore) -> None:
     """D18: a hit goes with a turn unasked when its fused score is at least 1/64 (rank 4 or
-    better in its list) and two distinct units of it match (R74), in any script: a CJK or
-    Thai bigram is one unit (R63), as a word is."""
+    better in its list) and two units of it match (R75), in any script: a CJK or Thai
+    bigram is one unit (R63), as a pair of a query word and a word of the text is."""
     terms = ["kayak", "trip"]
     tokens = index_tokens("A kayak trip.")
     assert PRESELECT_FLOOR == 1 / 64
@@ -801,25 +813,27 @@ def test_preselection_floor(store: MemoryStore) -> None:
     assert store.turn_payload(TOKYO + TRAVEL, exclude_conversation="c1")["recalled"] == []
 
 
-def test_the_floor_counts_words_of_the_text_not_query_words(store: MemoryStore) -> None:
-    """R74: every query word stays a term, and pre-selection's floor counts matched units:
-    each distinct word of the text that a query word begins, and each CJK or Thai term that
-    occurs. One word of the text is one unit, however many query words begin it, so a query
-    holding a word two ways doesn't clear the floor on it alone; "go golfing" keeps
-    "golfing"."""
+def test_a_text_word_is_one_unit_however_many_query_words_begin_it(store: MemoryStore) -> None:
+    """R74 and R75: every query word stays a term, and pre-selection's floor counts units:
+    pairs of a query word and a word of the text it begins, each word in one pair at most,
+    and CJK or Thai terms that occur. One word of the text is one unit, however many query
+    words begin it, so a query holding a word two ways doesn't clear the floor on it alone;
+    "go golfing" keeps "golfing", and makes two units with "Going golfing"."""
     kayak, golf = "I kayak and I love kayaking", "go golfing"
     assert query_terms(kayak) == ["kayak", "love", "kayaking"]
     assert query_terms(golf) == ["go", "golfing"]
     sunday = index_tokens("Went kayaking on Sunday.")
-    assert matched_units(sunday, query_terms(kayak)) == {"kayaking"}
+    assert matched_units(sunday, query_terms(kayak)) == 1
     assert not strong_match(index_tokens("Kayaking, then kayaking again."), query_terms(kayak))
     melbourne = index_tokens("Went golfing at Royal Melbourne.")
-    assert matched_units(melbourne, query_terms(golf)) == {"golfing"}
+    assert matched_units(melbourne, query_terms(golf)) == 1
     saturday = index_tokens("Going golfing on Saturday.")
-    assert matched_units(saturday, query_terms(golf)) == {"going", "golfing"}
+    assert matched_units(saturday, query_terms(golf)) == 2  # go with going, golfing with golfing
     # A CJK or Thai term is one unit, as it was one term (R63): 去东 and 东京.
-    shared = matched_units(index_tokens(TRIP_FACT), query_terms(TRIP_QUESTION))
-    assert shared == {chr(0x53BB) + " " + EAST, TOKYO_PHRASE}
+    trip, question = index_tokens(TRIP_FACT), query_terms(TRIP_QUESTION)
+    assert matched_units(trip, question) == 2
+    shared = [term for term in question if term_frequency(trip, term)]
+    assert shared == [chr(0x53BB) + " " + EAST, TOKYO_PHRASE]
 
     _know(store, "f1", "Went kayaking on Sunday.", days_ago=3)
     _know(store, "f2", "Went golfing at Royal Melbourne.", days_ago=2)
@@ -829,6 +843,90 @@ def test_the_floor_counts_words_of_the_text_not_query_words(store: MemoryStore) 
     assert sorted(_refs(store.search(golf))) == ["f2", "f3"]
     recalled = store.turn_payload(golf)["recalled"]
     assert [item["text"] for item in recalled] == ["Going golfing on Saturday."]  # two units
+
+
+def test_a_query_word_is_one_unit_however_many_text_words_it_begins(store: MemoryStore) -> None:
+    """R75: a query word pairs with one word of the text at most, so one that begins two
+    words of a text, "kayak" in "kayaking" and "kayak", doesn't clear the floor alone, as one
+    word of the text that two query words begin doesn't (R74). The one it pairs with leaves
+    the most pairs, whatever the order of the text's words."""
+    kayak, news = "Remind me about my kayak", "Any news on the project?"
+    my_kayak, plans = "Went kayaking in my new kayak.", "Projects: the new project plan is due."
+    assert query_terms(kayak) == ["remind", "kayak"]
+    assert query_terms(news) == ["any", "news", "project"]
+    assert matched_units(index_tokens(my_kayak), query_terms(kayak)) == 1
+    assert matched_units(index_tokens(plans), query_terms(news)) == 1
+    # "go" begins "golfing" before "going", and pairs with "going" so "golfing" pairs too.
+    assert matched_units(index_tokens("Golfing, then going home."), query_terms("go golfing")) == 2
+
+    _know(store, "f1", my_kayak, days_ago=2)
+    _know(store, "f2", plans, days_ago=1)
+    assert _refs(store.search(kayak)) == ["f1"]
+    assert _refs(store.search(news)) == ["f2"]
+    assert store.turn_payload(kayak)["recalled"] == []
+    assert store.turn_payload(news)["recalled"] == []
+    # A second query word with a word of its own to pair with makes two units.
+    recalled = store.turn_payload("Any news on the project plan?")["recalled"]
+    assert [item["text"] for item in recalled] == [plans]
+
+
+def test_a_higher_floor_counts_a_maximum_matching(
+    store: MemoryStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R75: the ablation may raise the floor, so the units are a maximum matching's pairs,
+    found by augmenting paths. With a floor of 3, "go golf gold" makes three units with
+    "Golfing at golden hour, then going home." only once "go", which begins all three words
+    of the text, gives up "golfing" to "golf" and then "golden" to "gold". Three query words
+    and three words of the text with pairs aren't enough: in "play golf or go golfing",
+    "golf" and "golfing" can pair only with "golfing", so the same text makes two units."""
+    monkeypatch.setattr(search_module, "PRESELECT_MIN_TERMS", 3)
+    question, golfing = "go golf gold", "Did I play golf or go golfing?"
+    three, two = "Golfing at golden hour, then going home.", "Golfing at golden hour."
+    assert query_terms(question) == ["go", "golf", "gold"]
+    assert matched_units(index_tokens(three), query_terms(question)) == 3
+    assert matched_units(index_tokens(two), query_terms(question)) == 2
+    assert query_terms(golfing) == ["play", "golf", "go", "golfing"]
+    assert matched_units(index_tokens(three), query_terms(golfing)) == 2
+
+    _know(store, "f1", three, days_ago=1)
+    _know(store, "f2", two, days_ago=2)
+    assert sorted(_refs(store.search(question))) == ["f1", "f2"]
+    assert [item["text"] for item in store.turn_payload(question)["recalled"]] == [three]
+    assert sorted(_refs(store.search(golfing))) == ["f1", "f2"]
+    assert store.turn_payload(golfing)["recalled"] == []
+
+
+def _best_matching(edges: Sequence[Sequence[str]]) -> int:
+    """The size of a maximum matching of ``edges``, as _maximum_matching takes them, found
+    by trying every way: each left vertex left out, or paired with each right one still
+    free."""
+
+    @functools.lru_cache(maxsize=None)
+    def best(at: int, used: FrozenSet[str]) -> int:
+        if at == len(edges):
+            return 0
+        paired = [1 + best(at + 1, used | {right}) for right in edges[at] if right not in used]
+        return max([best(at + 1, used)] + paired)
+
+    return best(0, frozenset())
+
+
+def test_the_matching_is_maximum_on_random_graphs() -> None:
+    """R75: _maximum_matching makes as many pairs as the best of every way of pairing, on
+    2,000 seeded random bipartite graphs of up to seven vertices a side. Taking the first
+    free right vertex falls short on over 100 of them, so augmenting paths are exercised."""
+    rng = random.Random(20261021)  # noqa: S311 - test data, not cryptography
+    short = 0
+    for _ in range(2000):
+        rights = ["t{}".format(number) for number in range(rng.randint(0, 7))]
+        edges = [rng.sample(rights, rng.randint(0, len(rights))) for _ in range(rng.randint(0, 7))]
+        most = _best_matching(edges)
+        assert search_module._maximum_matching(edges) == most, edges
+        taken: Set[str] = set()
+        for rights_of in edges:  # the first free right vertex, never given up
+            taken.update([right for right in rights_of if right not in taken][:1])
+        short += len(taken) < most
+    assert short > 100
 
 
 def test_the_current_conversations_facts_are_not_recalled(store: MemoryStore) -> None:
