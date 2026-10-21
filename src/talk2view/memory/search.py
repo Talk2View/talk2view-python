@@ -11,7 +11,19 @@ import json
 import math
 import re
 import unicodedata
-from typing import Any, Callable, Dict, Iterator, List, Mapping, Optional, Sequence, Tuple
+from typing import (
+    Any,
+    Callable,
+    Dict,
+    FrozenSet,
+    Iterator,
+    List,
+    Mapping,
+    Optional,
+    Sequence,
+    Set,
+    Tuple,
+)
 
 from .models import RESULT_CHARS_MAX, SUMMARY_TITLE_MAX, SearchHit
 from .text import (
@@ -24,14 +36,67 @@ from .text import (
     is_token_char,
 )
 
-#: The most terms a query keeps: the first 12 distinct ones.
+#: The most words a query keeps, its terms in every script but CJK and Thai: the first 12
+#: distinct ones.
 QUERY_TERMS_MAX = 12
+#: The most CJK and Thai terms a query keeps (R63): the first 24 distinct ones, bigrams and
+#: lone characters, in the order they appear.
+QUERY_BIGRAMS_MAX = 24
+#: Chinese and Japanese function bigrams a query leaves out, as it leaves out STOP_WORDS:
+#: question words, pronouns, conjunctions and verb endings, which nearly every round holds.
+#: 么时 and 为什 are the inner bigrams of 什么时候 ("when") and 为什么 ("why"). Each pair is
+#: written as its code points, with the bigram in the comment.
+CJK_STOP_BIGRAMS: FrozenSet[str] = frozenset(
+    chr(first) + chr(second)
+    for first, second in (
+        # Chinese
+        (0x4EC0, 0x4E48),  # 什么 what
+        (0x4E48, 0x65F6),  # 么时, in 什么时候
+        (0x65F6, 0x5019),  # 时候 time, when
+        (0x4E3A, 0x4EC0),  # 为什, in 为什么
+        (0x600E, 0x4E48),  # 怎么 how
+        (0x54EA, 0x91CC),  # 哪里 where
+        (0x591A, 0x5C11),  # 多少 how many
+        (0x6211, 0x4EEC),  # 我们 we
+        (0x4F60, 0x4EEC),  # 你们 you
+        (0x4ED6, 0x4EEC),  # 他们 they
+        (0x8FD9, 0x4E2A),  # 这个 this
+        (0x90A3, 0x4E2A),  # 那个 that
+        (0x4E00, 0x4E2A),  # 一个 a, one
+        (0x6CA1, 0x6709),  # 没有 haven't
+        (0x53EF, 0x4EE5),  # 可以 can
+        (0x4E0D, 0x662F),  # 不是 isn't
+        (0x5C31, 0x662F),  # 就是 just
+        (0x8FD8, 0x662F),  # 还是 or, still
+        (0x7684, 0x8BDD),  # 的话 if
+        (0x56E0, 0x4E3A),  # 因为 because
+        (0x6240, 0x4EE5),  # 所以 so
+        (0x4F46, 0x662F),  # 但是 but
+        (0x5982, 0x679C),  # 如果 if
+        (0x5DF2, 0x7ECF),  # 已经 already
+        # Japanese
+        (0x3067, 0x3059),  # です
+        (0x307E, 0x3059),  # ます
+        (0x307E, 0x3057),  # まし, in ました
+        (0x3057, 0x305F),  # した
+        (0x3057, 0x3066),  # して
+        (0x3066, 0x3044),  # てい, in ている
+        (0x3044, 0x308B),  # いる
+        (0x306A, 0x3044),  # ない
+        (0x3059, 0x304B),  # すか, in ですか
+        (0x306E, 0x3067),  # ので
+        (0x304B, 0x3089),  # から
+        (0x3053, 0x308C),  # これ
+        (0x305D, 0x308C),  # それ
+        (0x3053, 0x306E),  # この
+    )
+)
 #: Reciprocal rank fusion's k (spec §7.2 step 3).
 RRF_K = 60
 #: Pre-selection's floor (D18). A hit goes with a turn only when its fused score is at least
 #: 1 / (60 + 4), rank 4 or better in its list, and it matches at least PRESELECT_MIN_TERMS
-#: distinct terms, or one CJK or Thai phrase (see ``strong_match``). Module constants, so
-#: the ablation can tune them.
+#: distinct terms, in any script: a CJK or Thai bigram is one term, as a word is (R63).
+#: Module constants, so the ablation can tune them.
 PRESELECT_FLOOR = 1 / 64
 PRESELECT_MIN_TERMS = 2
 #: A round excerpt's width in code points, ellipses aside (D19).
@@ -51,46 +116,63 @@ _SPACE = re.compile(r"\s")
 
 
 def query_terms(text: str) -> List[str]:
-    """The terms a search for ``text`` looks for: at most QUERY_TERMS_MAX (12), each once, in
-    the order they first appear.
+    """The terms a search for ``text`` looks for, each once, in the order they first
+    appear: at most QUERY_TERMS_MAX (12) words and QUERY_BIGRAMS_MAX (24) CJK or Thai terms.
 
     The tokens are the index's own (``index_tokens``: NFKC, casefolded, no combining marks,
-    no Latin diacritics). A run of CJK or Thai characters written together, with nothing
-    but combining marks between them, is one term: a phrase of its characters between
-    single spaces ("东京" gives "东 京"), matched whole. Any other token is a term matched as
-    a prefix, unless it is one of STOP_WORDS or a single character, which would match
-    nearly everything. A Latin word written against CJK text is a term of its own."""
+    no Latin diacritics). A run of n CJK or Thai characters written together, with nothing
+    but combining marks between them, gives its n - 1 overlapping bigrams (R63): phrases of
+    two characters between a space, matched whole, so "东京行程" gives "东 京", "京 行" and
+    "行 程". One of CJK_STOP_BIGRAMS is left out. A run of one character is a term of one.
+    Any other token is a word, matched as a prefix, unless it is one of STOP_WORDS or a
+    single character, which would match nearly everything. A Latin word written against CJK
+    text is a word of its own."""
     terms: List[str] = []
+    seen: Set[str] = set()
+    words = bigrams = 0
     for term in _terms(unicodedata.normalize("NFKC", text)):
-        if term not in terms:
-            terms.append(term)
-            if len(terms) == QUERY_TERMS_MAX:
-                break
+        if term in seen:
+            continue
+        if is_phrase(term):
+            if bigrams == QUERY_BIGRAMS_MAX:
+                continue
+            bigrams += 1
+        else:
+            if words == QUERY_TERMS_MAX:
+                continue
+            words += 1
+        seen.add(term)
+        terms.append(term)
+        if words == QUERY_TERMS_MAX and bigrams == QUERY_BIGRAMS_MAX:
+            break
     return terms
 
 
 def _terms(text: str) -> Iterator[str]:
     """``text``'s terms in order, repeats included, lazily. ``text`` is in NFKC already, so
     ``index_token_spans`` gives ``index_tokens``' own tokens."""
-    run: List[str] = []
-    run_end = 0
+    last = ""  # the open run's last CJK or Thai character
+    alone = False  # whether it is the run's only one so far
+    last_end = 0
     for token, start, end in index_token_spans(text):
         if len(token) == 1 and is_segmented(token):
-            if run and not _parted(text[run_end:start]):
-                run.append(token)
+            if last and not _parted(text[last_end:start]):
+                if last + token not in CJK_STOP_BIGRAMS:
+                    yield last + " " + token
+                alone = False
             else:
-                if run:
-                    yield " ".join(run)
-                run = [token]
-            run_end = end
+                if alone:
+                    yield last
+                alone = True
+            last, last_end = token, end
             continue
-        if run:
-            yield " ".join(run)
-            run = []
+        if alone:
+            yield last
+        last, alone = "", False
         if len(token) > 1 and token not in STOP_WORDS:
             yield token
-    if run:
-        yield " ".join(run)
+    if alone:
+        yield last
 
 
 def _parted(between: str) -> bool:
@@ -100,8 +182,8 @@ def _parted(between: str) -> bool:
 
 
 def is_phrase(term: str) -> bool:
-    """Whether ``term`` (one of ``query_terms``') is matched whole, as a phrase: a run of
-    CJK or Thai characters, one or more. Any other term is matched as a prefix."""
+    """Whether ``term`` (one of ``query_terms``') is matched whole, as a phrase: a CJK or
+    Thai bigram, or a lone character. Any other term is a word, matched as a prefix."""
     return " " in term or (len(term) == 1 and is_segmented(term))
 
 
@@ -286,10 +368,10 @@ def fuse(
 
 def strong_match(tokens: Sequence[str], terms: Sequence[str]) -> bool:
     """Whether a text with the index tokens ``tokens`` matches enough of ``terms`` to be
-    pre-selected: PRESELECT_MIN_TERMS (2) distinct terms, or one phrase of two or more CJK
-    or Thai characters, specific enough on its own. A lone character is not."""
-    matched = matched_terms(tokens, terms)
-    return len(matched) >= PRESELECT_MIN_TERMS or any(" " in term for term in matched)
+    pre-selected: PRESELECT_MIN_TERMS (2) distinct terms, in every script. A CJK or Thai
+    bigram counts as one term (R63), so a two-character word alone is not enough, as one
+    Latin word is not."""
+    return len(matched_terms(tokens, terms)) >= PRESELECT_MIN_TERMS
 
 
 def preselected(score: float, tokens: Sequence[str], terms: Sequence[str]) -> bool:
@@ -436,10 +518,12 @@ def _dumps(value: Dict[str, Any]) -> str:
 
 
 __all__ = [
+    "CJK_STOP_BIGRAMS",
     "ELLIPSIS",
     "EXCERPT_WIDTH",
     "PRESELECT_FLOOR",
     "PRESELECT_MIN_TERMS",
+    "QUERY_BIGRAMS_MAX",
     "QUERY_TERMS_MAX",
     "RRF_K",
     "TRUNCATED",

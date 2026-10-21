@@ -1430,10 +1430,11 @@ class MemoryStore:
         """Search the facts and the log of the chats for ``query`` (spec §7.2), in one read:
         at most ``limit`` hits, best first.
 
-        The query's terms (``search.query_terms``: stop words and single letters left out,
-        at most 12) are looked up in the facts and, separately, in the rounds, each list
-        ranked by BM25. Superseded facts are left out unless nothing else matches; hidden
-        facts, rounds a forget blanked and incognito conversations' rounds never show. With
+        The query's terms (``search.query_terms``: at most 12 words, stop words and single
+        letters left out, and 24 bigrams of CJK or Thai text) are looked up in the facts
+        and, separately, in the rounds, each list ranked by BM25. Superseded facts are left
+        out unless nothing else matches; hidden facts, rounds a forget blanked and incognito
+        conversations' rounds never show. With
         ``from_date`` or ``to_date`` (YYYY-MM-DD, both included; ValueError otherwise),
         only what was recorded or said on those UTC days. The two lists are fused by
         reciprocal rank fusion (k = 60), a tie going to the newer. A fact comes whole; a

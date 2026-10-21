@@ -27,8 +27,11 @@ from talk2view.memory import TOPICS, MemoryStore, SearchHit, index_tokens, norma
 from talk2view.memory.models import RESULT_CHARS_MAX
 from talk2view.memory.payload import keep_within, recalled_items
 from talk2view.memory.search import (
+    CJK_STOP_BIGRAMS,
     ELLIPSIS,
     PRESELECT_FLOOR,
+    QUERY_BIGRAMS_MAX,
+    QUERY_TERMS_MAX,
     best_first,
     bm25_scan,
     build_fts_query,
@@ -70,6 +73,59 @@ FATHA = chr(0x064E)  # an Arabic haraka, a combining mark
 KATABA = chr(0x0643) + chr(0x062A) + chr(0x0628)  # كتب, "he wrote", without harakat
 THAI_EAT = chr(0x0E01) + chr(0x0E34) + chr(0x0E19)  # กิน: a vowel sign (Mn) between consonants
 DATE = re.compile(r"\d{4}-\d{2}-\d{2}", re.ASCII)
+
+
+def _chars(*points: int) -> str:
+    return "".join(chr(point) for point in points)
+
+
+# R63's sentences. 我下周去东京的行程是什么时候, "when is my trip to Tokyo next week?"
+TRIP_QUESTION = _chars(
+    0x6211, 0x4E0B, 0x5468, 0x53BB, 0x4E1C, 0x4EAC, 0x7684, 0x884C, 0x7A0B, 0x662F, 0x4EC0,
+    0x4E48, 0x65F6, 0x5019,
+)  # fmt: skip
+# 用户11月3日到10日去东京旅行, "the user goes to Tokyo from 3 to 10 November": 去东 and 东京
+# are bigrams of the question too.
+TRIP_FACT = (
+    _chars(0x7528, 0x6237) + "11" + _chars(0x6708) + "3" + _chars(0x65E5, 0x5230) + "10"
+    + _chars(0x65E5, 0x53BB, 0x4E1C, 0x4EAC, 0x65C5, 0x884C)
+)  # fmt: skip
+# 不知道什么时候搬家, "doesn't know when they will move house": it shares only stop bigrams
+# with the question (什么, 么时, 时候).
+MOVING_FACT = _chars(0x4E0D, 0x77E5, 0x9053, 0x4EC0, 0x4E48, 0x65F6, 0x5019, 0x642C, 0x5BB6)
+# 来週の東京出張はいつですか, "when is next week's business trip to Tokyo?"
+JA_QUESTION = _chars(
+    0x6765, 0x9031, 0x306E, 0x6771, 0x4EAC, 0x51FA, 0x5F35, 0x306F, 0x3044, 0x3064, 0x3067,
+    0x3059, 0x304B,
+)  # fmt: skip
+# 11月3日に東京へ出張する, "goes to Tokyo on business on 3 November": 東京 and 出張.
+JA_FACT = (
+    "11" + _chars(0x6708) + "3"
+    + _chars(0x65E5, 0x306B, 0x6771, 0x4EAC, 0x3078, 0x51FA, 0x5F35, 0x3059, 0x308B)
+)  # fmt: skip
+# 週末は京都で買い物, "shopping in Kyoto at the weekend": 週, は and 京 are in the question,
+# but none of its bigrams.
+JA_OTHER = _chars(0x9031, 0x672B, 0x306F, 0x4EAC, 0x90FD, 0x3067, 0x8CB7, 0x3044, 0x7269)
+# ไปเชียงใหม่วันไหน, "which day do I go to Chiang Mai?"
+TH_QUESTION = _chars(
+    0x0E44, 0x0E1B, 0x0E40, 0x0E0A, 0x0E35, 0x0E22, 0x0E07, 0x0E43, 0x0E2B, 0x0E21, 0x0E48,
+    0x0E27, 0x0E31, 0x0E19, 0x0E44, 0x0E2B, 0x0E19,
+)  # fmt: skip
+# จองโรงแรมที่เชียงใหม่แล้ว, "booked a hotel in Chiang Mai already": เชียงใหม่, Chiang Mai.
+TH_FACT = _chars(
+    0x0E08, 0x0E2D, 0x0E07, 0x0E42, 0x0E23, 0x0E07, 0x0E41, 0x0E23, 0x0E21, 0x0E17, 0x0E35,
+    0x0E48, 0x0E40, 0x0E0A, 0x0E35, 0x0E22, 0x0E07, 0x0E43, 0x0E2B, 0x0E21, 0x0E48, 0x0E41,
+    0x0E25, 0x0E49, 0x0E27,
+)  # fmt: skip
+# กินข้าวกับแม่, "ate with mum": no bigram of the question.
+TH_OTHER = _chars(
+    0x0E01, 0x0E34, 0x0E19, 0x0E02, 0x0E49, 0x0E32, 0x0E27, 0x0E01, 0x0E31, 0x0E1A, 0x0E41,
+    0x0E21, 0x0E48,
+)  # fmt: skip
+# 我用Python写脚本, "I write scripts in Python".
+CODING = _chars(0x6211, 0x7528) + "Python" + _chars(0x5199, 0x811A, 0x672C)
+# Python脚本每天早上运行, "a Python script runs every morning": "python" and 脚本.
+SCRIPT_FACT = "Python" + _chars(0x811A, 0x672C, 0x6BCF, 0x5929, 0x65E9, 0x4E0A, 0x8FD0, 0x884C)
 
 
 @pytest.fixture(params=BACKENDS)
@@ -208,21 +264,26 @@ def test_query_builder_cannot_inject(store: MemoryStore) -> None:
     assert fts_term('a"b') == '"a""b"*'
 
 
-def test_cjk_run_becomes_a_phrase(store: MemoryStore) -> None:
-    """R41: a run of CJK or Thai characters is one term, a phrase of its characters, which
-    the index holds one to a token; a Latin word written against the run is a prefix term
-    of its own."""
+def test_a_cjk_run_becomes_its_overlapping_bigrams(store: MemoryStore) -> None:
+    """R63: a run of n CJK or Thai characters gives its n - 1 overlapping bigrams, each a
+    phrase of two characters, which the index holds one to a token. A run of one is a term
+    of one, and a Latin word written against a run is a prefix term of its own."""
     assert query_terms(TOKYO) == [TOKYO_PHRASE]
     assert build_fts_query(TOKYO) == '"' + TOKYO_PHRASE + '"'
     assert build_fts_query(TOKYO + "Tower") == '"' + TOKYO_PHRASE + '" OR "tower"*'
+    i, want, go = WANT_TO_GO
     assert query_terms(WANT_TO_GO + "Google" + TOKYO) == [
-        " ".join(WANT_TO_GO),
+        i + " " + want,
+        want + " " + go,
         "google",
         TOKYO_PHRASE,
     ]
-    # Anything but a combining mark ends a run, and a lone character is a phrase of one.
+    # A repeated bigram is one term.
+    assert query_terms(TOKYO + TOKYO) == [TOKYO_PHRASE, CAPITAL + " " + EAST]
+    # Anything but a combining mark ends a run, and a lone character is a term of one.
     assert query_terms(EAST + ", " + CAPITAL) == [EAST, CAPITAL]
     assert build_fts_query(EAST) == '"' + EAST + '"'
+    assert query_terms(EAST + "Tower") == [EAST, "tower"]  # a word ends a run too
     assert query_terms(THAI_EAT) == [THAI_EAT[0] + " " + THAI_EAT[2]]
 
     _say(store, "c1", WANT_TO_GO + TOKYO + TRAVEL)  # "I want to go to Tokyo to travel"
@@ -232,6 +293,66 @@ def test_cjk_run_becomes_a_phrase(store: MemoryStore) -> None:
     assert _refs(store.search(TOKYO)) == ["r:c1:1"]
     assert sorted(_refs(store.search(EAST))) == ["r:c1:1", "r:c2:1"]
     assert _refs(store.search("goog")) == ["r:c3:1"]
+
+
+def test_words_and_bigrams_have_caps_of_their_own() -> None:
+    """R63: words keep their cap of 12 and CJK or Thai terms have their own of 24, each
+    taken in the query's order; one cap filling up never stops the other."""
+    words = ["term" + letter * 2 for letter in "abcdefghijklm"]  # 13 distinct words
+    run = _chars(*range(0x4E00, 0x4E1E))  # 30 characters: 29 bigrams
+    bigrams = [run[at] + " " + run[at + 1] for at in range(len(run) - 1)]
+    assert not {pair.replace(" ", "") for pair in bigrams} & CJK_STOP_BIGRAMS
+    assert (QUERY_TERMS_MAX, QUERY_BIGRAMS_MAX) == (12, 24)
+    assert query_terms(" ".join(words) + " " + run) == words[:12] + bigrams[:24]
+    assert query_terms(run + " " + " ".join(words)) == bigrams[:24] + words[:12]
+    assert query_terms(run + "zulu") == bigrams[:24] + ["zulu"]
+
+
+def test_stop_bigrams_are_left_out() -> None:
+    """R63: a stop bigram is not a term, as a stop word is not; the rest of its run stays."""
+    we_go = _chars(0x6211, 0x4EEC, 0x53BB)  # 我们去, "we go": 我们 is a stop bigram
+    assert query_terms(we_go) == [we_go[1] + " " + we_go[2]]
+    assert build_fts_query(_chars(0x4EC0, 0x4E48, 0x65F6, 0x5019)) is None  # 什么时候, "when"
+    assert len(CJK_STOP_BIGRAMS) <= 40
+    assert all(len(pair) == 2 and all(map(is_segmented, pair)) for pair in CJK_STOP_BIGRAMS)
+
+
+def test_a_chinese_question_preselects_a_fact_sharing_two_bigrams(store: MemoryStore) -> None:
+    """R63: the question and the trip fact share two bigrams (去东, 东京), so the fact is
+    found and pre-selected. A fact sharing one bigram is found but too weak to go with the
+    turn, and one sharing only stop bigrams is not found at all."""
+    _know(store, "f1", TRIP_FACT, days_ago=20)
+    _know(store, "f2", MOVING_FACT, days_ago=1)
+    _know(store, "f3", TOKYO + _chars(0x5F88, 0x5927), days_ago=2)  # 东京很大, "Tokyo is big"
+    assert _refs(store.search(TRIP_QUESTION)) == ["f1", "f3"]
+    assert strong_match(index_tokens(TRIP_FACT), query_terms(TRIP_QUESTION))
+    assert [item["text"] for item in store.turn_payload(TRIP_QUESTION)["recalled"]] == [TRIP_FACT]
+
+
+def test_japanese_and_thai_questions_find_a_fact_sharing_a_word(store: MemoryStore) -> None:
+    """R63: a Japanese and a Thai question, each written without spaces, find the fact that
+    shares a word with it, and the fact goes with the turn. A fact holding some of the
+    question's characters, but none of its bigrams, is not found."""
+    _know(store, "f1", JA_FACT)
+    _know(store, "f2", JA_OTHER)
+    _know(store, "f3", TH_FACT)
+    _know(store, "f4", TH_OTHER)
+    for question, fact, ref in ((JA_QUESTION, JA_FACT, "f1"), (TH_QUESTION, TH_FACT, "f3")):
+        assert _refs(store.search(question)) == [ref]
+        assert [item["text"] for item in store.turn_payload(question)["recalled"]] == [fact]
+
+
+def test_a_mixed_query_has_the_latin_word_and_the_bigrams(store: MemoryStore) -> None:
+    """R63: Latin written against Chinese is a prefix word between the runs' bigrams, and a
+    fact matching the word and one bigram has two terms, enough to be pre-selected."""
+    wo, yong, xie, jiao, ben = CODING[:2] + CODING[-3:]  # 我用 and 写脚本, in pinyin
+    assert query_terms(CODING) == [wo + " " + yong, "python", xie + " " + jiao, jiao + " " + ben]
+    assert build_fts_query(CODING) == '"{} {}" OR "python"* OR "{} {}" OR "{} {}"'.format(
+        wo, yong, xie, jiao, jiao, ben
+    )
+    _know(store, "f1", SCRIPT_FACT)
+    assert _refs(store.search(CODING)) == ["f1"]
+    assert [item["text"] for item in store.turn_payload(CODING)["recalled"]] == [SCRIPT_FACT]
 
 
 # ── ranking and fusion (D18) ──
@@ -354,7 +475,8 @@ def test_best_first_orders_as_the_fts5_sql_does() -> None:
 @pytest.mark.skipif(not SQLITE3_HAS_FTS5, reason="sqlite3 lacks FTS5")
 def test_bm25_scan_gives_fts5s_own_scores() -> None:
     """The scan backend's BM25 is FTS5's: the same rows match, with the same scores, for
-    prefix terms and phrases, repeated terms, folded diacritics, and an IDF at or under 0."""
+    prefix terms, bigrams and lone characters, repeated terms, folded diacritics, and an
+    IDF at or under 0."""
     texts = [
         "Booked a kayak trip to Norway.",
         "Kayak, kayak, kayaks: the kayaking club meets on Sunday.",
@@ -368,6 +490,11 @@ def test_bm25_scan_gives_fts5s_own_scores() -> None:
         "A note with nothing in common.",
         "Trip trip trip trip trip.",
         "Short.",
+        TRIP_FACT,
+        MOVING_FACT,
+        JA_FACT,
+        TH_FACT,
+        SCRIPT_FACT,
     ]
     queries = [
         "kayak",
@@ -382,6 +509,11 @@ def test_bm25_scan_gives_fts5s_own_scores() -> None:
         THAI_EAT,
         "trip",
         "zzz nothing",
+        WANT_TO_GO + TOKYO + TRAVEL,
+        TRIP_QUESTION,
+        JA_QUESTION,
+        TH_QUESTION,
+        CODING,
     ]
     corpora = [
         [("d{}".format(number), normalise_for_index(text)) for number, text in enumerate(texts)],
@@ -528,14 +660,16 @@ def test_search_result_json_limits_and_shape(store: MemoryStore) -> None:
 
 def test_preselection_floor(store: MemoryStore) -> None:
     """D18: a hit goes with a turn unasked when its fused score is at least 1/64 (rank 4 or
-    better in its list) and it matches two distinct terms, or one CJK or Thai phrase of two
-    characters or more."""
+    better in its list) and it matches two distinct terms, in any script: a CJK or Thai
+    bigram is one term (R63)."""
     terms = ["kayak", "trip"]
     tokens = index_tokens("A kayak trip.")
     assert PRESELECT_FLOOR == 1 / 64
     assert preselected(1 / 64, tokens, terms) and not preselected(1 / 65, tokens, terms)
     assert not strong_match(index_tokens("A kayak."), terms)
-    assert strong_match(index_tokens(WANT_TO_GO + TOKYO + TRAVEL), [TOKYO_PHRASE])
+    trip = index_tokens(WANT_TO_GO + TOKYO + TRAVEL)
+    assert not strong_match(trip, [TOKYO_PHRASE])  # one bigram, as one word, is too weak
+    assert strong_match(trip, query_terms(TOKYO + TRAVEL))  # 东京, 京旅 and 旅行
     assert not strong_match(index_tokens(WANT_TO_GO + EAST), [EAST])
 
     _know(store, "f1", "Booked a kayak trip to Norway in June.", days_ago=2)
@@ -549,7 +683,8 @@ def test_preselection_floor(store: MemoryStore) -> None:
         }
     ]
     _say(store, "c1", WANT_TO_GO + TOKYO + TRAVEL, days_ago=1, title="Trip")
-    assert store.turn_payload(TOKYO, exclude_conversation="c2")["recalled"] == [
+    assert store.turn_payload(TOKYO, exclude_conversation="c2")["recalled"] == []  # one bigram
+    assert store.turn_payload(TOKYO + TRAVEL, exclude_conversation="c2")["recalled"] == [
         {
             "kind": "excerpt",
             "date": "2026-10-20",
@@ -558,7 +693,7 @@ def test_preselection_floor(store: MemoryStore) -> None:
         }
     ]
     # The current conversation's own rounds are in the turn's context already.
-    assert store.turn_payload(TOKYO, exclude_conversation="c1")["recalled"] == []
+    assert store.turn_payload(TOKYO + TRAVEL, exclude_conversation="c1")["recalled"] == []
 
 
 def test_turn_payload_shape_and_caps(store: MemoryStore) -> None:
