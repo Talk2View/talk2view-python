@@ -12,7 +12,7 @@ import talk2view
 PACKAGE = Path(__file__).resolve().parents[1]
 
 # What a host imports to use on-device memory, from talk2view.memory.
-MEMORY_NAMES = ("T2VMemory", "MemoryStore", "MemoryEntry", "Fact", "SearchHit")
+MEMORY_NAMES = ("T2VMemory", "MemoryStore", "MemoryEntry", "Fact", "SearchHit", "AppliedBatch")
 MEMORY_HEADING = "### On-device memory (`memory_path`)"
 
 
@@ -122,6 +122,9 @@ def test_talk2view_takes_memory_path() -> None:
     assert talk2view.Talk2View.memory.fset is None
     assert isinstance(T2VMemory.enabled, property) and T2VMemory.enabled.fset is None
     assert "inline" in inspect.signature(T2VMemory.__init__).parameters
+    # A host's "Memory updated" notice reads the batch and takes it back; only the memory sets it.
+    assert isinstance(T2VMemory.last_applied, property) and T2VMemory.last_applied.fset is None
+    assert list(inspect.signature(T2VMemory.undo).parameters) == ["self", "batch_id"]
 
 
 def test_readme_documents_memory() -> None:
@@ -145,17 +148,22 @@ def test_readme_documents_memory() -> None:
         "reset()",
         "memory.enabled",
         "`403 memory_disabled`",
+        "`402 memory_budget_low`",
         "inline=True",
         "observe_turn",
         "observe_approval",
         "`talk2view.memory`",
         "keeps no memory content",
         "no sync",
+        "`t2v.memory.last_applied`",
+        "t2v.memory.undo(batch_id)",
+        "under one that already exists",
     ):
         assert needle in section, needle
     # The pointers in the sections around it.
     assert "memory_path=None," in readme
     assert '| `"memory"` |' in readme
+    assert "or `memory_path` is unset" in readme
     assert "`apsw >= 3.54`" in readme
 
 
@@ -188,6 +196,9 @@ def test_changelog_unreleased_announces_memory() -> None:
         "`talk2view.memory`",
         "`Capabilities.memory`",
         "`T2VSession.send_message(memory=...)`",
+        "`t2v.memory.last_applied`",
+        "`t2v.memory.undo(batch_id)`",
+        "under one that already exists",
         "pip install 'talk2view[memory]'",
     ):
         assert needle in unreleased, needle

@@ -1014,18 +1014,17 @@ memory lives only on the user's device, in a SQLite file under `memory_path`. Ta
 engine keeps no memory content: it reads what a call carries while the call runs, and
 answers with changes for your app to apply. There is no sync in this version, so another
 device, or another `memory_path`, has a memory of its own. Memory must also be turned on
-for your partner: until it is, the engine answers the memory calls with
-`403 memory_disabled`. Without `memory_path` (the default) memory is off and nothing
-changes.
+for your partner. Until it is, the engine answers the memory calls with
+`403 memory_disabled`, ignores each turn's `memory` field and gives the agent no memory
+tools, and the SDK goes on recording the log of the chats. Without `memory_path` (the
+default) memory is off and nothing changes.
 
 ```python
 from pathlib import Path
 from talk2view import Talk2View
 
-t2v = Talk2View(
-    partner_key="pk_live_...",
-    memory_path=Path.home() / ".config" / "myapp" / "talk2view-memory",
-)
+app_dir = Path.home() / ".config" / "myapp"        # a directory your app has made already
+t2v = Talk2View(partner_key="pk_live_...", memory_path=app_dir / "talk2view-memory")
 t2v.auth.login("user@example.com", "password")
 
 for event in t2v.chat("Remember that I prefer metric units"):
@@ -1043,8 +1042,8 @@ dropped, and one already in flight is not waited for. Reading `t2v.memory` raise
 file cannot be opened; `chat()` then logs one line and goes on without memory for that turn.
 
 The memory types are in `talk2view.memory`, not at the top level: `T2VMemory`
-(`t2v.memory`), `MemoryStore` (`t2v.memory.store`, the user's file), and the records the
-store returns, `MemoryEntry`, `Fact` and `SearchHit`.
+(`t2v.memory`), `MemoryStore` (`t2v.memory.store`, the user's file), and the records they
+return, `MemoryEntry`, `Fact`, `SearchHit` and `AppliedBatch`.
 
 #### What it keeps
 
@@ -1069,23 +1068,40 @@ included, is in Unicode code points, not bytes or graphemes.
 
 1. calls `run_due()`, which only queues work (see Triggers);
 2. sends the turn's `memory` field with the message: `status: "on"`, the user's `entries`,
-   the `recent` conversations (up to 8 titles and summaries) and up to 4 `recalled`
-   passages from older conversations that match the message. The same field rides every
-   `/resume` of the turn, and the resend after a lost session;
-3. answers the agent's `search_memory` calls from the store. The tool is the engine's own,
-   so you register nothing. A call has a `query` and, optionally, `from_date` and `to_date`
-   (`YYYY-MM-DD`) and a `limit` (8 by default, 1 to 20). The current conversation is left
-   out, because the agent has it already. A malformed argument gets a short
-   `{"error": ...}` result, and nothing raises;
+   the `recent` conversations and the `recalled` passages from older ones that match the
+   message (Privacy, below, lists what goes). The same field rides every `/resume` of the
+   turn, and the resend after a lost session;
+3. answers the agent's `search_memory` calls from the store (the tool is the engine's own,
+   so you register nothing); a malformed argument gets a short `{"error": ...}` result;
 4. applies each `memory` event, the agent's changes to the user's entries (`add`,
    `update`, `remove` or `forget`), before passing the event on to you, so a UI only has to
-   show it;
+   show it (see "Showing a change, and undoing it");
 5. records the round in the store's log when the turn is `done`. A turn that ended in an
    error, was stopped, or applied a `forget` or `remove` records none: a forget's own words
    would name what was forgotten.
 
 Set `Capabilities(timezone=...)`: memory reads the user's day from it (when an entry
 expires, the date shown on a fact) and falls back to the system's zone.
+
+#### Showing a change, and undoing it
+
+A `memory` event reaches you after the SDK has applied it, and `t2v.memory.last_applied`
+is that event's `AppliedBatch`: `applied` lists the changes that took effect, `dropped`
+names the rules that refused the others. Read it as the event arrives, because the next
+`memory` event replaces it and each turn starts with `None`. The batch can be taken back
+for 30 seconds:
+
+```python
+for event in t2v.chat("Remember that I prefer metric units"):
+    if event.type == "memory":
+        batch = t2v.memory.last_applied                    # None: nothing was applied
+        if batch is not None and batch.applied:
+            show_memory_updated(batch.id, batch.applied)   # your UI, with an Undo button
+
+# When the user taps Undo: True if taken back. False, and never an exception, after the
+# 30 seconds, for a batch undone already or overtaken by a later change, and once closed.
+undone = t2v.memory.undo(batch_id)
+```
 
 #### Triggers: when memory learns
 
@@ -1103,11 +1119,12 @@ call them directly, see below), and nothing runs on a timer unless you start one
 
 Consolidation is due when the entries are over their caps (more than 40, or more than
 6,000 characters), when 10 changes have built up and 7 days have passed since the last
-one (or since the file was created), and right after an import. One that has been applied
-is not repeated until memory has changed. `run_due()` never waits and never raises; it
-returns the keys it queued (`"extract:<conversation id>"`, `"consolidate"`).
-`t2v.memory.wait_idle(timeout)` waits for the queue, for tests and shutdown. A
-conversation still unextracted when the app quits is extracted at the next launch.
+one (or since the file was created), when the last one could not take every entry, and
+right after an import. One that has been applied is not repeated until memory has
+changed. `run_due()` never waits and never raises; it returns the keys it queued
+(`"extract:<conversation id>"`, `"consolidate"`). `t2v.memory.wait_idle(timeout)` waits
+for the queue, for tests and shutdown. A conversation still unextracted when the app
+quits is extracted at the next launch.
 
 #### Incognito, paused, and guests
 
@@ -1191,24 +1208,30 @@ Memory never makes `chat()` raise, and a failed engine call is silent: it return
 status and the engine's error type or the exception's class, never any memory text. The
 next trigger tries again once the cooldown has run:
 
-- After a failed call the automatic triggers start no engine call for 60 seconds, twice as
-  long after each further failure in a row, at most an hour. A `Retry-After` from the
-  engine makes it at least that long, still at most an hour. A call that succeeds ends the
+- After a failed call, the calls the SDK queues itself (from `run_due()`, a new
+  conversation or an import) make no engine call for 60 seconds, twice as long after each
+  further failure in a row, at most an hour. Each checks again as it starts, so a backlog
+  meeting a failing engine makes one call, not one each. A `Retry-After` from the engine
+  makes the wait at least that long, still at most an hour. A call that succeeds ends the
   cooldown. Direct calls (`extract()`, `consolidate()`, `import_text()`) ignore it, and
   their outcome still updates it. The cooldown is not saved: after a relaunch the first
   `run_due()` tries again at once.
+- Extraction, consolidation and imports are charged to the end-user's own budget, as a
+  chat turn is. The engine refuses them with `402 memory_budget_low` while the user has
+  less than a floor left (currently 10% of their budget or $0.10, whichever is more),
+  which the SDK treats as any other failed call: silent, logged once, retried after the
+  cooldown.
 - A `403 memory_disabled` (memory is not turned on for the partner) turns the engine calls
   off for the rest of the process: `t2v.memory.enabled`, a read-only property, becomes
   `False` and stays that way for this `Talk2View`. It is also `False` once the memory is
   closed. Chat is unaffected.
 
-`chat()` never waits for an engine memory call. `run_due()` and a conversation's end only
-queue work onto one daemon thread (`talk2view-memory`), which runs the calls one at a time,
-with at most one extraction queued per conversation; a turn reads only the user's own file
-before it is sent. That thread can also meet a rejected refresh token, so an
-`on_auth_state_change` listener can run on it (see the note on listener callbacks above).
-`T2VMemory(client, store, inline=True)` runs the calls in the caller, in order, for tests
-and evals that build their own `T2VMemory`; `Talk2View` never does.
+The calls `run_due()` and a new conversation queue run one at a time on one daemon thread,
+`talk2view-memory`, so a chat never waits for one. That thread can also meet a rejected
+refresh token, so an `on_auth_state_change` listener can run on it (see the note on
+listener callbacks above). `T2VMemory(client, store, inline=True)` runs the calls in the
+caller, in order, for tests and evals that build their own `T2VMemory`; `Talk2View` never
+does.
 
 `chat()` and `respond_to_approval()` pass the turn's events through
 `t2v.memory.observe_turn` and `t2v.memory.observe_approval` for you, which is how `memory`
@@ -1221,29 +1244,27 @@ them, together with `run_due`, `turn_payload` and `handle_search`.
   digits, `_` and `-` (1 to 128 of them; an engine UUID is one) names its file as it is.
   Any other id is named by the first 32 hex characters of its SHA-256, so no id makes an
   unsafe file name, and two ids that differ only in case never share a file.
-- **Permissions.** Nothing is created until the memory is first used. A `memory_path`
-  directory the SDK has to create is made `0700`, and an existing one is left as it is. The
-  file is created `0600` before SQLite opens it, and SQLite gives its `-wal` and `-shm`
-  files the same mode. On Windows the permission calls are skipped, as `FileStorage`'s are:
-  keep `memory_path` in a folder only the user can read.
-- **Deleted text is scrubbed** from the file (a forget or a removed entry once its undo
-  window has passed, a reset, a deleted chat): SQLite zeroes the freed pages, the search
-  index is merged and the write-ahead log is truncated.
-- **Search** runs on SQLite's FTS5 where it can, and the store picks a backend when it
-  opens: the standard library's `sqlite3` when it was built with FTS5; else `apsw`, if
-  installed, which bundles a SQLite with FTS5; else `scan`, which needs no FTS5: it keeps
-  the index in plain tables and scores them in Python, so a very large memory searches more
-  slowly. Memory works on all three, and `t2v.memory.store.backend` says which is in use. A
-  file can move between them: the store rebuilds the index when it opens a file that was
-  indexed the other way.
+- **Permissions.** Nothing is created until the memory is first used. When the SDK has to
+  create the `memory_path` directory it makes it `0700`; a parent it has to create too
+  gets the default mode, and an existing directory is left as found, so point
+  `memory_path` at a directory under one that already exists. The file is created `0600`
+  before SQLite opens it, and SQLite gives its `-wal` and `-shm` files the same mode. On
+  Windows the permission calls are skipped, as `FileStorage`'s are: keep `memory_path` in
+  a folder only the user can read.
+- **Deleted text is scrubbed** from the file once its undo window has passed (at once for
+  a reset or a deleted chat).
+- **Search** runs on SQLite's FTS5, and the store picks a backend when it opens: the
+  standard library's `sqlite3` when it was built with FTS5; else `apsw`, which bundles a
+  SQLite with FTS5; else `scan`, which needs no FTS5, keeps the index in plain tables and
+  scores it in Python, so a very large memory searches more slowly. Memory works on all
+  three, `t2v.memory.store.backend` says which is in use, and a file can move between them
+  (the store rebuilds the index when it opens a file indexed the other way). To have
+  `apsw` (3.54 or later), install the `[memory]` extra; apsw needs Python 3.11, so on 3.10
+  the extra adds nothing:
 
 ```bash
 pip install 'talk2view[memory]'
 ```
-
-The `[memory]` extra installs `apsw` (3.54 or later) on Python 3.11 and newer. apsw 3.54
-needs Python 3.11, so on 3.10 the extra adds nothing: the store uses the standard
-library's FTS5 when it has it, and the `scan` backend when it does not.
 
 #### Privacy
 
@@ -1326,7 +1347,7 @@ Events yielded by `chat()` / `send_message()`.
 | `"approval_result"` | `tool_name`, `tool_call_id`, `decision` | The decision that was applied (`"once"`, `"always"` or `"deny"`) |
 | `"status"` | `status`, `message` | Agent status update (e.g., "thinking", "planning") |
 | `"todos"` | `todos` | Agent's task plan |
-| `"memory"` | `tool_call_id`, `memory_ops` | Changes the agent asked to make to the user's memory (needs `Capabilities(memory=True)`, which `memory_path` sets). The SDK has applied them before you see the event, unless memory is paused or the chat incognito |
+| `"memory"` | `tool_call_id`, `memory_ops` | Changes the agent asked to make to the user's memory (needs `Capabilities(memory=True)`, which `memory_path` sets). The SDK has applied them before you see the event, unless memory is paused, the chat incognito or `memory_path` is unset; `t2v.memory.last_applied` is what it applied |
 | `"error"` | `message`, `error_type`, `detail` | A failure reported inside the stream (e.g. `"session_lost"`, a budget error). Never rendered as text |
 | `"done"` | `thread_id` | Stream complete |
 
