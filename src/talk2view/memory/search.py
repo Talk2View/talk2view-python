@@ -126,26 +126,40 @@ def query_terms(text: str) -> List[str]:
     "行 程". One of CJK_STOP_BIGRAMS is left out. A run of one character is a term of one.
     Any other token is a word, matched as a prefix, unless it is one of STOP_WORDS or a
     single character, which would match nearly everything. A Latin word written against CJK
-    text is a word of its own."""
-    terms: List[str] = []
-    seen: Set[str] = set()
+    text is a word of its own.
+
+    A word that another word of the query begins is left out, and takes no place under the
+    cap: "kayak"* matches "kayaking" already, and with both, one word in a text would count
+    as two terms toward pre-selection's floor."""
+    terms = list(dict.fromkeys(_terms(unicodedata.normalize("NFKC", text))))
+    covered = _covered([term for term in terms if not is_phrase(term)])
+    kept: List[str] = []
     words = bigrams = 0
-    for term in _terms(unicodedata.normalize("NFKC", text)):
-        if term in seen:
-            continue
+    for term in terms:
         if is_phrase(term):
             if bigrams == QUERY_BIGRAMS_MAX:
                 continue
             bigrams += 1
+        elif term in covered or words == QUERY_TERMS_MAX:
+            continue
         else:
-            if words == QUERY_TERMS_MAX:
-                continue
             words += 1
-        seen.add(term)
-        terms.append(term)
-        if words == QUERY_TERMS_MAX and bigrams == QUERY_BIGRAMS_MAX:
-            break
-    return terms
+        kept.append(term)
+    return kept
+
+
+def _covered(words: Sequence[str]) -> Set[str]:
+    """The ``words`` (distinct ones) that another of them begins. Sorted, the words one
+    begins come straight after it, so each is covered by the last before it that isn't, if
+    that one begins it."""
+    covered: Set[str] = set()
+    root = ""
+    for word in sorted(words):
+        if root and word.startswith(root):
+            covered.add(word)
+        else:
+            root = word
+    return covered
 
 
 def _terms(text: str) -> Iterator[str]:

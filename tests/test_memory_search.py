@@ -728,6 +728,29 @@ def test_preselection_floor(store: MemoryStore) -> None:
     assert store.turn_payload(TOKYO + TRAVEL, exclude_conversation="c1")["recalled"] == []
 
 
+def test_one_word_written_two_ways_is_one_term(store: MemoryStore) -> None:
+    """Review Minor 1: a word that another word of the query begins is left out, as
+    "kayak"* matches "kayaking" already, so one word written two ways counts once toward
+    the floor and takes one place under the cap. Words in every script but CJK and Thai are
+    prefixes alike; a CJK or Thai term is a phrase, and stays."""
+    question = "I kayak and I love kayaking"
+    assert query_terms(question) == ["kayak", "love"]
+    assert query_terms("kayaking kayaks kayak") == ["kayak"]
+    book = _chars(0x043A, 0x043D, 0x0438, 0x0433, 0x0430)  # книга, Russian "book"
+    assert query_terms(book + _chars(0x043C, 0x0438) + " " + book) == [book]  # книгами книга
+    assert query_terms(EAST + ", " + TOKYO) == [EAST, TOKYO_PHRASE]
+    words = _words(11)
+    assert query_terms(" ".join(["kayaking", *words, "kayak", "zebra"])) == [*words, "kayak"]
+    assert not strong_match(index_tokens("Went kayaking on Sunday."), query_terms(question))
+
+    _know(store, "f1", "Went kayaking on Sunday.")
+    assert _refs(store.search(question)) == ["f1"]
+    assert store.turn_payload(question)["recalled"] == []  # one word only
+    _know(store, "f2", "Would love to go kayaking again.")
+    recalled = store.turn_payload(question)["recalled"]
+    assert [item["text"] for item in recalled] == ["Would love to go kayaking again."]
+
+
 def test_turn_payload_shape_and_caps(store: MemoryStore) -> None:
     old = _stamp(100)
     store._insert_entry(_entry("e0", "Prefers metric units.", locked=True, updated_at=old))
