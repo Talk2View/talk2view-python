@@ -937,13 +937,6 @@ def account_controller(args: argparse.Namespace) -> "tuple[ChatController, Any]"
     t2v.skills.add(
         Skill(name="scan-report", description="Write a scan report.", content="Report the scan.")
     )
-    if args.register_signed_out:
-        # The signed-out-register repro, made deterministic. The SDK registers the host's
-        # skills 0.5 s after `add()` (its debounce); signed out, that register is refused
-        # with a 401, and the edit waits for the next message's flush, since nothing re-sends it on
-        # sign-in. Flushing here, before anyone could sign in, is that same refused
-        # register without the race: `skills.available` stays false after sign-in.
-        t2v.skills.flush()
     if args.hostile:
         t2v.skills.add(
             Skill(name="skill-" + HOSTILE, description="Writes " + HOSTILE, content="noop")
@@ -1237,6 +1230,16 @@ def main(argv: Optional[list] = None) -> int:
         bundled_skill_dirs=bundled_dirs,
         on_pick_skill_import=pick,
     )
+    if args.register_signed_out and account is not None:
+        # The signed-out-register repro, made deterministic. The SDK registers the host's
+        # skills 0.5 s after a change (its debounce); signed out, that register is refused
+        # with a 401, and the edit waits for the next message's flush, since nothing re-sends
+        # it on sign-in. Flushing here, before the page has its URL, is that same refused
+        # register without the race: `skills.available` stays false after sign-in. Here, not
+        # where the host adds its skill: building the server loads the bundled skills, a
+        # change of its own that would schedule another register 0.5 s later, and a page
+        # that signed in by then would see it go through.
+        account.skills.flush()
     if args.thread_command_error and server._threads is not None:
         # Reach into the server's own ThreadsState the way attachments_off()
         # below reaches into its own hub — patched before start() so no command can race it.

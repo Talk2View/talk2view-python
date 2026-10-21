@@ -64,9 +64,12 @@ test.describe('the approval card (client tool, FakeController)', () => {
     await page.getByRole('button', { name: 'Confirm deny' }).click();
     const step = lastReply(page).locator('.t2v-tool[data-state="denied"]');
     await expect(step).toContainText('Denied load_sample_data');
+    // The whole reply first: while it arrives the thread scrolls to keep it in view, and a
+    // click aimed at the step just before that scroll lands below it, on the message.
+    await expect(lastReply(page)).toContainText('Understood: nothing was loaded.');
+    await expect(page.getByRole('button', { name: 'Send' })).toBeVisible();
     await step.getByRole('button').click();
     await expect(step.locator('.t2v-tool-result')).toHaveText('Wrong volume');
-    await expect(lastReply(page)).toContainText('Understood: nothing was loaded.');
   });
 
   test('Stop on a waiting card denies it as cancelled', async ({ page, backend }) => {
