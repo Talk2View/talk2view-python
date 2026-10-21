@@ -1437,6 +1437,7 @@ class MemoryStore:
         from_date: Optional[str] = None,
         to_date: Optional[str] = None,
         limit: int = 8,
+        exclude_conversation: Optional[str] = None,
         timezone: Optional[str] = None,
     ) -> List[SearchHit]:
         """Search the facts and the log of the chats for ``query`` (spec §7.2), in one read:
@@ -1455,6 +1456,11 @@ class MemoryStore:
         ``timezone``, and its conversation's name ("" when it has none). A query with no
         terms finds nothing.
 
+        ``exclude_conversation``, the conversation the user is in, leaves out its rounds and
+        the facts drawn from it, as a turn's pre-selection does: they are in the turn's
+        context already. It is the device's own argument; the engine's ``search_memory``
+        arguments don't change, and the client passes the current conversation.
+
         ``timezone`` is the user's, an IANA name such as "Australia/Perth". None, or a name
         this platform doesn't know, means the system's local zone (``days``)."""
         found = self._found(
@@ -1462,6 +1468,7 @@ class MemoryStore:
             from_date=from_date,
             to_date=to_date,
             limit=limit,
+            exclude_conversation=exclude_conversation,
             timezone=timezone,
         )
         return [hit for hit, _ in found]
@@ -1473,17 +1480,20 @@ class MemoryStore:
         from_date: Optional[str] = None,
         to_date: Optional[str] = None,
         limit: int = 8,
+        exclude_conversation: Optional[str] = None,
         timezone: Optional[str] = None,
     ) -> str:
         """The ``search_memory`` tool's result for these arguments (spec §8.4): ``search``,
         with ``limit`` kept within 1 to RESULT_LIMIT_MAX (20), as ``{"results": [{"date",
         "conversation", "kind", "text"}]}`` JSON of at most RESULT_CHARS_MAX (8,000) code
-        points, with ``"note": "truncated"`` when results were dropped to fit."""
+        points, with ``"note": "truncated"`` when results were dropped to fit.
+        ``exclude_conversation`` and ``timezone`` go to ``search`` as they are."""
         hits = self.search(
             query,
             from_date=from_date,
             to_date=to_date,
             limit=max(1, min(limit, RESULT_LIMIT_MAX)),
+            exclude_conversation=exclude_conversation,
             timezone=timezone,
         )
         return result_json(hits)

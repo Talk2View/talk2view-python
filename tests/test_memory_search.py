@@ -841,6 +841,35 @@ def test_the_current_conversations_facts_are_not_recalled(store: MemoryStore) ->
     assert len(recalled("zebracorn in pencil", None)) == 2
 
 
+def test_a_search_can_leave_out_the_current_conversation(store: MemoryStore) -> None:
+    """Fix round 2: search and search_result_json take the current conversation, the
+    device's own argument (the engine's search_memory arguments don't change), and leave
+    out its rounds and the facts drawn from it, as pre-selection does. Without it, or with
+    a conversation the store doesn't know, everything is found as before."""
+    _say(store, "c1", "Planning a kayak trip to Norway.", "Pack a drybag.", title="Trip")
+    _say(store, "c2", "The kayak trip is in June.", "Sounds fun.", title="June")
+    _know(store, "f1", "Booked a kayak trip to Norway.", conversation_id="c1")
+    _know(store, "f2", "The kayak trip to Norway is in June.", conversation_id="c2")
+    _know(store, "f3", "Packed a drybag for the kayak trip.")  # drawn from no conversation
+    question = "kayak trip"
+
+    def found(current: Optional[str]) -> List[str]:
+        return sorted(_refs(store.search(question, exclude_conversation=current)))
+
+    everything = ["f1", "f2", "f3", "r:c1:1", "r:c2:1"]
+    assert found(None) == everything == sorted(_refs(store.search(question)))
+    assert found("c1") == ["f2", "f3", "r:c2:1"]
+    assert found("c2") == ["f1", "f3", "r:c1:1"]
+    assert found("c9") == everything
+    result = json.loads(store.search_result_json(question, exclude_conversation="c1"))
+    assert sorted(item["conversation"] for item in result["results"]) == ["", "June", "June"]
+    # Superseded facts, which count only when nothing else matches, are left out alike.
+    gone: Dict[str, Any] = {"superseded_by": "f9", "superseded_at": "2026-10-21T09:00:00Z"}
+    _know(store, "f4", "Sketched a zebracorn in pencil.", conversation_id="c1", **gone)
+    assert _refs(store.search("zebracorn", exclude_conversation="c1")) == []
+    assert _refs(store.search("zebracorn", exclude_conversation="c2")) == ["f4"]
+
+
 def test_turn_payload_shape_and_caps(store: MemoryStore) -> None:
     old = _stamp(100)
     store._insert_entry(_entry("e0", "Prefers metric units.", locked=True, updated_at=old))
