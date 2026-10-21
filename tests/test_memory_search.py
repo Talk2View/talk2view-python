@@ -179,13 +179,30 @@ def _system_zone_is_utc(monkeypatch: pytest.MonkeyPatch) -> None:
 
 @pytest.fixture
 def system_zone(monkeypatch: pytest.MonkeyPatch) -> Callable[[str], None]:
-    """Sets the system's local zone, as days reads it, on any platform."""
+    """Sets the system's local zone, as days reads it, on any platform (``_loaded_zone``:
+    the test skips when this platform can't load the zone)."""
 
     def set_zone(name: str) -> None:
-        zone = zoneinfo.ZoneInfo(name)
+        zone = _loaded_zone(name)
         monkeypatch.setattr(days, "_system_zone", lambda: zone)
 
     return set_zone
+
+
+def _loaded_zone(name: str) -> zoneinfo.ZoneInfo:
+    """The IANA zone ``name``, or a skip of the test, saying why, when this platform can't
+    load it: zoneinfo has no tz data on Windows unless the tzdata package is installed, and
+    this package doesn't depend on it. The system zone's pin needs none."""
+    try:
+        return zoneinfo.ZoneInfo(name)
+    except (zoneinfo.ZoneInfoNotFoundError, OSError, ValueError) as error:
+        pytest.skip("can't load the zone {}: no tz data? ({})".format(name, error))
+
+
+def _need_zones(*names: str) -> None:
+    """Skips the test, saying why, unless this platform can load each IANA zone it names."""
+    for name in names:
+        _loaded_zone(name)
 
 
 def _stamp(days_ago: float = 0.0, *, hours_ago: float = 0.0) -> str:
@@ -461,6 +478,7 @@ def test_superseded_facts_excluded_unless_nothing_else(store: MemoryStore) -> No
 def test_date_filter_applies_to_both_corpora(store: MemoryStore) -> None:
     """The filter takes the day, in the user's timezone, a fact was recorded or a round
     said, both ends included. The user here is on UTC (R64's tests try other zones)."""
+    _need_zones("UTC")
     _know(store, "f1", "Took a kayak lesson.", recorded_at="2026-10-10T23:30:00Z")
     _know(store, "f2", "Entered a kayak race.", recorded_at="2026-10-20T00:10:00Z")
     _say(store, "c1", "Kayak lesson today.", days_ago=11)  # 2026-10-10
@@ -1232,6 +1250,7 @@ def test_an_entry_is_sent_until_its_last_day_ends_where_the_user_is(
     """R64: an entry valid until 2026-11-10 is still sent at noon on the 10th in Los Angeles
     and no longer at 07:00 on the 11th in Sydney, the same instant. The day each entry was
     updated, and each conversation last active, is the user's day too."""
+    _need_zones(SYDNEY, LA)
     clock.now = EVENING
     trip = _entry("e1", "Is in Tokyo until 10 Nov.", topic="ongoing", valid_until="2026-11-10")
     store._insert_entry(replace(trip, updated_at=EVENING_AT))
@@ -1263,6 +1282,7 @@ def test_a_fact_gives_its_valid_until_and_is_recalled_past_it(
     """R65: a fact's valid_until never keeps it out of a search or a turn, wherever the user
     is: facts stay true as history. A fact hit with one, past or to come, gives it before
     its text, in a search_memory result and in a recalled item, within the engine's cap."""
+    _need_zones(SYDNEY, LA)
     clock.now = EVENING  # the 11th in Sydney, the 10th in Los Angeles
     flight = "Flies home from Tokyo on 10 November."
     again = "Flies home from Tokyo again on 3 December."
@@ -1287,6 +1307,7 @@ def test_the_date_filter_and_hit_dates_are_the_users_days(store: MemoryStore) ->
     """R64: the 11th in Sydney runs from 2026-11-10T13:00Z, included, to 2026-11-11T13:00Z,
     so what was recorded or said at 2026-11-10T20:00Z is on it, and dated it. In Los Angeles
     and in UTC the same instant is on the 10th."""
+    _need_zones(SYDNEY, LA, "UTC")
     _know(store, "f1", "Booked a kayak lesson.", recorded_at=EVENING_AT)
     _know(store, "f2", "Paid for the kayak.", recorded_at="2026-11-10T12:59:59Z")  # 23:59:59
     _know(store, "f3", "The kayak arrived.", recorded_at="2026-11-10T13:00:00Z")  # midnight
@@ -1381,6 +1402,9 @@ def test_unpinned_days_read_the_zone_the_platform_gives(monkeypatch: pytest.Monk
     monkeypatch.setenv("TZ", SYDNEY)
     time.tzset()
     try:
+        # The C library, not zoneinfo, loads TZ: Sydney's offset that evening says it could.
+        if time.localtime(EVENING.timestamp()).tm_gmtoff != 11 * 3600:
+            pytest.skip("the C library can't load the zone {}: no tz data?".format(SYDNEY))
         assert days.day(EVENING_AT, None) == "2026-11-11"
         assert days.day("2026-06-10T13:30:00Z", None) == "2026-06-10"
         assert days.bounds("2026-11-11", "2026-11-11", None) == (
@@ -1397,6 +1421,7 @@ def test_expiring_facts_and_the_markdown_export_use_the_users_days(
 ) -> None:
     """R64: an expired fact is valid until the day before the user's today, and the export
     dates each fact by the user's day."""
+    _need_zones(SYDNEY, LA)
     clock.now = EVENING
     _know(store, "f1", "Is in Tokyo this week.", recorded_at=EVENING_AT)
     _know(store, "f2", "Has exams this week.", recorded_at=EVENING_AT)
@@ -1412,6 +1437,7 @@ def test_day_bounds_read_impossible_and_far_dates_as_the_text_compares() -> None
     """``days.bounds``: the start of the user's first day and of the day after the last. A
     day the calendar lacks is the nearest real one on its side; no real day there finds
     nothing (None); a day whose start a datetime can't hold leaves its side open."""
+    _need_zones(SYDNEY, LA, "America/Sao_Paulo", "UTC")
     assert days.bounds("2026-11-11", "2026-11-11", SYDNEY) == (
         "2026-11-10T13:00:00Z",
         "2026-11-11T13:00:00Z",
