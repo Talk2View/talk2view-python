@@ -469,14 +469,16 @@ _SELECT_TITLES = "SELECT id, title FROM conversations WHERE title != '' ORDER BY
 # and only rounds with text from conversations that aren't incognito. A fact's valid_until
 # never leaves it out (R65): facts stay true as history. A date filter keeps what was
 # recorded or said at or after one time and before another (days.bounds: the starts of the
-# user's first day and of the day after the last). The FTS5 lists take the query, (for
-# facts, whether superseded ones count,) the two times, (for rounds, the conversation to
-# leave out,) and a LIMIT.
+# user's first day and of the day after the last), and the conversation to leave out, when
+# there is one, takes its rounds and the facts drawn from it along. The FTS5 lists take the
+# query, (for facts, whether superseded ones count,) the two times, the conversation and a
+# LIMIT.
 _FTS_FACTS = (
     "SELECT f.id, f.recorded_at FROM facts_index JOIN facts AS f ON f.id = facts_index.fact_id"
     " WHERE facts_index MATCH ?1 AND f.hidden_at IS NULL AND (?2 OR f.superseded_by IS NULL)"
     " AND (?3 IS NULL OR f.recorded_at >= ?3) AND (?4 IS NULL OR f.recorded_at < ?4)"
-    " ORDER BY bm25(facts_index), f.recorded_at DESC, f.rowid DESC LIMIT ?5"
+    " AND (?5 IS NULL OR f.conversation_id IS NOT ?5)"
+    " ORDER BY bm25(facts_index), f.recorded_at DESC, f.rowid DESC LIMIT ?6"
 )
 _FTS_ROUNDS = (
     "SELECT r.conversation_id, r.idx, r.at FROM rounds_index"
@@ -491,12 +493,12 @@ _FTS_ROUNDS = (
 )
 # The scan backend reads every index row, since bm25_scan measures the whole table as FTS5
 # does, each with its time, its row and whether the same filters list it (and, for a fact,
-# whether it is superseded). They take the two times (and, for rounds, the conversation to
-# leave out).
+# whether it is superseded). They take the two times and the conversation to leave out.
 _SCAN_FACTS = (
     "SELECT fs.fact_id, fs.seg_text, f.recorded_at, f.rowid,"
     " f.id IS NOT NULL AND f.hidden_at IS NULL"
-    " AND (?1 IS NULL OR f.recorded_at >= ?1) AND (?2 IS NULL OR f.recorded_at < ?2),"
+    " AND (?1 IS NULL OR f.recorded_at >= ?1) AND (?2 IS NULL OR f.recorded_at < ?2)"
+    " AND (?3 IS NULL OR f.conversation_id IS NOT ?3),"
     " f.superseded_by IS NOT NULL"
     " FROM facts_scan AS fs LEFT JOIN facts AS f ON f.id = fs.fact_id"
 )
@@ -1492,8 +1494,8 @@ class MemoryStore:
         Status "paused" while memory is paused, or "incognito" when the current conversation
         is, both with empty lists. Otherwise "on": the visible entries not yet expired; the
         recent conversations but the current one and incognito ones; and the hits of a search
-        for ``latest_user_message`` in older conversations (the current one's rounds left
-        out) that clear the pre-selection floor."""
+        for ``latest_user_message`` in older conversations (the current one's rounds and the
+        facts drawn from it left out) that clear the pre-selection floor."""
         today = days.today(_utc(self._clock()), timezone).isoformat()
         with self._read():
             if self.paused:
@@ -1535,7 +1537,7 @@ class MemoryStore:
     ) -> List[Tuple[SearchHit, str]]:
         """``search``'s hits for ``terms``, each with the whole text it was indexed by
         (pre-selection's floor counts the terms in it), leaving out the rounds of
-        ``exclude_conversation``."""
+        ``exclude_conversation`` and the facts drawn from it (review Minor 3)."""
         for name, value in (("from_date", from_date), ("to_date", to_date)):
             if date_problem(value):
                 raise ValueError(name + " must be a YYYY-MM-DD date")
@@ -1545,9 +1547,9 @@ class MemoryStore:
         start, end = span
         with self._read():
             rounds = self._ranked_rounds(terms, start, end, exclude_conversation, limit)
-            facts = self._ranked_facts(terms, start, end, False, limit)
+            facts = self._ranked_facts(terms, start, end, exclude_conversation, False, limit)
             if not facts and not rounds:  # superseded facts only when nothing else matches
-                facts = self._ranked_facts(terms, start, end, True, limit)
+                facts = self._ranked_facts(terms, start, end, exclude_conversation, True, limit)
             lists = [[ref for ref, _ in facts], [ref for ref, _ in rounds]]
             fused = fuse(lists, dict(facts + rounds))[:limit]
             return [self._hit(ref, score, terms, timezone) for ref, score in fused]
@@ -1557,19 +1559,21 @@ class MemoryStore:
         terms: List[str],
         start: Optional[str],
         end: Optional[str],
+        exclude_conversation: Optional[str],
         superseded: bool,
         limit: int,
     ) -> List[Tuple[str, str]]:
         """The facts that match, best first, at most ``limit``, as ``(id, recorded_at)``:
-        recorded from ``start`` to before ``end``."""
+        recorded from ``start`` to before ``end``, not drawn from ``exclude_conversation``."""
         if self.backend != "scan":
             return [
                 (fact_id, recorded_at)
                 for fact_id, recorded_at in self._query(
-                    _FTS_FACTS, (fts_query(terms), int(superseded), start, end, limit)
+                    _FTS_FACTS,
+                    (fts_query(terms), int(superseded), start, end, exclude_conversation, limit),
                 )
             ]
-        rows = self._query(_SCAN_FACTS, (start, end))
+        rows = self._query(_SCAN_FACTS, (start, end, exclude_conversation))
         scores = dict(
             bm25_scan([(row[0], row[1]) for row in rows], terms, cache=self._scan_cache["facts"])
         )

@@ -757,6 +757,34 @@ def test_preselection_floor(store: MemoryStore) -> None:
     assert store.turn_payload(TOKYO + TRAVEL, exclude_conversation="c1")["recalled"] == []
 
 
+def test_the_current_conversations_facts_are_not_recalled(store: MemoryStore) -> None:
+    """Review Minor 3: a turn's recalled hits come from older conversations, so the facts
+    drawn from the current one are left out with its rounds: they are in the turn's context
+    already. A fact drawn from no conversation stays, and a search with no current
+    conversation finds every one, superseded ones too when only those match."""
+    booked, june = "Booked a kayak trip to Norway.", "The kayak trip to Norway is in June."
+    packed = "Packed a drybag for the kayak trip."
+    _know(store, "f1", booked, conversation_id="c1")
+    _know(store, "f2", june, conversation_id="c2")
+    _know(store, "f3", packed)  # drawn from no conversation
+    question = "When is the kayak trip to Norway?"
+
+    def recalled(text: str, current: Optional[str]) -> List[str]:
+        items = store.turn_payload(text, exclude_conversation=current)["recalled"]
+        return sorted(item["text"] for item in items)
+
+    assert recalled(question, "c1") == sorted([june, packed])
+    assert recalled(question, "c2") == sorted([booked, packed])
+    assert recalled(question, None) == sorted([booked, june, packed])
+    assert sorted(_refs(store.search(question))) == ["f1", "f2", "f3"]
+    # Superseded facts, which count only when nothing else matches, are left out alike.
+    gone = {"superseded_by": "f9", "superseded_at": "2026-10-21T09:00:00Z"}
+    _know(store, "f4", "Sketched a zebracorn in pencil.", conversation_id="c1", **gone)
+    _know(store, "f5", "Painted a zebracorn in pencil.", **gone)
+    assert recalled("zebracorn in pencil", "c1") == ["Painted a zebracorn in pencil."]
+    assert len(recalled("zebracorn in pencil", None)) == 2
+
+
 def test_one_word_written_two_ways_is_one_term(store: MemoryStore) -> None:
     """Review Minor 1: a word that another word of the query begins is left out, as
     "kayak"* matches "kayaking" already, so one word written two ways counts once toward
