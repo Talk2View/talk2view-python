@@ -564,35 +564,22 @@ def _dumps(value: Dict[str, Any]) -> str:
     return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
 
 
+# The plan's interfaces, and what store.py and payload.py use (review Minor 5).
 __all__ = [
-    "CJK_STOP_BIGRAMS",
-    "ELLIPSIS",
-    "EXCERPT_WIDTH",
     "PRESELECT_FLOOR",
     "PRESELECT_MIN_TERMS",
-    "QUERY_BIGRAMS_MAX",
-    "QUERY_TERMS_MAX",
-    "RRF_K",
-    "TRUNCATED",
     "best_first",
     "bm25_scan",
     "build_fts_query",
     "conversation_title",
     "excerpt",
     "fact_hit",
-    "first_match",
     "fts_query",
-    "fts_term",
     "fuse",
-    "is_phrase",
-    "matched_terms",
     "preselected",
     "query_terms",
     "result_json",
     "round_hit",
     "round_ref",
-    "round_text",
     "rrf",
-    "strong_match",
-    "term_frequency",
 ]

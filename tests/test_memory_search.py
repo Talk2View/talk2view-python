@@ -6,6 +6,8 @@ scan backend must find what FTS5 finds, and rank it the same way."""
 
 from __future__ import annotations
 
+import ast
+import inspect
 import itertools
 import json
 import os
@@ -26,6 +28,9 @@ from typing import Any, Callable, Dict, Iterator, List, Optional, Sequence, Set,
 import pytest
 
 from talk2view.memory import TOPICS, MemoryStore, SearchHit, days, index_tokens, normalise_for_index
+from talk2view.memory import payload as payload_module
+from talk2view.memory import search as search_module
+from talk2view.memory import store as store_module
 from talk2view.memory.models import FACT_TEXT_MAX, RECALLED_TEXT_MAX, RESULT_CHARS_MAX
 from talk2view.memory.payload import keep_within, recalled_items
 from talk2view.memory.search import (
@@ -1574,6 +1579,22 @@ def test_fold_latin_and_is_segmented() -> None:
         assert is_segmented(ch)
     for ch in ("a", "1", chr(0xE0), chr(0x0643), chr(0xAC00)):  # Hangul spaces its words
         assert not is_segmented(ch)
+
+
+# ── what search.py exports ──
+
+
+def test_search_exports_the_plans_interfaces_and_what_the_store_uses() -> None:
+    """Review Minor 5: each name search.py exports is a contract a port or a fixture may
+    pin, so it exports the plan's interfaces and what store.py and payload.py take from it,
+    and nothing else."""
+    used = {"build_fts_query", "query_terms", "rrf", "bm25_scan", "excerpt"}
+    used |= {"PRESELECT_FLOOR", "PRESELECT_MIN_TERMS"}
+    for module in (store_module, payload_module):
+        for node in ast.walk(ast.parse(inspect.getsource(module))):
+            if isinstance(node, ast.ImportFrom) and node.level == 1 and node.module == "search":
+                used |= {alias.name for alias in node.names}
+    assert sorted(search_module.__all__) == sorted(used)
 
 
 # ── speed ──
