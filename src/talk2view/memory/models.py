@@ -18,6 +18,7 @@ ENTRY_MAX = 40
 ENTRY_TEXT_MAX = 300
 ENTRIES_CHARS_MAX = 6000
 FACT_TEXT_MAX = 400
+FORGET_TEXT_MIN = 2  # a forget's phrase, once normalised: one letter is in nearly every text
 RECENT_MAX = 8
 RECENT_CHARS_MAX = 3000
 RECALLED_MAX = 4
@@ -102,13 +103,17 @@ class SearchHit:
 @dataclass(frozen=True)
 class AppliedBatch:
     """One batch of memory changes as applied: what was applied, what was dropped, and what
-    was removed, kept so the batch can be undone."""
+    was removed, kept so the batch can be undone. A forget also reaches the store's log of
+    the chats: ``cleared_rounds`` counts the rounds it blanked, ``cleared_summaries`` the
+    summaries it cleared."""
 
     id: str
     applied: List[Dict[str, Any]]
     dropped: List[str]
     removed_entries: List[MemoryEntry]
     removed_facts: List[Fact]
+    cleared_rounds: int = 0
+    cleared_summaries: int = 0
 
 
 __all__ = [
@@ -118,6 +123,7 @@ __all__ = [
     "ENTRY_MAX",
     "ENTRY_TEXT_MAX",
     "FACT_TEXT_MAX",
+    "FORGET_TEXT_MIN",
     "IDLE_EXTRACT_S",
     "RECALLED_CHARS_MAX",
     "RECALLED_MAX",
