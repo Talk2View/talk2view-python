@@ -459,8 +459,14 @@ def excerpt(
 
     ``find_in``, text of the same length, is where to look for the term instead of
     ``text``: ``round_hit`` passes the round's text with its labels blanked."""
+    start, end = _window(text, terms, width, find_in)
+    return _shown(text, start, end)
+
+
+def _window(text: str, terms: Sequence[str], width: int, find_in: Optional[str]) -> Tuple[int, int]:
+    """Where ``excerpt`` cuts ``text``, as ``(start, end)``."""
     if len(text) <= width:
-        return text
+        return 0, len(text)
     found = first_match(text if find_in is None else find_in, terms)
     begin, finish = found if found is not None else (0, 0)
     start = max(0, min(begin - width // 2, len(text) - width))
@@ -474,8 +480,14 @@ def excerpt(
             if text[position].isspace():
                 end = position
                 break
-    piece = text[start:end].strip()
-    return (ELLIPSIS if start > 0 else "") + piece + (ELLIPSIS if end < len(text) else "")
+    return start, end
+
+
+def _shown(text: str, start: int, end: int, label: str = "") -> str:
+    """``text`` cut at ``start`` and ``end``, an ellipsis at each end that was cut, the
+    first followed by ``label``."""
+    head = ELLIPSIS + label if start > 0 else ""
+    return head + text[start:end].strip() + (ELLIPSIS if end < len(text) else "")
 
 
 def fact_hit(
@@ -501,16 +513,32 @@ def round_hit(
 ) -> SearchHit:
     """A round as a search result: an ``excerpt`` of its ``round_text``, dated ``date``, the
     user's day it was said (``days.day``). The excerpt is centred on a term in what was
-    said, never in a label: "use" begins "User"."""
+    said, never in a label: "use" begins "User". One cut after the round's start gives the
+    label of the side it starts in after the ellipsis, "… Assistant: …", so whose words
+    they are is never lost (review Minor 2); its width is excerpt's."""
+    text = round_text(user_text, assistant_text)
     said = _labelled(user_text, assistant_text, " " * len(_USER_LABEL), " " * len(_ASSISTANT_LABEL))
+    start, end = _window(text, terms, EXCERPT_WIDTH, said)
+    label = " " + _side_label(text, start, end, user_text, assistant_text)
     return SearchHit(
         kind="excerpt",
         date=date,
         conversation=title,
-        text=excerpt(round_text(user_text, assistant_text), terms, find_in=said),
+        text=_shown(text, start, end, label),
         score=score,
         ref=ref,
     )
+
+
+def _side_label(text: str, start: int, end: int, user_text: str, assistant_text: str) -> str:
+    """The label of the side of ``text``, a ``round_text``, that the excerpt from ``start``
+    to ``end`` begins in: "" when it begins with that label already."""
+    cut = text[start:end]
+    first = start + len(cut) - len(cut.lstrip())  # where the excerpt's text begins
+    reply = len(_USER_LABEL) + len(user_text) + 1 if user_text else 0  # the reply's label
+    if not assistant_text or first < reply:
+        return _USER_LABEL if first > 0 else ""
+    return _ASSISTANT_LABEL if first > reply else ""
 
 
 # ── the search_memory result (spec §8.4) ──

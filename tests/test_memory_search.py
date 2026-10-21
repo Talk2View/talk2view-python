@@ -45,6 +45,7 @@ from talk2view.memory.search import (
     fuse,
     preselected,
     query_terms,
+    round_hit,
     round_text,
     rrf,
     strong_match,
@@ -620,8 +621,8 @@ def test_a_round_hit_is_an_excerpt_saying_who_said_what(store: MemoryStore) -> N
         ref="r:c2:1",
     )
     long = hits["r:c1:1"]
-    assert long.text.startswith(ELLIPSIS) and long.text.endswith(ELLIPSIS)
-    assert "zebracorn" in long.text and len(long.text) <= 602
+    assert long.text.startswith(ELLIPSIS + " User: word") and long.text.endswith(ELLIPSIS)
+    assert "zebracorn" in long.text and len(long.text) <= 602 + len(" User: ")
     assert (long.kind, long.date, long.conversation) == ("excerpt", "2026-10-20", "Notes")
     fact = hits["f1"]
     assert (fact.kind, fact.date, fact.conversation, fact.text) == (
@@ -638,6 +639,34 @@ def test_an_excerpt_centres_on_what_was_said_not_its_labels(store: MemoryStore) 
     _say(store, "c1", " ".join(_words(150)) + " Then I use the kayak.", "Fine.", title="Notes")
     [hit] = store.search("use")
     assert hit.text.startswith(ELLIPSIS) and "I use the kayak." in hit.text
+
+
+def test_an_excerpt_says_whose_words_it_starts_in(store: MemoryStore) -> None:
+    """Review Minor 2: an excerpt cut after the start of its round gives the label of the
+    side it starts in after the ellipsis, once, so the model can tell the user's words
+    from the reply's. Where it is cut is excerpt's choice, as it was."""
+    deep = " ".join(_words(150)) + " zebracorn " + " ".join(_words(150, 150))
+    terms = ["zebracorn"]
+
+    def shown(user_text: str, assistant_text: str) -> str:
+        return round_hit("r:c1:1", 0.0, user_text, assistant_text, "2026-10-21", "", terms).text
+
+    reply = shown("Tell me about zebras.", deep)
+    text = round_text("Tell me about zebras.", deep)
+    assert reply == ELLIPSIS + " Assistant: " + excerpt(text, terms)[1:]
+    assert reply.startswith(ELLIPSIS + " Assistant: word") and reply.endswith(ELLIPSIS)
+    assert shown(deep, "Sounds good.").startswith(ELLIPSIS + " User: word")
+    assert shown("", deep).startswith(ELLIPSIS + " Assistant: word")
+    # Cut where the reply's own label begins: the label once.
+    at_label = shown(" ".join(_words(10)) + " " + "x" * 600, " ".join(_words(10)) + " zebracorn")
+    assert at_label.startswith(ELLIPSIS + " Assistant: word000 ")
+    assert at_label.count("Assistant:") == 1
+    # Not cut: the round's own labels, as before.
+    assert shown("Is a zebracorn real?", "No.") == "User: Is a zebracorn real?\nAssistant: No."
+
+    _say(store, "c1", "Tell me about zebras.", deep, title="Zebras")
+    [hit] = store.search("zebracorn")
+    assert hit.text == reply
 
 
 # ── the search_memory result (§8.4) ──
