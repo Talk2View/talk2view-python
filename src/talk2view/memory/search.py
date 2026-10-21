@@ -464,11 +464,10 @@ def excerpt(
     return (ELLIPSIS if start > 0 else "") + piece + (ELLIPSIS if end < len(text) else "")
 
 
-def fact_hit(ref: str, score: float, text: str, recorded_at: str, title: str) -> SearchHit:
-    """A fact as a search result: its text whole, dated the day it was recorded."""
-    return SearchHit(
-        kind="fact", date=recorded_at[:10], conversation=title, text=text, score=score, ref=ref
-    )
+def fact_hit(ref: str, score: float, text: str, date: str, title: str) -> SearchHit:
+    """A fact as a search result: its text whole, dated ``date``, the user's day it was
+    recorded (``days.day``)."""
+    return SearchHit(kind="fact", date=date, conversation=title, text=text, score=score, ref=ref)
 
 
 def round_hit(
@@ -476,17 +475,17 @@ def round_hit(
     score: float,
     user_text: str,
     assistant_text: str,
-    at: str,
+    date: str,
     title: str,
     terms: Sequence[str],
 ) -> SearchHit:
-    """A round as a search result: an ``excerpt`` of its ``round_text``, dated the day it
-    was said. The excerpt is centred on a term in what was said, never in a label: "use"
-    begins "User"."""
+    """A round as a search result: an ``excerpt`` of its ``round_text``, dated ``date``, the
+    user's day it was said (``days.day``). The excerpt is centred on a term in what was
+    said, never in a label: "use" begins "User"."""
     said = _labelled(user_text, assistant_text, " " * len(_USER_LABEL), " " * len(_ASSISTANT_LABEL))
     return SearchHit(
         kind="excerpt",
-        date=at[:10],
+        date=date,
         conversation=title,
         text=excerpt(round_text(user_text, assistant_text), terms, find_in=said),
         score=score,

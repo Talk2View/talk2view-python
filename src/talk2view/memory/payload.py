@@ -13,6 +13,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
+from .days import day
 from .models import (
     ENTRIES_CHARS_MAX,
     ENTRY_MAX,
@@ -61,60 +62,68 @@ def keep_within(
     return sorted(kept)
 
 
-def entry_items(entries: Sequence[MemoryEntry], today: str) -> List[Dict[str, Any]]:
+def entry_items(
+    entries: Sequence[MemoryEntry], today: str, timezone: Optional[str] = None
+) -> List[Dict[str, Any]]:
     """The entries a turn sends, in the store's order: every visible one still valid on
-    ``today`` (a ``valid_until`` before it has expired) that the engine would accept, within
-    ENTRY_MAX (40) entries and ENTRIES_CHARS_MAX (6,000) code points of text. Over a cap,
-    unlocked entries are left out before locked ones, the least recently updated first and,
-    on a tie, the later in the store's order, as the engine trims."""
-    usable = [
-        entry
-        for entry in entries
-        if not (entry.valid_until is not None and entry.valid_until < today) and _valid_entry(entry)
-    ]
+    ``today``, the user's date (a ``valid_until`` before it has expired), that the engine
+    would accept, within ENTRY_MAX (40) entries and ENTRIES_CHARS_MAX (6,000) code points of
+    text. Over a cap, unlocked entries are left out before locked ones, the least recently
+    updated first and, on a tie, the later in the store's order, as the engine trims. Each
+    is sent with the day it was updated in ``timezone``, the user's (``days``)."""
+    usable: List[Tuple[MemoryEntry, str]] = []  # each with the day it was updated
+    for entry in entries:
+        expired = entry.valid_until is not None and entry.valid_until < today
+        updated = day(entry.updated_at, timezone)
+        if not expired and _valid_entry(entry, updated):
+            usable.append((entry, updated))
     ranked = list(range(len(usable)))  # stable sorts: on a tie, the earlier stays ahead
-    ranked.sort(key=lambda position: usable[position].updated_at, reverse=True)
-    ranked.sort(key=lambda position: usable[position].locked, reverse=True)
-    sizes = [len(entry.text) for entry in usable]
+    ranked.sort(key=lambda position: usable[position][0].updated_at, reverse=True)
+    ranked.sort(key=lambda position: usable[position][0].locked, reverse=True)
+    sizes = [len(entry.text) for entry, _ in usable]
     return [
-        _entry_item(usable[position])
+        _entry_item(*usable[position])
         for position in keep_within(sizes, ranked, ENTRY_MAX, ENTRIES_CHARS_MAX)
     ]
 
 
-def _valid_entry(entry: MemoryEntry) -> bool:
-    """Whether the engine accepts the entry as the store holds it."""
+def _valid_entry(entry: MemoryEntry, updated: str) -> bool:
+    """Whether the engine accepts the entry as the store holds it, updated on the day
+    ``updated``."""
     return not (
         id_problem(entry.id)
         or topic_problem(entry.topic)
         or text_problem(entry.text)
-        or date_problem(entry.updated_at[:10])
+        or date_problem(updated)
         or date_problem(entry.valid_until)
     )
 
 
-def _entry_item(entry: MemoryEntry) -> Dict[str, Any]:
+def _entry_item(entry: MemoryEntry, updated: str) -> Dict[str, Any]:
     item: Dict[str, Any] = {
         "id": entry.id,
         "topic": entry.topic,
         "text": entry.text,
-        "updated_at": entry.updated_at[:10],
+        "updated_at": updated,
     }
     if entry.valid_until is not None:
         item["valid_until"] = entry.valid_until
     return item
 
 
-def recent_items(conversations: Sequence[ConversationRecord]) -> List[Dict[str, Any]]:
+def recent_items(
+    conversations: Sequence[ConversationRecord], timezone: Optional[str] = None
+) -> List[Dict[str, Any]]:
     """The recent conversations a turn sends, newest first, from ``conversations`` (most
     recently active first, incognito ones and the current one left out already), within
     RECENT_MAX (8) and RECENT_CHARS_MAX (3,000) code points of title and summary, the
     least recently active going first. A conversation is named by ``conversation_title``,
-    with its summary's text when it has one; one with no name left, as when a forget has
+    with its summary's text when it has one, and sent with the day it was last active in
+    ``timezone``, the user's (``days``); one with no name left, as when a forget has
     cleared it, or with an id the engine would refuse, is passed over."""
     items: List[Dict[str, Any]] = []
     for record in conversations:
-        item = _recent_item(record)
+        item = _recent_item(record, timezone)
         if item is not None:
             items.append(item)
     sizes = [len(item["title"]) + len(item["summary"]) for item in items]
@@ -122,9 +131,9 @@ def recent_items(conversations: Sequence[ConversationRecord]) -> List[Dict[str, 
     return [items[position] for position in kept]
 
 
-def _recent_item(record: ConversationRecord) -> Optional[Dict[str, Any]]:
+def _recent_item(record: ConversationRecord, timezone: Optional[str]) -> Optional[Dict[str, Any]]:
     title = conversation_title(record.title, record.summary_title)
-    last_active = record.last_active_at[:10]
+    last_active = day(record.last_active_at, timezone)
     if not title or id_problem(record.id) or date_problem(last_active):
         return None
     return {

@@ -46,7 +46,7 @@ from typing import (
 )
 
 from ..storage import _DIR_MODE, _FILE_MODE, _POSIX_PERMISSIONS
-from . import payload
+from . import days, payload
 from .models import (
     CONSOLIDATE_EVERY_S,
     CONSOLIDATE_FACTS_MAX,
@@ -466,16 +466,18 @@ _SELECT_TITLES = "SELECT id, title FROM conversations WHERE title != '' ORDER BY
 # Search's reads (search.py ranks and fuses). A search lists the facts and the rounds that
 # match, each list best first: bm25() ascending (FTS5's sign: lower is better), then the
 # newer, then the later row. It lists only visible facts, superseded ones only when asked,
-# and only rounds with text from conversations that aren't incognito; a date filter takes
-# the UTC day a fact was recorded or a round said, both ends included. The FTS5 lists take
-# the query, (for facts, whether superseded ones count,) the two dates, (for rounds, the
-# conversation to leave out,) and a LIMIT.
+# and only rounds with text from conversations that aren't incognito. A date filter keeps
+# what was recorded or said at or after one time and before another (days.bounds: the
+# starts of the user's first day and of the day after the last), and for a turn's payload
+# a fact whose valid_until is before the user's today is left out too. The FTS5 lists take
+# the query, (for facts, whether superseded ones count,) the two times, (for facts, the
+# user's today; for rounds, the conversation to leave out,) and a LIMIT.
 _FTS_FACTS = (
     "SELECT f.id, f.recorded_at FROM facts_index JOIN facts AS f ON f.id = facts_index.fact_id"
     " WHERE facts_index MATCH ?1 AND f.hidden_at IS NULL AND (?2 OR f.superseded_by IS NULL)"
-    " AND (?3 IS NULL OR substr(f.recorded_at, 1, 10) >= ?3)"
-    " AND (?4 IS NULL OR substr(f.recorded_at, 1, 10) <= ?4)"
-    " ORDER BY bm25(facts_index), f.recorded_at DESC, f.rowid DESC LIMIT ?5"
+    " AND (?3 IS NULL OR f.recorded_at >= ?3) AND (?4 IS NULL OR f.recorded_at < ?4)"
+    " AND (?5 IS NULL OR f.valid_until IS NULL OR f.valid_until >= ?5)"
+    " ORDER BY bm25(facts_index), f.recorded_at DESC, f.rowid DESC LIMIT ?6"
 )
 _FTS_ROUNDS = (
     "SELECT r.conversation_id, r.idx, r.at FROM rounds_index"
@@ -484,20 +486,19 @@ _FTS_ROUNDS = (
     " JOIN conversations AS c ON c.id = r.conversation_id"
     " WHERE rounds_index MATCH ?1 AND c.incognito = 0"
     " AND (r.user_text != '' OR r.assistant_text != '')"
-    " AND (?2 IS NULL OR substr(r.at, 1, 10) >= ?2)"
-    " AND (?3 IS NULL OR substr(r.at, 1, 10) <= ?3)"
+    " AND (?2 IS NULL OR r.at >= ?2) AND (?3 IS NULL OR r.at < ?3)"
     " AND r.conversation_id IS NOT ?4"
     " ORDER BY bm25(rounds_index), r.at DESC, r.rowid DESC LIMIT ?5"
 )
 # The scan backend reads every index row, since bm25_scan measures the whole table as FTS5
 # does, each with its time, its row and whether the same filters list it (and, for a fact,
-# whether it is superseded). They take the two dates (and, for rounds, the conversation to
-# leave out).
+# whether it is superseded). They take the two times (and, for facts, the user's today;
+# for rounds, the conversation to leave out).
 _SCAN_FACTS = (
     "SELECT fs.fact_id, fs.seg_text, f.recorded_at, f.rowid,"
     " f.id IS NOT NULL AND f.hidden_at IS NULL"
-    " AND (?1 IS NULL OR substr(f.recorded_at, 1, 10) >= ?1)"
-    " AND (?2 IS NULL OR substr(f.recorded_at, 1, 10) <= ?2),"
+    " AND (?1 IS NULL OR f.recorded_at >= ?1) AND (?2 IS NULL OR f.recorded_at < ?2)"
+    " AND (?3 IS NULL OR f.valid_until IS NULL OR f.valid_until >= ?3),"
     " f.superseded_by IS NOT NULL"
     " FROM facts_scan AS fs LEFT JOIN facts AS f ON f.id = fs.fact_id"
 )
@@ -505,8 +506,7 @@ _SCAN_ROUNDS = (
     "SELECT rs.conversation_id, rs.idx, rs.seg_text, r.at, r.rowid,"
     " r.rowid IS NOT NULL AND c.incognito = 0"
     " AND (r.user_text != '' OR r.assistant_text != '')"
-    " AND (?1 IS NULL OR substr(r.at, 1, 10) >= ?1)"
-    " AND (?2 IS NULL OR substr(r.at, 1, 10) <= ?2)"
+    " AND (?1 IS NULL OR r.at >= ?1) AND (?2 IS NULL OR r.at < ?2)"
     " AND r.conversation_id IS NOT ?3"
     " FROM rounds_scan AS rs"
     " LEFT JOIN rounds AS r ON r.conversation_id = rs.conversation_id AND r.idx = rs.idx"
@@ -589,11 +589,11 @@ def _entry_line(entry: MemoryEntry) -> str:
     return "- " + _one_line(entry.text) + (" (" + "; ".join(notes) + ")" if notes else "")
 
 
-def _fact_line(fact: Fact) -> str:
+def _fact_line(fact: Fact, timezone: Optional[str]) -> str:
     notes = ["until " + fact.valid_until] if fact.valid_until else []
     if fact.superseded_by:
         notes.append("superseded")
-    line = "- " + fact.recorded_at[:10] + ": " + _one_line(fact.text)
+    line = "- " + days.day(fact.recorded_at, timezone) + ": " + _one_line(fact.text)
     return line + (" (" + "; ".join(notes) + ")" if notes else "")
 
 
@@ -1040,11 +1040,12 @@ class MemoryStore:
             if merged:
                 self._raise_revision()
 
-    def expire_facts(self, ids: Sequence[str]) -> None:
+    def expire_facts(self, ids: Sequence[str], *, timezone: Optional[str] = None) -> None:
         """Consolidation's facts about something current or upcoming that is over: each
-        visible one gets ``valid_until`` the day before the clock's date (UTC), unless it
-        ends earlier already. Facts stay true as history, so none is deleted."""
-        yesterday = (_utc(self._clock()).date() - timedelta(days=1)).isoformat()
+        visible one gets ``valid_until`` the day before the clock's date in ``timezone``,
+        the user's (see ``days``: None means the system's local zone), unless it ends
+        earlier already. Facts stay true as history, so none is deleted."""
+        yesterday = (days.today(_utc(self._clock()), timezone) - timedelta(days=1)).isoformat()
         with self._write():
             expired = False
             for fact_id in ids:
@@ -1426,6 +1427,7 @@ class MemoryStore:
         from_date: Optional[str] = None,
         to_date: Optional[str] = None,
         limit: int = 8,
+        timezone: Optional[str] = None,
     ) -> List[SearchHit]:
         """Search the facts and the log of the chats for ``query`` (spec §7.2), in one read:
         at most ``limit`` hits, best first.
@@ -1434,19 +1436,25 @@ class MemoryStore:
         letters left out, and 24 bigrams of CJK or Thai text) are looked up in the facts
         and, separately, in the rounds, each list ranked by BM25. Superseded facts are left
         out unless nothing else matches; hidden facts, rounds a forget blanked and incognito
-        conversations' rounds never show. With
-        ``from_date`` or ``to_date`` (YYYY-MM-DD, both included; ValueError otherwise),
-        only what was recorded or said on those UTC days. The two lists are fused by
-        reciprocal rank fusion (k = 60), a tie going to the newer. A fact comes whole; a
-        round as an excerpt of about 600 code points around its first match. Each hit has
-        its date and its conversation's name ("" when it has none). A query with no terms
-        finds nothing."""
-        return [
-            hit
-            for hit, _ in self._found(
-                query_terms(query), from_date=from_date, to_date=to_date, limit=limit
-            )
-        ]
+        conversations' rounds never show. With ``from_date`` or ``to_date`` (YYYY-MM-DD,
+        both included; ValueError otherwise), only what was recorded or said on those days
+        in ``timezone`` (``days.bounds``: a day the calendar lacks, such as 2026-04-31,
+        reads as the nearest real one). The two lists are fused by reciprocal rank fusion
+        (k = 60), a tie going to the newer. A fact comes whole; a round as an excerpt of
+        about 600 code points around its first match. Each hit has its date, the day in
+        ``timezone``, and its conversation's name ("" when it has none). A query with no
+        terms finds nothing.
+
+        ``timezone`` is the user's, an IANA name such as "Australia/Perth". None, or a name
+        this platform doesn't know, means the system's local zone (``days``)."""
+        found = self._found(
+            query_terms(query),
+            from_date=from_date,
+            to_date=to_date,
+            limit=limit,
+            timezone=timezone,
+        )
+        return [hit for hit, _ in found]
 
     def search_result_json(
         self,
@@ -1455,6 +1463,7 @@ class MemoryStore:
         from_date: Optional[str] = None,
         to_date: Optional[str] = None,
         limit: int = 8,
+        timezone: Optional[str] = None,
     ) -> str:
         """The ``search_memory`` tool's result for these arguments (spec §8.4): ``search``,
         with ``limit`` kept within 1 to RESULT_LIMIT_MAX (20), as ``{"results": [{"date",
@@ -1465,22 +1474,29 @@ class MemoryStore:
             from_date=from_date,
             to_date=to_date,
             limit=max(1, min(limit, RESULT_LIMIT_MAX)),
+            timezone=timezone,
         )
         return result_json(hits)
 
     def turn_payload(
-        self, latest_user_message: Optional[str], *, exclude_conversation: Optional[str] = None
+        self,
+        latest_user_message: Optional[str],
+        *,
+        exclude_conversation: Optional[str] = None,
+        timezone: Optional[str] = None,
     ) -> Dict[str, Any]:
         """The ``memory`` field for a turn (spec §8.1), read in one read: ``{"status",
         "entries", "recent", "recalled"}``, every list within the engine's caps (see
-        payload.py). ``exclude_conversation`` is the current conversation.
+        payload.py). ``exclude_conversation`` is the current conversation. ``timezone`` is
+        the user's, as ``search`` takes it: every day in the field is a day there, "today"
+        for expiry among them.
 
         Status "paused" while memory is paused, or "incognito" when the current conversation
         is, both with empty lists. Otherwise "on": the visible entries not yet expired; the
         recent conversations but the current one and incognito ones; and the hits of a search
         for ``latest_user_message`` in older conversations (the current one's rounds left
-        out) that clear the pre-selection floor."""
-        today = _utc(self._clock()).date().isoformat()
+        out) that clear the pre-selection floor, facts that have expired left out."""
+        today = days.today(_utc(self._clock()), timezone).isoformat()
         with self._read():
             if self.paused:
                 return payload.empty("paused")
@@ -1500,11 +1516,13 @@ class MemoryStore:
                 to_date=None,
                 limit=payload.PRESELECT_SEARCH_LIMIT,
                 exclude_conversation=exclude_conversation,
+                timezone=timezone,
+                valid_on=today,
             )
         return {
             "status": "on",
-            "entries": payload.entry_items(entries, today),
-            "recent": payload.recent_items(recent),
+            "entries": payload.entry_items(entries, today, timezone),
+            "recent": payload.recent_items(recent, timezone),
             "recalled": payload.recalled_items(found, terms),
         }
 
@@ -1516,41 +1534,49 @@ class MemoryStore:
         to_date: Optional[str],
         limit: int,
         exclude_conversation: Optional[str] = None,
+        timezone: Optional[str] = None,
+        valid_on: Optional[str] = None,
     ) -> List[Tuple[SearchHit, str]]:
         """``search``'s hits for ``terms``, each with the whole text it was indexed by
         (pre-selection's floor counts the terms in it), leaving out the rounds of
-        ``exclude_conversation``."""
+        ``exclude_conversation`` and, with ``valid_on`` (the user's today), the facts whose
+        ``valid_until`` is before it."""
         for name, value in (("from_date", from_date), ("to_date", to_date)):
             if date_problem(value):
                 raise ValueError(name + " must be a YYYY-MM-DD date")
-        if not terms or limit < 1:
+        span = days.bounds(from_date, to_date, timezone)
+        if not terms or limit < 1 or span is None:
             return []
+        start, end = span
         with self._read():
-            rounds = self._ranked_rounds(terms, from_date, to_date, exclude_conversation, limit)
-            facts = self._ranked_facts(terms, from_date, to_date, False, limit)
+            rounds = self._ranked_rounds(terms, start, end, exclude_conversation, limit)
+            facts = self._ranked_facts(terms, start, end, valid_on, False, limit)
             if not facts and not rounds:  # superseded facts only when nothing else matches
-                facts = self._ranked_facts(terms, from_date, to_date, True, limit)
+                facts = self._ranked_facts(terms, start, end, valid_on, True, limit)
             lists = [[ref for ref, _ in facts], [ref for ref, _ in rounds]]
             fused = fuse(lists, dict(facts + rounds))[:limit]
-            return [self._hit(ref, score, terms) for ref, score in fused]
+            return [self._hit(ref, score, terms, timezone) for ref, score in fused]
 
     def _ranked_facts(
         self,
         terms: List[str],
-        from_date: Optional[str],
-        to_date: Optional[str],
+        start: Optional[str],
+        end: Optional[str],
+        valid_on: Optional[str],
         superseded: bool,
         limit: int,
     ) -> List[Tuple[str, str]]:
-        """The facts that match, best first, at most ``limit``, as ``(id, recorded_at)``."""
+        """The facts that match, best first, at most ``limit``, as ``(id, recorded_at)``:
+        recorded from ``start`` to before ``end``, still valid on ``valid_on``."""
         if self.backend != "scan":
             return [
                 (fact_id, recorded_at)
                 for fact_id, recorded_at in self._query(
-                    _FTS_FACTS, (fts_query(terms), int(superseded), from_date, to_date, limit)
+                    _FTS_FACTS,
+                    (fts_query(terms), int(superseded), start, end, valid_on, limit),
                 )
             ]
-        rows = self._query(_SCAN_FACTS, (from_date, to_date))
+        rows = self._query(_SCAN_FACTS, (start, end, valid_on))
         scores = dict(
             bm25_scan([(row[0], row[1]) for row in rows], terms, cache=self._scan_cache["facts"])
         )
@@ -1566,21 +1592,22 @@ class MemoryStore:
     def _ranked_rounds(
         self,
         terms: List[str],
-        from_date: Optional[str],
-        to_date: Optional[str],
+        start: Optional[str],
+        end: Optional[str],
         exclude_conversation: Optional[str],
         limit: int,
     ) -> List[Tuple[str, str]]:
-        """The rounds that match, best first, at most ``limit``, as ``(round_ref, at)``."""
+        """The rounds that match, best first, at most ``limit``, as ``(round_ref, at)``:
+        said from ``start`` to before ``end``."""
         if self.backend != "scan":
             return [
                 (round_ref(conversation_id, idx), at)
                 for conversation_id, idx, at in self._query(
                     _FTS_ROUNDS,
-                    (fts_query(terms), from_date, to_date, exclude_conversation, limit),
+                    (fts_query(terms), start, end, exclude_conversation, limit),
                 )
             ]
-        rows = self._query(_SCAN_ROUNDS, (from_date, to_date, exclude_conversation))
+        rows = self._query(_SCAN_ROUNDS, (start, end, exclude_conversation))
         refs = [round_ref(row[0], row[1]) for row in rows]
         scores = dict(
             bm25_scan(
@@ -1598,20 +1625,23 @@ class MemoryStore:
             limit,
         )
 
-    def _hit(self, ref: str, score: float, terms: List[str]) -> Tuple[SearchHit, str]:
-        """The hit ``ref`` (a fact's id or a ``round_ref``) with its fused ``score``, and
-        the whole text it was indexed by."""
+    def _hit(
+        self, ref: str, score: float, terms: List[str], timezone: Optional[str]
+    ) -> Tuple[SearchHit, str]:
+        """The hit ``ref`` (a fact's id or a ``round_ref``) with its fused ``score``, dated
+        the day in ``timezone``, and the whole text it was indexed by."""
         if ref.startswith("r:"):
             conversation_id, idx = ref[2:].rsplit(":", 1)
             user_text, assistant_text, at, title, summary_title = self._query(
                 _ROUND_HIT, (conversation_id, int(idx))
             )[0]
             name = conversation_title(title, summary_title)
-            hit = round_hit(ref, score, user_text, assistant_text, at, name, terms)
+            date = days.day(at, timezone)
+            hit = round_hit(ref, score, user_text, assistant_text, date, name, terms)
             return hit, user_text + "\n" + assistant_text
         text, recorded_at, title, summary_title, incognito = self._query(_FACT_HIT, (ref,))[0]
         name = "" if incognito else conversation_title(title, summary_title)
-        return fact_hit(ref, score, text, recorded_at, name), text
+        return fact_hit(ref, score, text, days.day(recorded_at, timezone), name), text
 
     # ── settings and lifecycle ──
 
@@ -1647,10 +1677,11 @@ class MemoryStore:
         }
         return json.dumps(document, ensure_ascii=False, indent=2)
 
-    def export_markdown(self) -> str:
+    def export_markdown(self, *, timezone: Optional[str] = None) -> str:
         """Every entry and fact, as Markdown for the user to read: the entries under their
-        topics, then the facts with the date each was recorded. Superseded facts are in it,
-        marked; removed and forgotten entries and facts are not."""
+        topics, then the facts with the date each was recorded, the day in ``timezone``,
+        the user's (see ``days``: None means the system's local zone). Superseded facts are
+        in it, marked; removed and forgotten entries and facts are not."""
         with self._lock:
             entries, facts = self.entries(), self.facts(include_superseded=True)
         lines = ["# Memory", "", "Exported " + _timestamp(self._clock()) + ".", "", "## Entries"]
@@ -1667,7 +1698,7 @@ class MemoryStore:
         if not entries:
             lines += ["", "None."]
         lines += ["", "## Facts", ""]
-        lines += [_fact_line(fact) for fact in facts] or ["None."]
+        lines += [_fact_line(fact, timezone) for fact in facts] or ["None."]
         return "\n".join(lines) + "\n"
 
     def reset(self) -> None:

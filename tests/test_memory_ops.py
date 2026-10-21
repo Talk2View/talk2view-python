@@ -10,6 +10,7 @@ import itertools
 import json
 import logging
 import sqlite3
+import time
 from dataclasses import replace
 from datetime import timedelta
 from pathlib import Path
@@ -85,6 +86,22 @@ def store(tmp_path: Path, backend: str, clock: FakeClock) -> Iterator[MemoryStor
         yield memory
     finally:
         memory.close()
+
+
+@pytest.fixture(autouse=True)
+def _system_zone_is_utc(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    """The system's local zone is UTC for these tests, wherever they run: a store method
+    given no timezone takes the system's days (R64), as consolidation does until it passes
+    the user's, and these tests' dates are UTC days. Without time.tzset (Windows), the
+    machine's zone stays."""
+    if not hasattr(time, "tzset"):
+        yield
+        return
+    monkeypatch.setenv("TZ", "UTC")
+    time.tzset()
+    yield
+    monkeypatch.undo()
+    time.tzset()
 
 
 def _rows(store: MemoryStore, table: str) -> List[Tuple[Any, ...]]:

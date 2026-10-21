@@ -15,15 +15,17 @@ import sqlite3
 import statistics
 import time
 import unicodedata
+import zoneinfo
 from contextlib import closing
 from dataclasses import replace
 from datetime import timedelta
 from pathlib import Path
-from typing import Any, Dict, Iterator, List, Optional, Sequence, Set, Tuple
+from types import SimpleNamespace
+from typing import Any, Callable, Dict, Iterator, List, Optional, Sequence, Set, Tuple
 
 import pytest
 
-from talk2view.memory import TOPICS, MemoryStore, SearchHit, index_tokens, normalise_for_index
+from talk2view.memory import TOPICS, MemoryStore, SearchHit, days, index_tokens, normalise_for_index
 from talk2view.memory.models import RESULT_CHARS_MAX
 from talk2view.memory.payload import keep_within, recalled_items
 from talk2view.memory.search import (
@@ -145,6 +147,35 @@ def store(tmp_path: Path, backend: str, clock: FakeClock) -> Iterator[MemoryStor
         yield memory
     finally:
         memory.close()
+
+
+@pytest.fixture(autouse=True)
+def _system_zone_is_utc(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    """The system's local zone is UTC for these tests, wherever they run: with no timezone
+    given, a day is the system's (R64), and their dates are written for a user on UTC.
+    Without time.tzset (Windows), the machine's zone stays."""
+    if not hasattr(time, "tzset"):
+        yield
+        return
+    monkeypatch.setenv("TZ", "UTC")
+    time.tzset()
+    yield
+    monkeypatch.undo()
+    time.tzset()
+
+
+@pytest.fixture
+def system_zone(monkeypatch: pytest.MonkeyPatch) -> Callable[[str], None]:
+    """Sets the system's local zone, as the TZ variable does (Unix only); the autouse
+    fixture puts it back."""
+    if not hasattr(time, "tzset"):
+        pytest.skip("time.tzset is Unix only")
+
+    def set_zone(name: str) -> None:
+        monkeypatch.setenv("TZ", name)
+        time.tzset()
+
+    return set_zone
 
 
 def _stamp(days_ago: float = 0.0, *, hours_ago: float = 0.0) -> str:
@@ -405,22 +436,23 @@ def test_superseded_facts_excluded_unless_nothing_else(store: MemoryStore) -> No
 
 
 def test_date_filter_applies_to_both_corpora(store: MemoryStore) -> None:
-    """The filter takes the UTC day a fact was recorded or a round said, both ends
-    included."""
+    """The filter takes the day, in the user's timezone, a fact was recorded or a round
+    said, both ends included. The user here is on UTC (R64's tests try other zones)."""
     _know(store, "f1", "Took a kayak lesson.", recorded_at="2026-10-10T23:30:00Z")
     _know(store, "f2", "Entered a kayak race.", recorded_at="2026-10-20T00:10:00Z")
     _say(store, "c1", "Kayak lesson today.", days_ago=11)  # 2026-10-10
     _say(store, "c2", "Kayak race today.", days_ago=1)  # 2026-10-20
 
     def found(**dates: str) -> List[str]:
-        return sorted(_refs(store.search("kayak", **dates)))
+        return sorted(_refs(store.search("kayak", timezone="UTC", **dates)))
 
     assert found() == ["f1", "f2", "r:c1:1", "r:c2:1"]
     assert found(from_date="2026-10-15") == ["f2", "r:c2:1"]
     assert found(to_date="2026-10-10") == ["f1", "r:c1:1"]
     assert found(from_date="2026-10-20", to_date="2026-10-20") == ["f2", "r:c2:1"]
     assert found(from_date="2026-10-11", to_date="2026-10-19") == []
-    assert {hit.date for hit in store.search("kayak", from_date="2026-10-20")} == {"2026-10-20"}
+    hits = store.search("kayak", from_date="2026-10-20", timezone="UTC")
+    assert {hit.date for hit in hits} == {"2026-10-20"}
     for bad in ("2026-10-2", "20/10/2026", "2026-10-20T00:00:00Z", ""):
         with pytest.raises(ValueError, match="from_date must be a YYYY-MM-DD date"):
             store.search("kayak", from_date=bad)
@@ -1041,6 +1073,210 @@ def test_a_built_payload_passes_the_engines_rules_whole(store: MemoryStore) -> N
     )
     timed = dict(payload["recent"][0], last_active_at="2026-10-20T10:00:00Z")
     assert _engine_counts(dict(payload, recent=[timed]))["dropped recent"] == 1
+
+
+# ── the user's days (R64) ──
+
+LA, SYDNEY = "America/Los_Angeles", "Australia/Sydney"
+# Noon on 10 November in Los Angeles (UTC-8), 07:00 on the 11th in Sydney (UTC+11).
+EVENING = T0 + timedelta(days=20, hours=10)
+EVENING_AT = EVENING.strftime("%Y-%m-%dT%H:%M:%SZ")  # 2026-11-10T20:00:00Z
+UNKNOWN_ZONES = ("Mars/Olympus_Mons", "", "../../etc/passwd", "America", "not a zone")
+
+
+def test_an_entry_is_sent_until_its_last_day_ends_where_the_user_is(
+    store: MemoryStore, clock: FakeClock
+) -> None:
+    """R64: an entry valid until 2026-11-10 is still sent at noon on the 10th in Los Angeles
+    and no longer at 07:00 on the 11th in Sydney, the same instant. The day each entry was
+    updated, and each conversation last active, is the user's day too."""
+    clock.now = EVENING
+    trip = _entry("e1", "Is in Tokyo until 10 Nov.", topic="ongoing", valid_until="2026-11-10")
+    store._insert_entry(replace(trip, updated_at=EVENING_AT))
+    store._insert_entry(_entry("e2", "Has a dog.", updated_at=EVENING_AT))
+    store.record_round("c1", "Hello.", "Hi.", at=EVENING, title="Greetings")
+    dog = {"id": "e2", "topic": "identity", "text": "Has a dog."}
+    in_la = store.turn_payload(None, timezone=LA)
+    assert in_la["entries"] == [
+        {
+            "id": "e1",
+            "topic": "ongoing",
+            "text": "Is in Tokyo until 10 Nov.",
+            "updated_at": "2026-11-10",
+            "valid_until": "2026-11-10",
+        },
+        dict(dog, updated_at="2026-11-10"),
+    ]
+    in_sydney = store.turn_payload(None, timezone=SYDNEY)
+    assert in_sydney["entries"] == [dict(dog, updated_at="2026-11-11")]
+    assert [item["last_active_at"] for item in (*in_la["recent"], *in_sydney["recent"])] == [
+        "2026-11-10",
+        "2026-11-11",
+    ]
+
+
+def test_a_fact_past_its_valid_until_is_not_preselected_but_still_found(
+    store: MemoryStore, clock: FakeClock
+) -> None:
+    """R64: a fact whose valid_until is over where the user is goes unsent with a turn, as
+    an expired entry does. A search still finds it: facts stay true as history."""
+    clock.now = EVENING
+    flight = "Flies home from Tokyo on 10 November."
+    _know(store, "f1", flight, recorded_at="2026-10-01T09:00:00Z", valid_until="2026-11-10")
+    question = "When is my flight home from Tokyo?"
+    assert [item["text"] for item in store.turn_payload(question, timezone=LA)["recalled"]] == [
+        flight
+    ]
+    assert store.turn_payload(question, timezone=SYDNEY)["recalled"] == []
+    assert _refs(store.search(question, timezone=SYDNEY)) == ["f1"]
+
+
+def test_the_date_filter_and_hit_dates_are_the_users_days(store: MemoryStore) -> None:
+    """R64: the 11th in Sydney runs from 2026-11-10T13:00Z, included, to 2026-11-11T13:00Z,
+    so what was recorded or said at 2026-11-10T20:00Z is on it, and dated it. In Los Angeles
+    and in UTC the same instant is on the 10th."""
+    _know(store, "f1", "Booked a kayak lesson.", recorded_at=EVENING_AT)
+    _know(store, "f2", "Paid for the kayak.", recorded_at="2026-11-10T12:59:59Z")  # 23:59:59
+    _know(store, "f3", "The kayak arrived.", recorded_at="2026-11-10T13:00:00Z")  # midnight
+    store.record_round("c1", "Kayak lesson booked.", "", at=EVENING)
+    store.record_round("c2", "Kayak at dawn.", "", at=T0 + timedelta(days=20, hours=3))  # midnight
+
+    def found(day: str, zone: str) -> List[Tuple[str, str]]:
+        hits = store.search("kayak", from_date=day, to_date=day, timezone=zone)
+        return sorted((hit.ref, hit.date) for hit in hits)
+
+    on_the_11th = ["f1", "f3", "r:c1:1", "r:c2:1"]
+    assert found("2026-11-11", SYDNEY) == [(ref, "2026-11-11") for ref in on_the_11th]
+    assert found("2026-11-10", SYDNEY) == [("f2", "2026-11-10")]
+    result = json.loads(store.search_result_json("booked", timezone=SYDNEY))
+    assert [item["date"] for item in result["results"]] == ["2026-11-11", "2026-11-11"]
+    for zone in (LA, "UTC"):
+        assert found("2026-11-11", zone) == []
+        assert {date for _, date in found("2026-11-10", zone)} == {"2026-11-10"}
+        assert len(found("2026-11-10", zone)) == 5
+    # A day the calendar lacks reads as the text compares: November, the 0th to the 31st.
+    whole = store.search("kayak", from_date="2026-11-00", to_date="2026-11-31", timezone=SYDNEY)
+    assert len(whole) == 5
+
+
+def test_an_unknown_zone_falls_back_to_the_systems_without_raising(
+    store: MemoryStore, clock: FakeClock, system_zone: Callable[[str], None]
+) -> None:
+    """R64: a name zoneinfo can't use, unknown, empty, malformed or a folder of zones, means
+    the system's local zone, and nothing raises."""
+    clock.now = EVENING
+    store._insert_entry(_entry("e1", "Is in Tokyo until 10 Nov.", valid_until="2026-11-10"))
+    _know(store, "f1", "Booked a kayak lesson.", recorded_at=EVENING_AT)
+    system_zone(SYDNEY)
+    for name in UNKNOWN_ZONES:
+        assert store.turn_payload(None, timezone=name)["entries"] == []  # over on the 11th
+        [hit] = store.search("kayak", from_date="2026-11-11", timezone=name)
+        assert hit.date == "2026-11-11"
+    system_zone(LA)
+    for name in UNKNOWN_ZONES:
+        assert [item["id"] for item in store.turn_payload(None, timezone=name)["entries"]] == ["e1"]
+        assert store.search("kayak", from_date="2026-11-11", timezone=name) == []
+
+
+def test_with_no_tz_data_a_named_zone_falls_back_to_the_systems(
+    store: MemoryStore,
+    clock: FakeClock,
+    system_zone: Callable[[str], None],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """R64: on a platform with no tz data, such as Windows without tzdata, zoneinfo knows no
+    zone at all; the system's local zone stands in for every name."""
+
+    def no_tz_data(key: str) -> Any:
+        raise zoneinfo.ZoneInfoNotFoundError("No time zone found with key " + key)
+
+    clock.now = EVENING
+    store._insert_entry(_entry("e1", "Is in Tokyo until 10 Nov.", valid_until="2026-11-10"))
+    system_zone(LA)
+    monkeypatch.setattr(days, "zoneinfo", SimpleNamespace(ZoneInfo=no_tz_data))
+    days._named_zone.cache_clear()
+    try:
+        # Sydney is past the 10th, but the system's zone, Los Angeles, is not.
+        assert len(store.turn_payload(None, timezone=SYDNEY)["entries"]) == 1
+        assert days.day(EVENING_AT, SYDNEY) == "2026-11-10"
+    finally:
+        days._named_zone.cache_clear()
+
+
+def test_no_zone_means_the_systems(
+    store: MemoryStore, clock: FakeClock, system_zone: Callable[[str], None]
+) -> None:
+    """R64: with timezone None, the default, every day is the system's local zone's."""
+    clock.now = EVENING
+    store._insert_entry(_entry("e1", "Is in Tokyo until 10 Nov.", valid_until="2026-11-10"))
+    _know(store, "f1", "Booked a kayak lesson.", recorded_at=EVENING_AT)
+    system_zone(SYDNEY)
+    assert store.turn_payload(None)["entries"] == []
+    assert [hit.date for hit in store.search("kayak")] == ["2026-11-11"]
+    assert _refs(store.search("kayak", from_date="2026-11-11")) == ["f1"]
+    system_zone(LA)
+    assert [item["id"] for item in store.turn_payload(None)["entries"]] == ["e1"]
+    assert [hit.date for hit in store.search("kayak")] == ["2026-11-10"]
+    assert store.search("kayak", from_date="2026-11-11") == []
+
+
+def test_expiring_facts_and_the_markdown_export_use_the_users_days(
+    store: MemoryStore, clock: FakeClock
+) -> None:
+    """R64: an expired fact is valid until the day before the user's today, and the export
+    dates each fact by the user's day."""
+    clock.now = EVENING
+    _know(store, "f1", "Is in Tokyo this week.", recorded_at=EVENING_AT)
+    _know(store, "f2", "Has exams this week.", recorded_at=EVENING_AT)
+    store.expire_facts(["f1"], timezone=SYDNEY)  # the 11th there
+    store.expire_facts(["f2"], timezone=LA)  # the 10th there
+    assert [fact.valid_until for fact in store.facts()] == ["2026-11-10", "2026-11-09"]
+    tokyo = ": Is in Tokyo this week. (until 2026-11-10)"
+    assert "- 2026-11-11" + tokyo in store.export_markdown(timezone=SYDNEY)
+    assert "- 2026-11-10" + tokyo in store.export_markdown(timezone=LA)
+
+
+def test_day_bounds_read_impossible_and_far_dates_as_the_text_compares() -> None:
+    """``days.bounds``: the start of the user's first day and of the day after the last. A
+    day the calendar lacks is the nearest real one on its side; no real day there finds
+    nothing (None); a day whose start a datetime can't hold leaves its side open."""
+    assert days.bounds("2026-11-11", "2026-11-11", SYDNEY) == (
+        "2026-11-10T13:00:00Z",
+        "2026-11-11T13:00:00Z",
+    )
+    assert days.bounds(None, None, SYDNEY) == (None, None)
+
+    def start(day: str) -> Tuple[Optional[str], Optional[str]]:
+        return day + "T00:00:00Z", None
+
+    def end(day: str) -> Tuple[Optional[str], Optional[str]]:
+        return None, day + "T00:00:00Z"
+
+    # Each text as a from_date and as a to_date.
+    cases = [
+        ("2026-04-31", start("2026-05-01"), end("2026-05-01")),  # from 1 May; to 30 April
+        ("2026-02-30", start("2026-03-01"), end("2026-03-01")),
+        ("2026-03-00", start("2026-03-01"), end("2026-03-01")),  # from 1 March; to 28 February
+        ("2026-00-15", start("2026-01-01"), end("2026-01-01")),  # to 31 December 2025
+        ("2026-13-01", start("2027-01-01"), end("2027-01-01")),  # to 31 December 2026
+        ("0000-05-05", start("0001-01-01"), None),  # no day comes before year 1
+        ("0001-01-00", start("0001-01-01"), None),
+        ("9999-12-32", None, (None, None)),  # none after 9999-12-31, whose end is open
+    ]
+    for text, as_from, as_to in cases:
+        assert days.bounds(text, None, "UTC") == as_from, text
+        assert days.bounds(None, text, "UTC") == as_to, text
+    assert days.bounds("0001-01-01", "9999-12-31", SYDNEY) == (None, None)
+    # A day that starts in a daylight-saving gap starts when the clocks jump.
+    assert days.bounds("2018-11-04", None, "America/Sao_Paulo") == ("2018-11-04T03:00:00Z", None)
+    # A time's day, and the UTC day for a time with no day there or a malformed one.
+    assert [days.day(EVENING_AT, zone) for zone in (SYDNEY, LA, "UTC")] == [
+        "2026-11-11",
+        "2026-11-10",
+        "2026-11-10",
+    ]
+    assert days.day("9999-12-31T23:00:00Z", SYDNEY) == "9999-12-31"
+    assert days.day("2026-11-10", SYDNEY) == "2026-11-10"
 
 
 # ── incognito (R44) ──
