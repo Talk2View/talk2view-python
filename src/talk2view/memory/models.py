@@ -105,7 +105,7 @@ class AppliedBatch:
     """One batch of memory changes as applied: what was applied, what was dropped, and what
     was removed, kept so the batch can be undone. A forget also reaches the store's log of
     the chats: ``cleared_rounds`` counts the rounds it blanked, ``cleared_summaries`` the
-    summaries it cleared."""
+    summaries it cleared and ``cleared_titles`` the chat titles it blanked."""
 
     id: str
     applied: List[Dict[str, Any]]
@@ -114,6 +114,7 @@ class AppliedBatch:
     removed_facts: List[Fact]
     cleared_rounds: int = 0
     cleared_summaries: int = 0
+    cleared_titles: int = 0
 
 
 __all__ = [

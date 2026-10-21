@@ -295,6 +295,7 @@ def test_schema_version_and_meta_defaults(tmp_path: Path, backend: str) -> None:
         "paused": "0",
         "include_sensitive": "0",
         "changes_since_consolidation": "0",
+        "revision": "0",
         "index_kind": "scan" if backend == "scan" else "fts5",
         # A new store counts the days to its first consolidation from when it was created.
         "last_consolidated_at": "2026-10-21T10:00:00Z",

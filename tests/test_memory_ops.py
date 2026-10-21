@@ -90,8 +90,25 @@ def _fail_last_write(store: MemoryStore) -> None:
     )
 
 
+def _fail_marking_consolidated(store: MemoryStore) -> None:
+    """Make recording a consolidation fail, as a full disk would: the last write
+    ``apply_consolidation`` makes. ``_stop_failing`` drops it."""
+    store._db.execute(
+        "CREATE TEMP TRIGGER fail BEFORE INSERT ON meta"
+        " WHEN NEW.key = 'changes_since_consolidation'"
+        " BEGIN SELECT RAISE(ABORT, 'disk full'); END"
+    )
+
+
 def _stop_failing(store: MemoryStore) -> None:
     store._db.execute("DROP TRIGGER fail")
+
+
+def _round_texts(store: MemoryStore) -> List[Tuple[Any, ...]]:
+    """Every round as stored, blank ones included: (conversation_id, idx, user, reply)."""
+    return store._query(
+        "SELECT conversation_id, idx, user_text, assistant_text FROM rounds ORDER BY rowid"
+    )
 
 
 def _in_files(store: MemoryStore, word: str) -> bool:
@@ -633,6 +650,7 @@ def test_forget_matches_entries_and_facts_and_reports_them(
             "fact_ids": ["f1", "f2"],
             "cleared_rounds": 0,
             "cleared_summaries": 0,
+            "cleared_titles": 0,
         }
     ]
     assert (batch.dropped, batch.cleared_rounds, batch.cleared_summaries) == ([], 0, 0)
@@ -689,6 +707,7 @@ def test_an_entry_added_and_forgotten_in_one_batch(store: MemoryStore) -> None:
             "fact_ids": [],
             "cleared_rounds": 0,
             "cleared_summaries": 0,
+            "cleared_titles": 0,
         },
     ]
     assert batch.removed_entries == store.entries(include_hidden=True)
@@ -700,13 +719,16 @@ def test_an_entry_added_and_forgotten_in_one_batch(store: MemoryStore) -> None:
 
 
 def test_forget_clears_the_memory_log(store: MemoryStore, clock: FakeClock) -> None:
-    """A forget reaches the store's own log of the chats too, which search reads: both texts
-    of each round where either holds the phrase are blanked and the round's index row
-    deleted, and each summary whose title or text holds it is cleared. The batch keeps what
-    was there, for undo, through the window; then purge deletes it from the files."""
+    """A forget reaches the store's own log of the chats too, which search and the turn
+    payload read: both texts of each round whose texts hold the phrase are blanked and the
+    round's index row deleted, each summary whose title or text holds it is cleared, and
+    each chat title that holds it is blanked. The batch keeps what was there, for undo,
+    through the window; then purge deletes it from the files."""
     store.record_round("c1", "My locker code is " + WORD + ".", "Noted.", at=T0, title="Locker")
     store.record_round("c1", "Find me a dentist.", "Here are three.", at=T0)
-    store.record_round("c2", "Hello", "Hi. Your " + WORD + " code is safe.", at=T0)
+    store.record_round(
+        "c2", "Hello", "Hi. Your " + WORD + " code is safe.", at=T0, title="The " + WORD + " code"
+    )
     store.record_round("c3", "", "", at=T0)  # a round without text has no index row
     store.set_summary("c1", "Locker", "The user's locker code is " + WORD + ".")
     store.set_summary("c2", WORD + " chat", "The user said hello.")
@@ -716,13 +738,13 @@ def test_forget_clears_the_memory_log(store: MemoryStore, clock: FakeClock) -> N
     index_before = _indexed_rounds(store)
     assert [(c, i) for c, i, _ in index_before] == [("c1", 1), ("c1", 2), ("c2", 1)]
 
-    def summary(conversation_id: str) -> Tuple[Any, Any]:
+    def chat(conversation_id: str) -> Tuple[Any, Any, Any]:
         record = store.conversation(conversation_id)
         assert record is not None
-        return record.summary_title, record.summary_text
+        return record.title, record.summary_title, record.summary_text
 
     batch = store.forget(WORD.upper() + ".")  # matched once normalised, as entries are
-    assert (batch.cleared_rounds, batch.cleared_summaries) == (2, 2)
+    assert (batch.cleared_rounds, batch.cleared_summaries, batch.cleared_titles) == (2, 2, 1)
     assert batch.applied == [
         {
             "op": "forget",
@@ -731,24 +753,24 @@ def test_forget_clears_the_memory_log(store: MemoryStore, clock: FakeClock) -> N
             "fact_ids": [],
             "cleared_rounds": 2,
             "cleared_summaries": 2,
+            "cleared_titles": 1,
         }
     ]
-    assert store.rounds("c1") == [
-        (1, "", "", NOW),
-        (2, "Find me a dentist.", "Here are three.", NOW),
+    assert _round_texts(store) == [
+        ("c1", 1, "", ""),
+        ("c1", 2, "Find me a dentist.", "Here are three."),
+        ("c2", 1, "", ""),
+        ("c3", 1, "", ""),
     ]
-    assert store.rounds("c2") == [(1, "", "", NOW)]
     assert _indexed_rounds(store) == [
         ("c1", 2, normalise_for_index("Find me a dentist.\nHere are three."))
     ]
     assert _found(store, WORD) == ([], [])
-    assert [summary(c) for c in ("c1", "c2", "c3")] == [
-        (None, None),
-        (None, None),
-        ("Dentist", "The user asked for a dentist."),
+    assert [chat(c) for c in ("c1", "c2", "c3")] == [
+        ("Locker", None, None),  # a title without the phrase stays
+        ("", None, None),
+        (None, "Dentist", "The user asked for a dentist."),
     ]
-    chat = store.conversation("c1")
-    assert chat is not None and chat.title == "Locker"  # the app's name for the chat stays
     # The index holds what rebuilding it from the rounds gives.
     indexed = _indexed_rounds(store)
     with store._write():
@@ -760,29 +782,39 @@ def test_forget_clears_the_memory_log(store: MemoryStore, clock: FakeClock) -> N
     assert [_rows(store, table) for table in tables] == before
     assert _indexed_rounds(store) == index_before
 
-    # A round or a summary changed since is a later change: the undo refuses, whole.
+    # A round, summary or title changed since is a later change: the undo refuses, whole.
     again = store.forget(WORD)
-    store.delete_conversation("c2")  # a round and a summary the batch cleared are gone
+    store.delete_conversation("c2")  # a round, a summary and a title the batch cleared
     assert store.undo(again.id) is False
-    assert store.rounds("c1")[0] == (1, "", "", NOW)  # nothing came back
-    assert summary("c1") == (None, None)
+    assert _round_texts(store)[0] == ("c1", 1, "", "")  # nothing came back
+    assert chat("c1") == ("Locker", None, None)
     store.set_summary("c3", "Dentist", "Booked with Dr Ngata.")
     third = store.forget("ngata")
-    assert (third.cleared_rounds, third.cleared_summaries) == (0, 1)
+    assert (third.cleared_rounds, third.cleared_summaries, third.cleared_titles) == (0, 1, 0)
     store.set_summary("c3", "Dentist", "Booked.")  # a new summary since
     assert store.undo(third.id) is False
-    assert summary("c3") == ("Dentist", "Booked.")
+    assert chat("c3") == (None, "Dentist", "Booked.")
     store.record_round("c3", "Ask about wombats.", "Noted.", at=T0)
     fourth = store.forget("wombats")
-    assert (fourth.cleared_rounds, fourth.cleared_summaries) == (1, 0)
+    assert (fourth.cleared_rounds, fourth.cleared_summaries, fourth.cleared_titles) == (1, 0, 0)
     # The chat's rounds deleted while the chat stays, as marking it incognito will: the
     # undo refuses rather than index rounds that are gone.
     store._db.execute("DELETE FROM rounds WHERE conversation_id = 'c3'")
     assert store.undo(fourth.id) is False
-    assert [(c, i) for c, i, _ in _indexed_rounds(store)] == [("c1", 2)]
+    store.record_round("c4", "Hi.", "Hello.", at=T0, title="Okapi club")
+    fifth = store.forget("okapi")
+    assert (fifth.cleared_rounds, fifth.cleared_summaries, fifth.cleared_titles) == (0, 0, 1)
+    assert chat("c4") == ("", None, None)
+    assert store.undo(fifth.id) is True
+    assert chat("c4") == ("Okapi club", None, None)
+    sixth = store.forget("okapi")
+    store._db.execute("UPDATE conversations SET title = 'Club' WHERE id = 'c4'")  # renamed
+    assert store.undo(sixth.id) is False
+    assert chat("c4") == ("Club", None, None)
+    assert [(c, i) for c, i, _ in _indexed_rounds(store)] == [("c1", 2), ("c4", 1)]
     assert _in_files(store, WORD)  # the batch keeps the texts through the window
     clock.now = T0 + timedelta(seconds=31)
-    assert store.purge() == 0  # no entry or fact went, only the batch
+    assert store.purge() == 0  # no entry or fact went, only the batches
     assert store._query("SELECT count(*) FROM undo_batches") == [(0,)]
     assert not _in_files(store, WORD)
 
@@ -797,12 +829,33 @@ def test_forget_matches_a_round_on_its_two_texts_joined(store: MemoryStore) -> N
 
     batch = store.forget("Deep dish")
     assert batch.cleared_rounds == 1
-    assert store.rounds("c1") == [
-        (1, "", "", NOW),
-        (2, "Deep breaths.", "Dish soap is under the sink.", NOW),
-        (3, "Deep-dish pizza.", "Noted.", NOW),
+    assert _round_texts(store) == [
+        ("c1", 1, "", ""),
+        ("c1", 2, "Deep breaths.", "Dish soap is under the sink."),
+        ("c1", 3, "Deep-dish pizza.", "Noted."),
     ]
     assert [(c, i) for c, i, _ in _indexed_rounds(store)] == [("c1", 2), ("c1", 3)]
+
+
+def test_blank_rounds_are_left_out_of_rounds_and_unextracted(store: MemoryStore) -> None:
+    """A round with neither text, as a forget leaves one, is nothing to read: rounds()
+    leaves it out, and unextracted() lists no conversation whose only rounds extraction
+    has not seen are blank."""
+    store.record_round("c1", "Hello", "Hi.", at=T0)
+    store.record_round("c1", "My code is " + WORD + ".", "Noted.", at=T0)
+    store.record_round("c2", "Hello", "Hi.", at=T0)
+    store.record_round("c2", "Also " + WORD + ".", "Noted.", at=T0)
+    store.record_round("c2", "Thanks.", "You're welcome.", at=T0)
+    store.record_round("c3", "", "", at=T0)  # recorded blank
+    store.mark_extracted("c1", 1)
+    store.mark_extracted("c2", 1)
+    assert [record.id for record in store.unextracted()] == ["c1", "c2"]
+
+    store.forget(WORD)
+    assert store.rounds("c1") == [(1, "Hello", "Hi.", NOW)]
+    assert store.rounds("c2", after=1) == [(3, "Thanks.", "You're welcome.", NOW)]
+    assert store.rounds("c3") == []
+    assert [record.id for record in store.unextracted()] == ["c2"]
 
 
 def test_delete_entry_is_the_users_own_delete(store: MemoryStore, clock: FakeClock) -> None:
@@ -1137,8 +1190,8 @@ def test_replace_entries_keeps_ids_and_locked_verbatim(
     )
     assert store.entries() == [senior, locked, studying]
 
-    # The engine sends only the fields the model set, so an item without valid_until
-    # leaves the date as it was, as an update op does.
+    # An item is the entry's whole state, unlike an update op: one without valid_until, or
+    # with null, gives the entry no date.
     store.replace_entries(
         [
             {"id": "e1", "topic": "work", "text": senior.text, "valid_until": "2027-06-30"},
@@ -1147,13 +1200,28 @@ def test_replace_entries_keeps_ids_and_locked_verbatim(
     )
     dated = replace(senior, valid_until="2027-06-30", updated_at=at(2 * 86400))
     assert store.entries() == [dated, locked, studying]
+    clock.now = T0 + timedelta(days=3)
     store.replace_entries(
         [
             {"id": "e1", "topic": "work", "text": senior.text},
             {"id": "e5", "topic": "ongoing", "text": "Studying video editing."},
         ]
     )
-    assert store.entries() == [dated, locked, studying]
+    assert store.entries() == [replace(senior, updated_at=at(3 * 86400)), locked, studying]
+    store.replace_entries(
+        [
+            {"id": "e1", "topic": "work", "text": senior.text, "valid_until": "2027-06-30"},
+            {"id": "e5", "topic": "ongoing", "text": "Studying video editing."},
+        ]
+    )
+    clock.now = T0 + timedelta(days=4)
+    store.replace_entries(
+        [
+            {"id": "e1", "topic": "work", "text": senior.text, "valid_until": None},
+            {"id": "e5", "topic": "ongoing", "text": "Studying video editing."},
+        ]
+    )
+    assert store.entries() == [replace(senior, updated_at=at(4 * 86400)), locked, studying]
 
 
 def test_needs_consolidation_when_over_caps(store: MemoryStore) -> None:
@@ -1240,7 +1308,167 @@ def test_changes_counter_and_mark_consolidated(store: MemoryStore) -> None:
     store.delete_entry("e1")
     store.record_round("c1", "Talked about zebras.", "Noted.")
     store.forget("zebras")
-    assert store.changes_since_consolidation() == 4
+    store.record_round("c2", "Hi.", "Hello.", title="Okapi club")
+    store.forget("okapi")  # a title only
+    assert store.changes_since_consolidation() == 5
+
+
+def test_revision_rises_with_every_change_to_memory(tmp_path: Path, backend: str) -> None:
+    """R55: a consolidation applies only against the revision its request was built from,
+    so every committed change to memory raises it, and nothing else does. A failed write
+    doesn't, and nothing lowers it: it is kept in the file, and reset raises it too."""
+    clock = FakeClock()
+    path = tmp_path / "u1.sqlite3"
+    store = MemoryStore(path, backend=backend, clock=clock)  # type: ignore[arg-type]
+    seen = store.revision()
+
+    def rise() -> int:
+        """How far the revision rose since the last call."""
+        nonlocal seen
+        before, seen = seen, store.revision()
+        return seen - before
+
+    def facts(*texts: str) -> None:
+        store.add_facts(
+            [{"text": text, "topic": "people"} for text in texts],
+            conversation_id=None,
+            source="said",
+        )
+
+    try:
+        assert seen == 0
+        # Each write that changes the visible entries or facts raises it...
+        store.apply_ops([add("Likes tea."), add("Has a dog.")])
+        assert rise() == 1
+        store.edit_entry("e1", text="Likes green tea.")
+        assert rise() == 1
+        deleted = store.delete_entry("e2")
+        assert rise() == 1
+        assert deleted is not None and store.undo(deleted) is True
+        assert rise() == 1
+        facts("The dog is called Rex.", "The user has a cat.")
+        assert rise() == 1
+        facts("The dog is called Max.")
+        store.merge_facts("f3", ["f1"])
+        store.expire_facts(["f2"])
+        assert rise() == 3
+        store.replace_entries(
+            [
+                {"id": "e1", "topic": "preferences", "text": "Locked: left as it is."},
+                {"id": "e2", "topic": "people", "text": "Has a dog."},
+            ]
+        )
+        assert rise() == 1
+        store.forget("dog")
+        assert rise() == 1
+        # ...and so does a forget that cleared only the log, which a consolidation's request
+        # may have carried.
+        store.record_round("c1", "Talked about zebras.", "Noted.", at=T0, title="Zoo")
+        store.forget("zebras")
+        assert rise() == 1
+
+        # Writes that change no entry or fact leave it.
+        store.apply_ops([add("Likes green tea."), {"op": "remove", "id": "e1"}])
+        store.forget("matches nothing")
+        assert store.delete_entry("e404") is None
+        store.add_facts([{"text": "", "topic": "people"}], conversation_id=None, source="said")
+        store.merge_facts("f3", ["f2"])  # f3 is forgotten
+        store.merge_facts("f2", ["f1", "f404"])  # f1 is forgotten; f404 never was
+        store.expire_facts(["f2"])  # ended already
+        store.replace_entries([{"id": "e1", "topic": "preferences", "text": "Likes tea."}])
+        assert store.undo("b404") is False
+        store.record_round("c2", "Hello", "Hi.", at=T0, title="Hi")
+        store.set_summary("c2", "Hi", "The user said hello.")
+        store.mark_extracted("c2", 1)
+        store.set_incognito("c3", True)
+        store.delete_conversation("c2")
+        store.paused = True
+        store.include_sensitive = True
+        store.mark_consolidated()
+        clock.now = T0 + timedelta(seconds=31)
+        assert store.purge() == 3  # e2, f1 and f3: hidden already
+        assert rise() == 0
+        _fail_last_write(store)
+        with pytest.raises(Exception, match="disk full"):
+            store.apply_ops([add("Likes coffee.")])
+        _stop_failing(store)
+        assert rise() == 0
+
+        store.reset()
+        assert rise() == 1
+    finally:
+        store.close()
+    store = MemoryStore(path, backend=backend, clock=clock)  # type: ignore[arg-type]
+    try:
+        assert store.revision() == seen
+    finally:
+        store.close()
+
+
+def test_apply_consolidation_is_all_or_nothing(store: MemoryStore, clock: FakeClock) -> None:
+    """R55: a consolidation's result applies whole, in one transaction, and only against
+    the revision its request was built from, so an entry update_memory adds while the call
+    runs is never deleted by a result that never saw it."""
+    store.apply_ops([add("Works as a designer.", topic="work"), add("Likes tea.")])
+    store.add_facts(
+        [
+            {"text": "The user is vegetarian.", "topic": "preferences"},
+            {"text": "The user doesn't eat meat.", "topic": "preferences"},
+            {"text": "The user has exams this week.", "topic": "ongoing"},
+        ],
+        conversation_id="c1",
+        source="said",
+    )
+    revision = store.revision()  # read as the request is built
+
+    def entry(entry_id: str, topic: str, text: str) -> Dict[str, Any]:
+        return {"id": entry_id, "topic": topic, "text": text, "valid_until": None, "locked": False}
+
+    designer = entry("e1", "work", "Works as a senior designer.")
+    tea = entry("e2", "preferences", "Likes tea.")
+    merges: List[Any] = [{"keep": "f1", "drop": ["f2"]}]
+    store.apply_ops([add("Has a dog.", topic="people")])  # update_memory, while the call runs
+    clock.now = T0 + timedelta(days=1)
+    tables = ("entries", "facts")
+    before = [_rows(store, table) for table in tables]
+    meta = store._query("SELECT key, value FROM meta ORDER BY key")
+
+    assert (
+        store.apply_consolidation([designer, tea], merges, ["f3"], expected_revision=revision)
+        is False
+    )
+    assert [_rows(store, table) for table in tables] == before
+    assert store._query("SELECT key, value FROM meta ORDER BY key") == meta
+
+    # Built again, the result names the new entry. A failure at its last write leaves
+    # nothing behind either.
+    result = [designer, tea, entry("e3", "people", "Has a dog.")]
+    revision = store.revision()
+    _fail_marking_consolidated(store)
+    with pytest.raises(Exception, match="disk full"):
+        store.apply_consolidation(result, merges, ["f3"], expected_revision=revision)
+    _stop_failing(store)
+    assert [_rows(store, table) for table in tables] == before
+    assert store._query("SELECT key, value FROM meta ORDER BY key") == meta
+
+    # A malformed merge group is skipped, as a malformed fact id is.
+    malformed = [{"keep": "f1"}, "not a group", {"keep": ["f3"], "drop": ["f2"]}]
+    assert (
+        store.apply_consolidation(result, malformed + merges, ["f3", 7], expected_revision=revision)
+        is True
+    )
+    assert [entry.text for entry in store.entries()] == [
+        "Works as a senior designer.",
+        "Likes tea.",
+        "Has a dog.",
+    ]
+    assert [
+        (fact.id, fact.superseded_by, fact.valid_until)
+        for fact in store.facts(include_superseded=True)
+    ] == [("f1", None, None), ("f2", "f1", None), ("f3", None, "2026-10-21")]
+    assert store.changes_since_consolidation() == 0
+    assert store._meta_value("last_consolidated_at") == at(86400)
+    assert store.revision() > revision
 
 
 # ── the store: settings, export and reset ──
@@ -1316,6 +1544,7 @@ def test_reset_leaves_an_empty_schema(store: MemoryStore, clock: FakeClock) -> N
         name for (name,) in store._query("SELECT name FROM sqlite_master WHERE type = 'table'")
     }
 
+    revision = store.revision()
     clock.now = T0 + timedelta(days=1)
     store.reset()
 
@@ -1327,9 +1556,11 @@ def test_reset_leaves_an_empty_schema(store: MemoryStore, clock: FakeClock) -> N
     assert (_indexed_facts(store), _indexed_rounds(store)) == ([], [])
     assert not _in_files(store, WORD)
     assert "## Entries\n\nNone.\n\n## Facts\n\nNone.\n" in store.export_markdown()
-    # The user's switches stay; consolidation starts afresh.
+    # The user's switches stay; consolidation starts afresh; the revision rises, as it
+    # never falls.
     assert (store.paused, store.include_sensitive) == (True, True)
     assert store.changes_since_consolidation() == 0
+    assert store.revision() == revision + 1
     # Ids carry on: none is ever used twice.
     batch = store.apply_ops([add("Likes tea.")])
     assert batch.applied[0]["id"] == "e3"

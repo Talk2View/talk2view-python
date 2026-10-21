@@ -228,6 +228,7 @@ _META_DEFAULTS = (
     ("paused", "0"),
     ("include_sensitive", "0"),
     ("changes_since_consolidation", "0"),
+    ("revision", "0"),
 )
 
 # The search index, kept by the store (no triggers): one row per fact and per round with
@@ -394,8 +395,9 @@ _SELECT_VISIBLE_FACTS = (
     " superseded_by, superseded_at, source, hidden_at FROM facts"
     " WHERE hidden_at IS NULL ORDER BY rowid"
 )
-# The rounds and summaries a forget can clear, as undo keeps them: a round as
-# [conversation_id, idx, user_text, assistant_text], a summary as [id, title, text].
+# The rounds, summaries and chat titles a forget can clear, as undo keeps them: a round as
+# [conversation_id, idx, user_text, assistant_text], a summary as [id, title, text], a
+# title as [id, title].
 _SELECT_ROUNDS_WITH_TEXT = (
     "SELECT conversation_id, idx, user_text, assistant_text FROM rounds"
     " WHERE user_text != '' OR assistant_text != '' ORDER BY rowid"
@@ -404,6 +406,7 @@ _SELECT_SUMMARIES = (
     "SELECT id, summary_title, summary_text FROM conversations"
     " WHERE summary_title IS NOT NULL OR summary_text IS NOT NULL ORDER BY rowid"
 )
+_SELECT_TITLES = "SELECT id, title FROM conversations WHERE title != '' ORDER BY rowid"
 
 # Where a change the engine proposed came from. An entry's source can also be "edited",
 # which only the user's own edit (edit_entry) sets, as it locks the entry.
@@ -446,6 +449,7 @@ def _changed_memory(record: Dict[str, Any]) -> bool:
         or record["fact_ids"]
         or record["cleared_rounds"]
         or record["cleared_summaries"]
+        or record["cleared_titles"]
     )
 
 
@@ -615,11 +619,12 @@ class MemoryStore:
         hides every fact, superseded ones included, whose ``normalise_dedupe`` text holds its
         own, and clears it from the log of the chats: both texts of each round whose user
         text and reply, joined with a space, hold it once normalised are blanked, and the
-        round's index row deleted, and each summary whose title or text holds it is cleared.
-        Its record gains the facts' ids (``fact_ids``) and the counts (``cleared_rounds``,
-        ``cleared_summaries``). The batch keeps each entry row it changed as it was before
-        and after, the facts it hid, and the rounds and summaries as they were, for
-        ``undo``."""
+        round's index row deleted, each summary whose title or text holds it is cleared, and
+        each chat title that holds it is blanked. Its record gains the facts' ids
+        (``fact_ids``) and the counts (``cleared_rounds``, ``cleared_summaries``,
+        ``cleared_titles``). The batch keeps each entry row it changed as it was before and
+        after, the facts it hid, and the rounds, summaries and titles as they were, for
+        ``undo``. A batch that changed anything raises the ``revision``."""
         if source not in _SOURCES:
             raise ValueError("source must be one of " + ", ".join(_SOURCES))
         now = _timestamp(self._clock())
@@ -652,9 +657,9 @@ class MemoryStore:
                     removed_entries.append(entry)
             forgets = [record for record in applied if record["op"] == "forget"]
             removed_facts = self._hide_forgotten_facts(forgets, batch_id, now)
-            rounds, summaries = self._clear_forgotten_log(forgets)
+            rounds, summaries, titles = self._clear_forgotten_log(forgets)
             changes = sum(1 for record in applied if _changed_memory(record))
-            if images or removed_facts or rounds or summaries:
+            if images or removed_facts or rounds or summaries or titles:
                 self._save_batch(
                     batch_id,
                     now,
@@ -662,8 +667,10 @@ class MemoryStore:
                     facts=[fact.id for fact in removed_facts],
                     rounds=rounds,
                     summaries=summaries,
+                    titles=titles,
                     changes=changes,
                 )
+                self._raise_revision()
             self._add_changes(changes)
         return AppliedBatch(
             id=batch_id,
@@ -673,16 +680,17 @@ class MemoryStore:
             removed_facts=removed_facts,
             cleared_rounds=len(rounds),
             cleared_summaries=len(summaries),
+            cleared_titles=len(titles),
         )
 
     def forget(self, text: str) -> AppliedBatch:
         """Hide every unlocked entry and every fact whose ``normalise_dedupe`` text holds
         ``text``'s, and clear it from the log of the chats, as one batch ``undo`` can
         reverse: ``apply_ops`` with one ``forget``. The batch's ``removed_entries`` and
-        ``removed_facts`` are exactly what went; ``cleared_rounds`` and ``cleared_summaries``
-        count what was cleared. A locked entry it holds is passed by, with "locked" in
-        ``dropped``, and a phrase under FORGET_TEXT_MIN (2) code points once normalised is
-        dropped whole, as "forget text too short"."""
+        ``removed_facts`` are exactly what went; ``cleared_rounds``, ``cleared_summaries``
+        and ``cleared_titles`` count what was cleared. A locked entry it holds is passed
+        by, with "locked" in ``dropped``, and a phrase under FORGET_TEXT_MIN (2) code points
+        once normalised is dropped whole, as "forget text too short"."""
         return self.apply_ops([{"op": "forget", "text": text}])
 
     def delete_entry(self, entry_id: str) -> Optional[str]:
@@ -701,14 +709,16 @@ class MemoryStore:
             image = _entry_image(replace(entry, hidden_at=now), batch_id)
             self._db.execute(_UPDATE_ENTRY_IMAGE, image[1:] + [entry_id])
             self._save_batch(batch_id, now, entries=[[entry_id, list(rows[0]), image]], changes=1)
+            self._raise_revision()
             self._add_changes(1)
         return batch_id
 
     def undo(self, batch_id: str) -> bool:
-        """Reverse the batch ``batch_id`` exactly, in one transaction: the entries it added
-        are deleted, the entries it changed or hid get back the rows they had, the facts it
-        hid are shown again, and the rounds and summaries a forget cleared get their text
-        back, with the rounds' index rows. Then the file is scrubbed of the text that went.
+        """Reverse the batch ``batch_id`` exactly, in one transaction, raising the
+        ``revision``: the entries it added are deleted, the entries it changed or hid get
+        back the rows they had, the facts it hid are shown again, and the rounds, summaries
+        and chat titles a forget cleared get their text back, with the rounds' index rows.
+        Then the file is scrubbed of the text that went.
 
         True when undone. False for a batch applied over UNDO_WINDOW_S (30) seconds ago,
         one undone already, one that changed nothing, or an unknown id; and False, changing
@@ -746,8 +756,13 @@ class MemoryStore:
                     "UPDATE conversations SET summary_title = ?, summary_text = ? WHERE id = ?",
                     (title, text, conversation_id),
                 )
+            for conversation_id, title in payload["titles"]:
+                self._db.execute(
+                    "UPDATE conversations SET title = ? WHERE id = ?", (title, conversation_id)
+                )
             self._db.execute("DELETE FROM undo_batches WHERE id = ?", (batch_id,))
             self._add_changes(-payload["changes"])
+            self._raise_revision()
             self._scrub()
         return True
 
@@ -806,6 +821,7 @@ class MemoryStore:
                 locked=True,
             )
             self._db.execute(_UPDATE_ENTRY_IMAGE, _entry_image(edited, None)[1:] + [entry_id])
+            self._raise_revision()
             self._add_changes(1)
         return edited
 
@@ -860,6 +876,8 @@ class MemoryStore:
                     if isinstance(old_id, str) and old_id != fact.id:
                         self._supersede(old_id, fact.id, now)
                 recorded.append(fact)
+            if recorded:
+                self._raise_revision()
             self._add_changes(len(recorded))
         return recorded
 
@@ -874,9 +892,12 @@ class MemoryStore:
                 "SELECT 1 FROM facts WHERE id = ? AND hidden_at IS NULL", (keep,)
             ):
                 return
+            merged = False
             for fact_id in drop:
                 if isinstance(fact_id, str) and fact_id != keep:
-                    self._supersede(fact_id, keep, now)
+                    merged = self._supersede(fact_id, keep, now) or merged
+            if merged:
+                self._raise_revision()
 
     def expire_facts(self, ids: Sequence[str]) -> None:
         """Consolidation's facts about something current or upcoming that is over: each
@@ -884,6 +905,7 @@ class MemoryStore:
         ends earlier already. Facts stay true as history, so none is deleted."""
         yesterday = (_utc(self._clock()).date() - timedelta(days=1)).isoformat()
         with self._write():
+            expired = False
             for fact_id in ids:
                 if isinstance(fact_id, str):
                     self._db.execute(
@@ -891,16 +913,56 @@ class MemoryStore:
                         " AND (valid_until IS NULL OR valid_until > ?)",
                         (yesterday, fact_id, yesterday),
                     )
+                    expired = self._changed_rows() > 0 or expired
+            if expired:
+                self._raise_revision()
 
     # ── consolidation ──
+
+    def apply_consolidation(
+        self,
+        entries: Sequence[Dict[str, Any]],
+        merge_facts: Sequence[Dict[str, Any]],
+        expire_facts: Sequence[str],
+        *,
+        expected_revision: int,
+    ) -> bool:
+        """Apply a consolidation's result, all or nothing, in one transaction: consolidation
+        applies its result only through this. ``expected_revision`` is the ``revision`` read
+        when its request was built. If memory has changed since, the result would undo that
+        change, so nothing is written and it returns False. Otherwise it replaces the entries
+        (``replace_entries``), merges each ``{"keep": id, "drop": [ids]}`` group of facts
+        (``merge_facts``; a malformed group is skipped), expires the facts named
+        (``expire_facts``), records the consolidation (``mark_consolidated``) and returns
+        True."""
+        with self._write():
+            if self.revision() != expected_revision:
+                return False
+            self.replace_entries(entries)
+            for group in merge_facts:
+                keep: Any = group.get("keep") if isinstance(group, dict) else None
+                drop: Any = group.get("drop") if isinstance(group, dict) else None
+                if isinstance(keep, str) and isinstance(drop, list):
+                    self.merge_facts(keep, drop)
+            self.expire_facts(expire_facts)
+            self.mark_consolidated()
+        return True
+
+    def revision(self) -> int:
+        """A count, kept in the file, that every committed change to memory raises and
+        nothing lowers: each write that changes the visible entries or facts, a forget that
+        changed anything, the log only included (a consolidation's request may carry what it
+        cleared), an undo and a reset. The log's own writes (rounds, summaries, extraction's
+        marks), purge and the switches leave it. ``apply_consolidation`` checks it."""
+        return int(self._meta_value("revision") or 0)
 
     def replace_entries(self, entries: Sequence[Dict[str, Any]]) -> None:
         """Make consolidation's result the set of visible entries, in one transaction.
 
-        An item with the id of a visible entry rewrites its topic, text and
-        ``valid_until`` (``updated_at`` too when they change), keeping its id and
-        ``created_at``; a ``valid_until`` the item leaves out stays as it was. An item with
-        id None, or none, becomes a new entry, source "inferred". A visible
+        An item is the entry's whole state. One with the id of a visible entry rewrites its
+        topic, text and ``valid_until`` (``updated_at`` too when they change), keeping its
+        id and ``created_at``; a ``valid_until`` it leaves out, or null, means no date. An
+        item with id None, or none, becomes a new entry, source "inferred". A visible
         entry no item names is deleted, and the file scrubbed of it. Locked entries come
         through verbatim whatever the items say, and hidden ones (in their undo window) are
         left alone. As the engine does, an existing entry whose item breaks a rule (a topic
@@ -914,6 +976,7 @@ class MemoryStore:
                 for row in self._db.execute(_SELECT_VISIBLE_ENTRY_IMAGES)
             }
             named: Set[str] = set()
+            changed = False
             for item in entries:
                 if not isinstance(item, dict):
                     continue
@@ -941,6 +1004,7 @@ class MemoryStore:
                                 source_conversation_id=None,
                             )
                         )
+                        changed = True
                     continue
                 entry = current.get(entry_id) if isinstance(entry_id, str) else None
                 if entry is None or entry.id in named:
@@ -948,17 +1012,11 @@ class MemoryStore:
                 named.add(entry.id)
                 if entry.locked or broken:
                     continue
-                rewritten = replace(
-                    entry,
-                    topic=topic,
-                    text=text,
-                    # The engine sends only the fields the model set, so a missing date is
-                    # unchanged, as in an update op.
-                    valid_until=entry.valid_until if valid_until is None else valid_until,
-                )
+                rewritten = replace(entry, topic=topic, text=text, valid_until=valid_until)
                 if rewritten != entry:
                     image = _entry_image(replace(rewritten, updated_at=now), None)
                     self._db.execute(_UPDATE_ENTRY_IMAGE, image[1:] + [entry.id])
+                    changed = True
             gone = [
                 entry.id for entry in current.values() if entry.id not in named and not entry.locked
             ]
@@ -966,6 +1024,8 @@ class MemoryStore:
                 self._db.execute("DELETE FROM entries WHERE id = ?", (entry_id,))
             if gone:
                 self._scrub()
+            if changed or gone:
+                self._raise_revision()
 
     def needs_consolidation(self) -> bool:
         """Whether a consolidation is due: the visible entries are over the caps (more than
@@ -1113,7 +1173,8 @@ class MemoryStore:
 
     def unextracted(self, *, idle_for_s: Optional[float] = None) -> List[ConversationRecord]:
         """Conversations with rounds extraction has not seen, least recently active first.
-        With ``idle_for_s``, only those idle at least that long by the clock."""
+        Rounds with neither text, as a forget leaves them, don't count. With
+        ``idle_for_s``, only those idle at least that long by the clock."""
         cutoff = (
             _timestamp(self._clock() - timedelta(seconds=idle_for_s))
             if idle_for_s is not None
@@ -1124,7 +1185,8 @@ class MemoryStore:
             " extracted_through, incognito FROM conversations AS c"
             " WHERE incognito = 0 AND (? IS NULL OR last_active_at <= ?)"
             " AND EXISTS (SELECT 1 FROM rounds AS r"
-            " WHERE r.conversation_id = c.id AND r.idx > c.extracted_through)"
+            " WHERE r.conversation_id = c.id AND r.idx > c.extracted_through"
+            " AND (r.user_text != '' OR r.assistant_text != ''))"
             " ORDER BY c.last_active_at, c.rowid",
             (cutoff, cutoff),
         )
@@ -1132,10 +1194,12 @@ class MemoryStore:
 
     def rounds(self, conversation_id: str, *, after: int = 0) -> List[Tuple[int, str, str, str]]:
         """The conversation's rounds with index above ``after``, in order, as
-        ``(idx, user_text, assistant_text, at)``."""
+        ``(idx, user_text, assistant_text, at)``. A round with neither text, as a forget
+        leaves one, is left out."""
         rows = self._query(
             "SELECT idx, user_text, assistant_text, at FROM rounds"
-            " WHERE conversation_id = ? AND idx > ? ORDER BY idx",
+            " WHERE conversation_id = ? AND idx > ?"
+            " AND (user_text != '' OR assistant_text != '') ORDER BY idx",
             (conversation_id, after),
         )
         return [(row[0], row[1], row[2], row[3]) for row in rows]
@@ -1200,7 +1264,8 @@ class MemoryStore:
     def reset(self) -> None:
         """Forget everything (spec §10.1): delete every entry, fact, conversation record,
         round and batch, and the search index, in one transaction, then scrub the file. The
-        user's switches stay, and so do the id counters, so no id is ever used twice."""
+        user's switches stay, and so do the id counters, so no id is ever used twice; the
+        ``revision`` rises."""
         now = _timestamp(self._clock())
         with self._write():
             for statement in self._index.clear + (
@@ -1213,6 +1278,7 @@ class MemoryStore:
                 self._db.execute(statement)
             self._set_meta("changes_since_consolidation", "0")
             self._set_meta("last_consolidated_at", now)
+            self._raise_revision()
             self._scrub()
 
     # ── internals ──
@@ -1322,16 +1388,17 @@ class MemoryStore:
 
     def _clear_forgotten_log(
         self, forgets: List[Dict[str, Any]]
-    ) -> Tuple[List[List[Any]], List[List[Any]]]:
+    ) -> Tuple[List[List[Any]], List[List[Any]], List[List[Any]]]:
         """In the caller's write: for each forget record in ``forgets``, blank both texts of
         every round whose user text and reply, joined with a space and normalised
         (``normalise_dedupe``), hold the forget's normalised text, so a phrase split between
-        them is found too, and delete the round's index row; and clear every summary whose
-        title or text holds it. Record the counts in its ``cleared_rounds`` and
-        ``cleared_summaries``. Returns the rounds and the summaries as they were, for undo,
-        as _SELECT_ROUNDS_WITH_TEXT and _SELECT_SUMMARIES give them."""
+        them is found too, and delete the round's index row; clear every summary whose
+        title or text holds it; and blank every chat title that holds it. Record the counts
+        in its ``cleared_rounds``, ``cleared_summaries`` and ``cleared_titles``. Returns the
+        rounds, summaries and titles as they were, for undo, as _SELECT_ROUNDS_WITH_TEXT,
+        _SELECT_SUMMARIES and _SELECT_TITLES give them."""
         if not forgets:
-            return [], []
+            return [], [], []
         rounds = [
             (list(row), normalise_dedupe(row[2] + " " + row[3]))
             for row in self._db.execute(_SELECT_ROUNDS_WITH_TEXT)
@@ -1340,10 +1407,13 @@ class MemoryStore:
             (list(row), normalise_dedupe(row[1] or ""), normalise_dedupe(row[2] or ""))
             for row in self._db.execute(_SELECT_SUMMARIES)
         ]
+        titles = [(list(row), normalise_dedupe(row[1])) for row in self._db.execute(_SELECT_TITLES)]
         cleared_rounds: List[List[Any]] = []
         cleared_summaries: List[List[Any]] = []
+        cleared_titles: List[List[Any]] = []
         taken_rounds: Set[Tuple[str, int]] = set()
         taken_summaries: Set[str] = set()
+        taken_titles: Set[str] = set()
         for record in forgets:
             key = normalise_dedupe(record["text"])
             blanked = [
@@ -1369,11 +1439,19 @@ class MemoryStore:
                     (conversation_id,),
                 )
                 taken_summaries.add(conversation_id)
+            untitled = [row for row, title in titles if row[0] not in taken_titles and key in title]
+            for conversation_id, _ in untitled:
+                self._db.execute(
+                    "UPDATE conversations SET title = '' WHERE id = ?", (conversation_id,)
+                )
+                taken_titles.add(conversation_id)
             cleared_rounds += blanked
             cleared_summaries += cleared
+            cleared_titles += untitled
             record["cleared_rounds"] = len(blanked)
             record["cleared_summaries"] = len(cleared)
-        return cleared_rounds, cleared_summaries
+            record["cleared_titles"] = len(untitled)
+        return cleared_rounds, cleared_summaries, cleared_titles
 
     def _index_round(
         self, conversation_id: str, idx: int, user_text: str, assistant_text: str
@@ -1395,16 +1473,19 @@ class MemoryStore:
         facts: Sequence[str] = (),
         rounds: Sequence[List[Any]] = (),
         summaries: Sequence[List[Any]] = (),
+        titles: Sequence[List[Any]] = (),
         changes: int,
     ) -> None:
         """In the caller's write: keep what a batch did, for ``undo``: each entry row it
         wrote as ``[id, row before (None when added), row after]``, the ids of the facts it
-        hid, the rounds and summaries it cleared as they were, and its count of changes."""
+        hid, the rounds, summaries and chat titles it cleared as they were, and its count of
+        changes."""
         payload = {
             "entries": entries,
             "facts": list(facts),
             "rounds": list(rounds),
             "summaries": list(summaries),
+            "titles": list(titles),
             "changes": changes,
         }
         self._db.execute(
@@ -1438,15 +1519,32 @@ class MemoryStore:
             )
             if summary != [(None, None)]:
                 return False
+        for conversation_id, _ in payload["titles"]:
+            title = self._db.execute(
+                "SELECT title FROM conversations WHERE id = ?", (conversation_id,)
+            )
+            if title != [("",)]:
+                return False
         return True
 
-    def _supersede(self, fact_id: str, by: str, now: str) -> None:
+    def _supersede(self, fact_id: str, by: str, now: str) -> bool:
         """In the caller's write: mark the visible fact ``fact_id`` superseded by ``by``,
-        unless a fact has superseded it already."""
+        unless a fact has superseded it already. Returns whether it did."""
         self._db.execute(
             "UPDATE facts SET superseded_by = ?, superseded_at = ? WHERE id = ?"
             " AND superseded_by IS NULL AND hidden_at IS NULL",
             (by, now, fact_id),
+        )
+        return self._changed_rows() > 0
+
+    def _changed_rows(self) -> int:
+        """In the caller's write: how many rows the last INSERT, UPDATE or DELETE changed."""
+        return int(self._db.execute("SELECT changes()")[0][0])
+
+    def _raise_revision(self) -> None:
+        """In the caller's write: raise the ``revision`` by one."""
+        self._db.execute(
+            "UPDATE meta SET value = CAST(value AS INTEGER) + 1 WHERE key = 'revision'"
         )
 
     def _new_id(self, kind: str) -> str:
