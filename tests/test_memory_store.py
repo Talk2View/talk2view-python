@@ -16,7 +16,7 @@ import unicodedata
 from contextlib import closing
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Dict, Iterator, List
+from typing import Any, Dict, Iterator, List, Optional, Tuple
 
 import pytest
 
@@ -46,15 +46,14 @@ def _compiled_with_fts5() -> bool:
 SQLITE3_HAS_FTS5 = _compiled_with_fts5()
 APSW_IMPORTABLE = importlib.util.find_spec("apsw") is not None
 
-BACKENDS = [
-    pytest.param(
-        "sqlite3", marks=pytest.mark.skipif(not SQLITE3_HAS_FTS5, reason="sqlite3 lacks FTS5")
-    ),
-    "scan",
-    pytest.param(
-        "apsw", marks=pytest.mark.skipif(not APSW_IMPORTABLE, reason="apsw is not installed")
-    ),
-]
+SQLITE3 = pytest.param(
+    "sqlite3", marks=pytest.mark.skipif(not SQLITE3_HAS_FTS5, reason="sqlite3 lacks FTS5")
+)
+APSW = pytest.param(
+    "apsw", marks=pytest.mark.skipif(not APSW_IMPORTABLE, reason="apsw is not installed")
+)
+BACKENDS = [SQLITE3, "scan", APSW]
+FTS5_BACKENDS = [SQLITE3, APSW]
 
 T0 = datetime(2026, 10, 21, 10, 0, 0, tzinfo=timezone.utc)
 
@@ -132,6 +131,43 @@ def _conversation(store: MemoryStore, conversation_id: str) -> ConversationRecor
 
 def _ids(records: List[ConversationRecord]) -> List[str]:
     return [record.id for record in records]
+
+
+def _indexed_facts(store: MemoryStore) -> List[Tuple[Any, ...]]:
+    """The fact index's rows, ``(fact_id, seg_text)``, from the tables of the store's kind."""
+    if store.backend == "scan":
+        return store._query("SELECT fact_id, seg_text FROM facts_scan ORDER BY fact_id")
+    return store._query("SELECT fact_id, seg_text FROM facts_index ORDER BY fact_id")
+
+
+def _indexed_rounds(store: MemoryStore) -> List[Tuple[Any, ...]]:
+    """The round index's rows, ``(conversation_id, idx, seg_text)``."""
+    if store.backend == "scan":
+        return store._query(
+            "SELECT conversation_id, idx, seg_text FROM rounds_scan ORDER BY conversation_id, idx"
+        )
+    return store._query(
+        "SELECT conversation_id, idx, seg_text FROM rounds_index ORDER BY conversation_id, idx"
+    )
+
+
+def _found(store: MemoryStore, word: str) -> Tuple[List[Tuple[Any, ...]], List[Tuple[Any, ...]]]:
+    """The facts and the rounds the store's index finds by ``word``: through FTS5's own
+    index, or, for scan, by a substring test on the plain tables."""
+    if store.backend == "scan":
+        pattern = "%" + word + "%"
+        return (
+            store._query("SELECT fact_id FROM facts_scan WHERE seg_text LIKE ?", (pattern,)),
+            store._query(
+                "SELECT conversation_id, idx FROM rounds_scan WHERE seg_text LIKE ?", (pattern,)
+            ),
+        )
+    return (
+        store._query("SELECT fact_id FROM facts_index WHERE facts_index MATCH ?", (word,)),
+        store._query(
+            "SELECT conversation_id, idx FROM rounds_index WHERE rounds_index MATCH ?", (word,)
+        ),
+    )
 
 
 # ── the file ──
@@ -256,6 +292,7 @@ def test_schema_version_and_meta_defaults(tmp_path: Path, backend: str) -> None:
         "paused": "0",
         "include_sensitive": "0",
         "changes_since_consolidation": "0",
+        "index_kind": "scan" if backend == "scan" else "fts5",
     }
     # Opening again never resets what is stored.
     with closing(sqlite3.connect(str(path))) as conn:
@@ -268,17 +305,123 @@ def test_schema_version_and_meta_defaults(tmp_path: Path, backend: str) -> None:
 def test_index_tables_are_fts5_or_plain_by_backend(store: MemoryStore, backend: str) -> None:
     sql = dict(
         store._query(
-            "SELECT name, sql FROM sqlite_master WHERE name IN ('facts_index', 'rounds_index')"
+            "SELECT name, sql FROM sqlite_master WHERE name IN"
+            " ('facts_index', 'rounds_index', 'facts_scan', 'rounds_scan')"
         )
     )
-    assert set(sql) == {"facts_index", "rounds_index"}
-    for statement in sql.values():
-        if backend == "scan":
+    if backend == "scan":
+        assert set(sql) == {"facts_scan", "rounds_scan"}
+        for statement in sql.values():
             assert statement.startswith("CREATE TABLE")
-        else:
+    else:
+        assert set(sql) == {"facts_index", "rounds_index"}
+        for statement in sql.values():
             assert statement.startswith("CREATE VIRTUAL TABLE")
             assert "fts5" in statement
             assert "unicode61 remove_diacritics 2" in statement
+
+
+@pytest.mark.parametrize("fts5_backend", FTS5_BACKENDS)
+def test_switching_index_kind_rebuilds_the_index(tmp_path: Path, fts5_backend: str) -> None:
+    """One file, opened in turn with scan and with an FTS5 backend: scan, sqlite3, scan,
+    sqlite3 (and the same with apsw). Each open of the other kind rebuilds the index from the
+    facts and rounds, so what every earlier store added is found, once, through the current
+    store's index."""
+    path = tmp_path / "u1.sqlite3"
+    words = ["alpha", "bravo", "charlie", "delta"]
+    for step, backend in enumerate(["scan", fts5_backend, "scan", fts5_backend]):
+        memory = MemoryStore(path, backend=backend)  # type: ignore[arg-type]
+        try:
+            kind = "scan" if backend == "scan" else "fts5"
+            assert _meta(path)["index_kind"] == kind
+            memory._insert_fact(_fact("f{}".format(step), "Said " + words[step] + "."))
+            memory.record_round("c1", "Say " + words[step], "OK.", at=T0)
+            for earlier, word in enumerate(words[: step + 1]):
+                assert _found(memory, word) == ([("f{}".format(earlier),)], [("c1", earlier + 1)])
+            # The rebuilt rows are the ones indexing each row as it was written gives.
+            assert _indexed_facts(memory) == [
+                ("f{}".format(n), normalise_for_index("Said " + word + "."))
+                for n, word in enumerate(words[: step + 1])
+            ]
+            assert _indexed_rounds(memory) == [
+                ("c1", n + 1, normalise_for_index("Say " + word + "\nOK."))
+                for n, word in enumerate(words[: step + 1])
+            ]
+            tables = {name for (name,) in memory._query("SELECT name FROM sqlite_master")}
+            # FTS5 drops the scan tables. Scan cannot open FTS5's, so it leaves them, stale.
+            assert ({"facts_scan", "rounds_scan"} <= tables) == (kind == "scan")
+            assert ({"facts_index", "rounds_index"} <= tables) == (step > 0)
+        finally:
+            memory.close()
+
+
+@pytest.mark.skipif(not SQLITE3_HAS_FTS5, reason="needs sqlite3 to write the FTS5 tables")
+def test_scan_leaves_the_fts5_tables_alone(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A SQLite without FTS5 fails on any statement that names an FTS5 table ("no such
+    module: fts5"). So scan, opening a file an FTS5 store wrote, must never name one. An
+    authorizer that refuses them stands in for that SQLite."""
+    path = tmp_path / "u1.sqlite3"
+    with_fts5 = MemoryStore(path, backend="sqlite3")
+    try:
+        with_fts5._insert_fact(_fact("f1", "Has a dog called Rex."))
+        with_fts5.record_round("c1", "Hello", "Hi.", at=T0)
+    finally:
+        with_fts5.close()
+
+    refused: List[str] = []
+    real_connect = sqlite3.connect
+
+    def refuse_fts5_tables(action: int, arg1: Optional[str], arg2: Optional[str], *_: Any) -> int:
+        for name in (arg1, arg2):
+            if name is not None and name.startswith(("facts_index", "rounds_index")):
+                refused.append(name)  # the FTS5 tables and their shadow tables
+                return sqlite3.SQLITE_DENY
+        return sqlite3.SQLITE_OK
+
+    def connect(database: str, *args: Any, **kwargs: Any) -> sqlite3.Connection:
+        conn = real_connect(database, *args, **kwargs)
+        conn.set_authorizer(refuse_fts5_tables)
+        return conn
+
+    monkeypatch.setattr(sqlite3, "connect", connect)
+    scan = MemoryStore(path, backend="scan")
+    try:
+        scan._insert_fact(_fact("f2", "Has a cat called Tom."))
+        scan.record_round("c1", "Bye", "Goodbye.", at=T0)
+        scan.delete_conversation("c1")
+        assert [fact_id for fact_id, _ in _indexed_facts(scan)] == ["f1", "f2"]
+        assert _indexed_rounds(scan) == []
+    finally:
+        scan.close()
+    assert refused == []
+
+    # Back on FTS5, its stale tables are refilled: the chat deleted meanwhile is gone.
+    monkeypatch.undo()
+    back = MemoryStore(path, backend="sqlite3")
+    try:
+        assert [fact_id for fact_id, _ in _indexed_facts(back)] == ["f1", "f2"]
+        assert _found(back, "tom") == ([("f2",)], [])
+        assert _found(back, "hello") == ([], [])
+        assert _indexed_rounds(back) == []
+    finally:
+        back.close()
+
+
+def test_reopening_with_the_same_index_kind_keeps_the_index(tmp_path: Path, backend: str) -> None:
+    """Only a change of kind rebuilds the index; any other open leaves it as it is."""
+    path = tmp_path / "u1.sqlite3"
+    memory = MemoryStore(path, backend=backend)  # type: ignore[arg-type]
+    try:
+        memory._insert_fact(_fact("f1", "Has a dog."))
+        with memory._write():  # the fact goes and its index row stays; a rebuild would drop it
+            memory._db.execute("DELETE FROM facts WHERE id = 'f1'")
+    finally:
+        memory.close()
+    memory = MemoryStore(path, backend=backend)  # type: ignore[arg-type]
+    try:
+        assert _indexed_facts(memory) == [("f1", normalise_for_index("Has a dog."))]
+    finally:
+        memory.close()
 
 
 # ── entries and facts ──
@@ -330,7 +473,7 @@ def test_entry_and_fact_round_trip(store: MemoryStore) -> None:
         ("e1", normalise_dedupe(locked.text)),
         ("e2", normalise_dedupe(plain.text)),
     ]
-    assert store._query("SELECT fact_id, seg_text FROM facts_index ORDER BY fact_id") == [
+    assert _indexed_facts(store) == [
         ("f1", normalise_for_index(old.text)),
         ("f2", normalise_for_index(new.text)),
     ]
@@ -372,7 +515,7 @@ def test_a_failed_write_rolls_back_the_whole_transaction(store: MemoryStore) -> 
                 store._insert_entry(_entry("e1", "Has a dog."))  # the same id again
         assert store.facts() == []
         assert store.entries() == []
-        assert store._query("SELECT count(*) FROM facts_index") == [(0,)]
+        assert _indexed_facts(store) == []
     store._insert_fact(fact)
     assert store.facts() == [fact]
 
@@ -407,7 +550,7 @@ def test_record_round_appends_and_updates_last_active(store: MemoryStore, clock:
     assert _conversation(store, "c1").last_active_at == "2026-10-21T10:05:00Z"
 
     # Each round is indexed as the user's message and the reply, normalised.
-    assert store._query("SELECT conversation_id, idx, seg_text FROM rounds_index ORDER BY idx") == [
+    assert _indexed_rounds(store) == [
         ("c1", 1, normalise_for_index("Book me a flight\nBooked.")),
         ("c1", 2, normalise_for_index("And a hotel\nDone.")),
         ("c1", 3, normalise_for_index("Late\nOK.")),
@@ -448,7 +591,7 @@ def test_delete_conversation_removes_rounds_and_summary_keeps_facts(store: Memor
 
     assert store.conversation("c1") is None
     assert store.rounds("c1") == []
-    assert store._query("SELECT conversation_id FROM rounds_index") == [("c2",)]
+    assert _indexed_rounds(store) == [("c2", 1, normalise_for_index("Hello\nHi."))]
     assert store.rounds("c2") == [(1, "Hello", "Hi.", "2026-10-21T10:00:00Z")]
     # Facts and entries drawn from the chat stay until the user deletes them (spec §7.1).
     assert store.facts() == [fact]
@@ -460,7 +603,7 @@ def test_incognito_conversation_records_nothing(store: MemoryStore) -> None:
     store.set_incognito("c1", True)
     assert store.record_round("c1", "Something private", "OK.", at=T0) == 0
     assert store.rounds("c1") == []
-    assert store._query("SELECT count(*) FROM rounds_index") == [(0,)]
+    assert _indexed_rounds(store) == []
     assert _conversation(store, "c1").incognito is True
     assert store.unextracted() == []
     assert store.recent_conversations() == []
@@ -548,7 +691,7 @@ def test_concurrent_writes_are_serialised(store: MemoryStore) -> None:
     rounds = store.rounds("shared")
     assert [idx for idx, _, _, _ in rounds] == list(range(1, 401))
     assert len({user_text for _, user_text, _, _ in rounds}) == 400
-    assert store._query("SELECT count(*) FROM rounds_index") == [(400,)]
+    assert len(_indexed_rounds(store)) == 400
 
 
 def test_two_stores_on_one_file_wait_for_each_other(tmp_path: Path, backend: str) -> None:
@@ -609,6 +752,14 @@ def test_segment_cjk_leaves_latin_alone() -> None:
     assert segment_cjk("hello world") == "hello world"
     wo, qu = chr(0x6211), chr(0x53BB)  # "I go"
     assert segment_cjk(wo + qu + " tokyo") == wo + " " + qu + " tokyo"
+    # With no spaces, a CJK code point is set apart from the Latin text on either side, so
+    # the Latin word stays one token: "I use Python to write" indexes as I, use, python, write.
+    yong, xie = chr(0x7528), chr(0x5199)
+    assert segment_cjk(wo + yong + "Python" + xie) == wo + " " + yong + " Python " + xie
+    assert normalise_for_index(wo + yong + "Python" + xie) == wo + " " + yong + " python " + xie
+    assert segment_cjk("2026" + chr(0x5E74)) == "2026 " + chr(0x5E74)  # digits too: "2026 year"
+    # A space or line break already there is left as the only separator.
+    assert segment_cjk("Python " + wo + "\n" + yong) == "Python " + wo + "\n" + yong
     hiragana = chr(0x3068) + chr(0x3046) + chr(0x304D)
     assert segment_cjk(hiragana) == " ".join(hiragana)
     tokyo_hangul = chr(0xB3C4) + chr(0xCFC4)  # Korean puts spaces between words already

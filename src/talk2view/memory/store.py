@@ -6,9 +6,13 @@ Three backends, chosen when the store opens (``MemoryStore.backend`` says which)
 - ``sqlite3``: the standard library's, when it was built with FTS5;
 - ``apsw``: when it was not and apsw is installed (``pip install 'talk2view[memory]'``,
   Python 3.11+), since apsw bundles a SQLite with FTS5;
-- ``scan``: the standard library's ``sqlite3`` with the two ``*_index`` tables as plain
-  tables, which search scans instead of matching. Memory works everywhere; it never crashes
-  for want of FTS5.
+- ``scan``: the standard library's ``sqlite3`` with the search index in plain tables, which
+  search scans instead of matching. Memory works everywhere; it never crashes for want of
+  FTS5.
+
+A file can move between them: ``meta`` records the kind of index the file holds, ``fts5`` or
+``scan``, and a store that opens a file indexed the other way rebuilds the index for its own
+kind from the facts and rounds.
 """
 
 from __future__ import annotations
@@ -18,6 +22,7 @@ import importlib
 import os
 import sqlite3
 import threading
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import ModuleType
@@ -192,29 +197,72 @@ _TABLES = (
     )""",
 )
 
-#: The search indexes, maintained by the store (no triggers). ``seg_text`` is
-#: ``normalise_for_index`` of a fact's text, or of a round's user and assistant text.
-_FTS5_INDEXES = (
-    "CREATE VIRTUAL TABLE IF NOT EXISTS facts_index USING fts5("
-    "fact_id UNINDEXED, seg_text, tokenize='unicode61 remove_diacritics 2')",
-    "CREATE VIRTUAL TABLE IF NOT EXISTS rounds_index USING fts5("
-    "conversation_id UNINDEXED, idx UNINDEXED, seg_text, "
-    "tokenize='unicode61 remove_diacritics 2')",
-)
-
-#: The ``scan`` backend's indexes: the same columns in plain tables.
-_SCAN_INDEXES = (
-    "CREATE TABLE IF NOT EXISTS facts_index (fact_id TEXT NOT NULL, seg_text TEXT NOT NULL)",
-    "CREATE TABLE IF NOT EXISTS rounds_index ("
-    "conversation_id TEXT NOT NULL, idx INTEGER NOT NULL, seg_text TEXT NOT NULL)",
-)
-
 _META_DEFAULTS = (
     ("schema_version", "1"),
     ("paused", "0"),
     ("include_sensitive", "0"),
     ("changes_since_consolidation", "0"),
 )
+
+# The search index, kept by the store (no triggers): one row per fact and per round, whose
+# ``seg_text`` is ``normalise_for_index`` of the fact's text, or of the round's user message
+# and reply. The sqlite3 and apsw backends keep it in the FTS5 tables ``facts_index`` and
+# ``rounds_index``; scan keeps the same columns in the plain tables ``facts_scan`` and
+# ``rounds_scan``. (The plan's data model gives scan the ``*_index`` names as well; the
+# schema is internal to the SDK, and names of its own keep scan from ever naming an FTS5
+# table, which a SQLite without FTS5 cannot open.) ``meta``'s ``index_kind`` records which
+# kind the file holds.
+
+
+@dataclass(frozen=True)
+class _Index:
+    """One kind of search index, as literal statements: no SQL is assembled at run time."""
+
+    kind: str  # meta's index_kind
+    create: Tuple[str, ...]
+    clear: Tuple[str, ...]
+    insert_fact: str
+    insert_round: str
+    delete_rounds: str  # of one conversation
+    drop_other: Tuple[str, ...]  # run once this kind's index is rebuilt
+
+
+_FTS5_INDEX = _Index(
+    kind="fts5",
+    create=(
+        "CREATE VIRTUAL TABLE IF NOT EXISTS facts_index USING fts5("
+        "fact_id UNINDEXED, seg_text, tokenize='unicode61 remove_diacritics 2')",
+        "CREATE VIRTUAL TABLE IF NOT EXISTS rounds_index USING fts5("
+        "conversation_id UNINDEXED, idx UNINDEXED, seg_text, "
+        "tokenize='unicode61 remove_diacritics 2')",
+    ),
+    clear=("DELETE FROM facts_index", "DELETE FROM rounds_index"),
+    insert_fact="INSERT INTO facts_index (fact_id, seg_text) VALUES (?, ?)",
+    insert_round="INSERT INTO rounds_index (conversation_id, idx, seg_text) VALUES (?, ?, ?)",
+    delete_rounds="DELETE FROM rounds_index WHERE conversation_id = ?",
+    drop_other=("DROP TABLE IF EXISTS facts_scan", "DROP TABLE IF EXISTS rounds_scan"),
+)
+
+_SCAN_INDEX = _Index(
+    kind="scan",
+    create=(
+        "CREATE TABLE IF NOT EXISTS facts_scan (fact_id TEXT NOT NULL, seg_text TEXT NOT NULL)",
+        "CREATE TABLE IF NOT EXISTS rounds_scan ("
+        "conversation_id TEXT NOT NULL, idx INTEGER NOT NULL, seg_text TEXT NOT NULL)",
+    ),
+    clear=("DELETE FROM facts_scan", "DELETE FROM rounds_scan"),
+    insert_fact="INSERT INTO facts_scan (fact_id, seg_text) VALUES (?, ?)",
+    insert_round="INSERT INTO rounds_scan (conversation_id, idx, seg_text) VALUES (?, ?, ?)",
+    delete_rounds="DELETE FROM rounds_scan WHERE conversation_id = ?",
+    # Scan cannot open FTS5 tables, so it leaves them. They go stale until an FTS5 store's
+    # rebuild clears and refills them.
+    drop_other=(),
+)
+
+
+def _round_text(user_text: str, assistant_text: str) -> str:
+    """A round's ``seg_text``."""
+    return normalise_for_index(user_text + "\n" + assistant_text)
 
 
 def _create_private_file(path: Path) -> None:
@@ -300,6 +348,7 @@ class MemoryStore:
             )
         self.path = Path(path)
         self.backend: Backend = backend if backend is not None else _choose_backend()
+        self._index = _SCAN_INDEX if self.backend == "scan" else _FTS5_INDEX
         self._clock = clock
         self._lock = threading.RLock()
         self._in_write = False
@@ -387,10 +436,7 @@ class MemoryStore:
                     fact.source,
                 ),
             )
-            self._db.execute(
-                "INSERT INTO facts_index (fact_id, seg_text) VALUES (?, ?)",
-                (fact.id, normalise_for_index(fact.text)),
-            )
+            self._db.execute(self._index.insert_fact, (fact.id, normalise_for_index(fact.text)))
 
     # ── conversations ──
 
@@ -437,8 +483,8 @@ class MemoryStore:
                 (conversation_id, idx, user_text, assistant_text, stamp),
             )
             self._db.execute(
-                "INSERT INTO rounds_index (conversation_id, idx, seg_text) VALUES (?, ?, ?)",
-                (conversation_id, idx, normalise_for_index(user_text + "\n" + assistant_text)),
+                self._index.insert_round,
+                (conversation_id, idx, _round_text(user_text, assistant_text)),
             )
         return idx
 
@@ -504,9 +550,7 @@ class MemoryStore:
         """Delete a conversation's record, rounds and summary, as when the user deletes the
         chat. Facts and entries drawn from it stay until the user deletes them."""
         with self._write():
-            self._db.execute(
-                "DELETE FROM rounds_index WHERE conversation_id = ?", (conversation_id,)
-            )
+            self._db.execute(self._index.delete_rounds, (conversation_id,))
             # Its rounds go with it: ON DELETE CASCADE.
             self._db.execute("DELETE FROM conversations WHERE id = ?", (conversation_id,))
 
@@ -546,13 +590,41 @@ class MemoryStore:
         # These two only take effect outside a transaction.
         self._db.execute("PRAGMA journal_mode = WAL")
         self._db.execute("PRAGMA foreign_keys = ON")
-        indexes = _SCAN_INDEXES if self.backend == "scan" else _FTS5_INDEXES
         with self._write():
-            for statement in _TABLES + indexes:
+            for statement in _TABLES + self._index.create:
                 self._db.execute(statement)
             self._db.executemany(
-                "INSERT OR IGNORE INTO meta (key, value) VALUES (?, ?)", _META_DEFAULTS
+                "INSERT OR IGNORE INTO meta (key, value) VALUES (?, ?)",
+                _META_DEFAULTS + (("index_kind", self._index.kind),),
             )
+            recorded = self._db.execute("SELECT value FROM meta WHERE key = 'index_kind'")
+            if recorded != [(self._index.kind,)]:
+                self._rebuild_index()
+
+    def _rebuild_index(self) -> None:
+        """Fill this store's kind of index afresh from ``facts`` and ``rounds``, in the
+        caller's transaction. The file was indexed the other way, so the other kind's writes
+        are missing from these tables, and whatever they hold is stale."""
+        for statement in self._index.clear:
+            self._db.execute(statement)
+        facts = self._db.execute("SELECT id, text FROM facts ORDER BY rowid")
+        self._db.executemany(
+            self._index.insert_fact,
+            [(fact_id, normalise_for_index(text)) for fact_id, text in facts],
+        )
+        rounds = self._db.execute(
+            "SELECT conversation_id, idx, user_text, assistant_text FROM rounds ORDER BY rowid"
+        )
+        self._db.executemany(
+            self._index.insert_round,
+            [
+                (conversation, idx, _round_text(user, reply))
+                for conversation, idx, user, reply in rounds
+            ],
+        )
+        for statement in self._index.drop_other:
+            self._db.execute(statement)
+        self._db.execute("UPDATE meta SET value = ? WHERE key = 'index_kind'", (self._index.kind,))
 
     def _query(self, sql: str, params: Sequence[Any] = ()) -> List[Tuple[Any, ...]]:
         with self._lock:

@@ -19,10 +19,10 @@ def code_points(text: str) -> int:
 
 
 #: Inclusive code-point ranges of the scripts written without spaces between words: Thai,
-#: kana and Han (with its extensions and compatibility ideographs). ``segment_cjk`` spaces
-#: their code points apart, so unicode61 makes each one a token. Hangul is left out: Korean
-#: puts spaces between words, and a prefix term finds a word with a particle attached.
+#: kana and Han (with its extensions and compatibility ideographs). ``segment_cjk`` sets
+#: their code points apart, so unicode61 makes each one a token.
 _SEGMENTED: Tuple[Tuple[int, int], ...] = (
+    # No Hangul: Korean spaces its words, and a prefix term matches a word with a particle.
     (0x0E00, 0x0E7F),  # Thai
     (0x3005, 0x3007),  # ideographic iteration mark, closing mark, number zero
     (0x3040, 0x30FF),  # Hiragana, Katakana
@@ -41,14 +41,17 @@ def _segmented(ch: str) -> bool:
 
 
 def segment_cjk(text: str) -> str:
-    """Put a space between consecutive CJK or Thai code points, leaving all other text as it
-    is. Expects text without combining marks: ``normalise_for_index`` strips them first, so
-    a Thai vowel sign is never parted from its consonant."""
+    """Set every CJK or Thai code point apart with a space on each side, against any
+    neighbour that is not whitespace already, leaving all other text as it is. unicode61 then
+    makes each such code point a token, and a Latin word written against them without
+    spaces, as Chinese often writes one, stays a token of its own. Expects text without
+    combining marks: ``normalise_for_index`` strips them first, so a Thai vowel sign is never
+    parted from its consonant."""
     out: List[str] = []
     previous = False
     for ch in text:
         current = _segmented(ch)
-        if current and previous:
+        if (current or previous) and out and not (ch.isspace() or out[-1].isspace()):
             out.append(" ")
         out.append(ch)
         previous = current
@@ -74,7 +77,8 @@ def normalise_dedupe(text: str) -> str:
 
 
 #: English function words a search query leaves out. Chat pronouns are among them: nearly
-#: every round holds "my" or "you", so as query terms they would match everything.
+#: every round holds "my" or "you", so as query terms they would match everything. Single
+#: letters ("a", "i") are not listed: the query drops every 1-character Latin token already.
 STOP_WORDS: FrozenSet[str] = frozenset(
     """
     about all an and are as at be been but by did do does for from had has have how if in
