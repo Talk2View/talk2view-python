@@ -1572,6 +1572,49 @@ def test_index_token_spans_give_index_tokens_and_their_places() -> None:
     assert list(index_token_spans(with_harakat + "!")) == [(KATABA, 0, 6)]
 
 
+def _ranges(*bounds: Tuple[int, int]) -> List[str]:
+    """The code points of each inclusive range, as characters."""
+    return [chr(point) for low, high in bounds for point in range(low, high + 1)]
+
+
+# What the property check draws from, script by script: the forms NFKC rewrites as well.
+_ASCII_POOLS = [
+    _ranges((0x41, 0x5A), (0x61, 0x7A)),  # Latin
+    _ranges((0x30, 0x39)),  # digits
+    list(" -_,.!?'\"()/:;\n\t"),  # punctuation and spaces
+]
+_POOLS = _ASCII_POOLS + [
+    _ranges((0xC0, 0xD6), (0xD8, 0xF6), (0x100, 0x17F), (0x1EA0, 0x1EF9)),  # with diacritics
+    _ranges((0x300, 0x36F)),  # combining diacritical marks
+    _ranges((0x4E00, 0x4E3F), (0x3041, 0x3096), (0x30A1, 0x30FA), (0xFF66, 0xFF9D)),  # CJK
+    _ranges((0xF900, 0xF90F)),  # CJK compatibility ideographs
+    _ranges((0x0E01, 0x0E3A), (0x0E40, 0x0E4E), (0x0E50, 0x0E59)),  # Thai, with its marks
+    _ranges((0xAC00, 0xAC3F), (0x1100, 0x1112), (0x1161, 0x1175), (0x3131, 0x318E)),  # Hangul
+    _ranges((0x0621, 0x064A), (0x064B, 0x0652), (0x0660, 0x0669), (0xFE80, 0xFE8F)),  # Arabic
+    _ranges((0xFF10, 0xFF19), (0xB2, 0xB3), (0x2460, 0x2473)),  # full-width, super, circled
+    _ranges((0xA0, 0xA0), (0x3000, 0x3002), (0x300C, 0x300D), (0x2026, 0x2026)),  # spaces
+    _ranges((0xE000, 0xE00F)),  # private use, which unicode61 counts as letters
+]
+
+
+def test_index_token_spans_agree_with_index_tokens_on_random_text() -> None:
+    """Review Minor 6: index_token_spans is a second tokenizer, kept in step with
+    index_tokens. Over 3,000 seeded random strings in NFKC, drawn from Latin, Latin with
+    diacritics, CJK, Thai, Hangul, Arabic, digits, punctuation and private use, they give
+    the same tokens, and each token's span holds it."""
+    rng = random.Random(20261021)  # noqa: S311 - test data, not cryptography
+    for number in range(3000):
+        pools = _ASCII_POOLS if number % 5 == 0 else _POOLS
+        raw = "".join(rng.choice(rng.choice(pools)) for _ in range(rng.randint(0, 40)))
+        text = unicodedata.normalize("NFKC", raw)
+        spans = list(index_token_spans(text))
+        assert [token for token, _, _ in spans] == index_tokens(text), ascii(text)
+        for token, start, end in spans:
+            assert 0 <= start < end <= len(text), ascii(text)
+            assert token in index_tokens(text[start:end]), ascii(text)
+        assert [start for _, start, _ in spans] == sorted(start for _, start, _ in spans)
+
+
 def test_fold_latin_and_is_segmented() -> None:
     assert fold_latin(CA_PHE) == "ca phe"
     assert fold_latin("plain ASCII") == "plain ASCII"
