@@ -514,6 +514,7 @@ class MemoryStore:
         self._lock = threading.RLock()
         self._in_write = False
         self._scrub_due = False  # a _scrub asked for inside the current _write
+        self._revision_raised = False  # the current _write has raised the revision
         apsw = _import_apsw() if self.backend == "apsw" else None
         if self.backend == "apsw" and apsw is None:
             raise ImportError(
@@ -624,7 +625,7 @@ class MemoryStore:
         (``fact_ids``) and the counts (``cleared_rounds``, ``cleared_summaries``,
         ``cleared_titles``). The batch keeps each entry row it changed as it was before and
         after, the facts it hid, and the rounds, summaries and titles as they were, for
-        ``undo``. A batch that changed anything raises the ``revision``."""
+        ``undo``. A batch that changed entries or facts raises the ``revision``."""
         if source not in _SOURCES:
             raise ValueError("source must be one of " + ", ".join(_SOURCES))
         now = _timestamp(self._clock())
@@ -670,6 +671,7 @@ class MemoryStore:
                     titles=titles,
                     changes=changes,
                 )
+            if images or removed_facts:
                 self._raise_revision()
             self._add_changes(changes)
         return AppliedBatch(
@@ -949,11 +951,11 @@ class MemoryStore:
         return True
 
     def revision(self) -> int:
-        """A count, kept in the file, that every committed change to memory raises and
-        nothing lowers: each write that changes the visible entries or facts, a forget that
-        changed anything, the log only included (a consolidation's request may carry what it
-        cleared), an undo and a reset. The log's own writes (rounds, summaries, extraction's
-        marks), purge and the switches leave it. ``apply_consolidation`` checks it."""
+        """A count, kept in the file, that each committed write changing the visible entries
+        or facts raises by one, however many changes it holds, and nothing lowers. An undo
+        and a reset raise it too. The log's writes (rounds, summaries and titles, a forget's
+        clearing of them included, and extraction's marks), purge, incognito and the
+        switches leave it. ``apply_consolidation`` checks it."""
         return int(self._meta_value("revision") or 0)
 
     def replace_entries(self, entries: Sequence[Dict[str, Any]]) -> None:
@@ -1542,10 +1544,13 @@ class MemoryStore:
         return int(self._db.execute("SELECT changes()")[0][0])
 
     def _raise_revision(self) -> None:
-        """In the caller's write: raise the ``revision`` by one."""
+        """In the caller's write: raise the ``revision`` by one, once per transaction."""
+        if self._revision_raised:
+            return
         self._db.execute(
             "UPDATE meta SET value = CAST(value AS INTEGER) + 1 WHERE key = 'revision'"
         )
+        self._revision_raised = True
 
     def _new_id(self, kind: str) -> str:
         """In the caller's write: a new id of ``kind`` (see _ID_KINDS), its prefix and a
@@ -1609,6 +1614,7 @@ class MemoryStore:
                 raise
             finally:
                 self._in_write = False
+                self._revision_raised = False
             if self._scrub_due:
                 self._scrub_due = False
                 self._scrub()

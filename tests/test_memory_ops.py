@@ -771,6 +771,12 @@ def test_forget_clears_the_memory_log(store: MemoryStore, clock: FakeClock) -> N
         ("", None, None),
         (None, "Dentist", "The user asked for a dentist."),
     ]
+    recent = store.recent_conversations()
+    assert [(record.id, record.title) for record in recent] == [
+        ("c3", None),
+        ("c2", ""),
+        ("c1", "Locker"),
+    ]
     # The index holds what rebuilding it from the rounds gives.
     indexed = _indexed_rounds(store)
     with store._write():
@@ -1361,13 +1367,19 @@ def test_revision_rises_with_every_change_to_memory(tmp_path: Path, backend: str
         assert rise() == 1
         store.forget("dog")
         assert rise() == 1
-        # ...and so does a forget that cleared only the log, which a consolidation's request
-        # may have carried.
-        store.record_round("c1", "Talked about zebras.", "Noted.", at=T0, title="Zoo")
-        store.forget("zebras")
+        # ...once per committed write, however many changes it holds.
+        with store._write():
+            store.apply_ops([add("Likes coffee.")])
+            facts("The user drinks coffee.")
+            store.forget("coffee")
         assert rise() == 1
 
-        # Writes that change no entry or fact leave it.
+        # Writes that change no entry or fact leave it: a forget that cleared only the log
+        # (rounds, summaries and titles) among them.
+        store.record_round("c1", "Talked about zebras.", "Noted.", at=T0, title="Zebras")
+        store.set_summary("c1", "Zebras", "The user talked about zebras.")
+        batch = store.forget("zebras")
+        assert (batch.cleared_rounds, batch.cleared_summaries, batch.cleared_titles) == (1, 1, 1)
         store.apply_ops([add("Likes green tea."), {"op": "remove", "id": "e1"}])
         store.forget("matches nothing")
         assert store.delete_entry("e404") is None
@@ -1386,7 +1398,7 @@ def test_revision_rises_with_every_change_to_memory(tmp_path: Path, backend: str
         store.include_sensitive = True
         store.mark_consolidated()
         clock.now = T0 + timedelta(seconds=31)
-        assert store.purge() == 3  # e2, f1 and f3: hidden already
+        assert store.purge() == 5  # e2, e3, f1, f3 and f4: hidden already
         assert rise() == 0
         _fail_last_write(store)
         with pytest.raises(Exception, match="disk full"):
@@ -1407,8 +1419,8 @@ def test_revision_rises_with_every_change_to_memory(tmp_path: Path, backend: str
 
 def test_apply_consolidation_is_all_or_nothing(store: MemoryStore, clock: FakeClock) -> None:
     """R55: a consolidation's result applies whole, in one transaction, and only against
-    the revision its request was built from, so an entry update_memory adds while the call
-    runs is never deleted by a result that never saw it."""
+    the revision its request was built from, so a change made while the call runs is never
+    undone by a result that never saw it."""
     store.apply_ops([add("Works as a designer.", topic="work"), add("Likes tea.")])
     store.add_facts(
         [
@@ -1419,7 +1431,6 @@ def test_apply_consolidation_is_all_or_nothing(store: MemoryStore, clock: FakeCl
         conversation_id="c1",
         source="said",
     )
-    revision = store.revision()  # read as the request is built
 
     def entry(entry_id: str, topic: str, text: str) -> Dict[str, Any]:
         return {"id": entry_id, "topic": topic, "text": text, "valid_until": None, "locked": False}
@@ -1427,23 +1438,40 @@ def test_apply_consolidation_is_all_or_nothing(store: MemoryStore, clock: FakeCl
     designer = entry("e1", "work", "Works as a senior designer.")
     tea = entry("e2", "preferences", "Likes tea.")
     merges: List[Any] = [{"keep": "f1", "drop": ["f2"]}]
-    store.apply_ops([add("Has a dog.", topic="people")])  # update_memory, while the call runs
-    clock.now = T0 + timedelta(days=1)
     tables = ("entries", "facts")
+
+    def refused(result: List[Dict[str, Any]], revision: int) -> None:
+        """The result is refused, and nothing is written."""
+        rows = [_rows(store, table) for table in tables]
+        meta = store._query("SELECT key, value FROM meta ORDER BY key")
+        assert (
+            store.apply_consolidation(result, merges, ["f3"], expected_revision=revision) is False
+        )
+        assert [_rows(store, table) for table in tables] == rows
+        assert store._query("SELECT key, value FROM meta ORDER BY key") == meta
+
+    # An entry update_memory adds while the call runs survives: the result never saw it.
+    revision = store.revision()  # read as the request is built
+    dog = store.apply_ops([add("Has a dog.", topic="people")])
+    refused([designer, tea], revision)
+    assert store.entries()[-1].text == "Has a dog."
+
+    # So does one added while an older batch is undone, which leaves the count of changes
+    # where it was: the revision still moved.
+    revision = store.revision()
+    changes = store.changes_since_consolidation()
+    store.apply_ops([add("Has a cat.", topic="people")])
+    assert store.undo(dog.id) is True
+    assert store.changes_since_consolidation() == changes
+    refused([designer, tea, entry("e3", "people", "Has a dog.")], revision)
+    assert store.entries()[-1].text == "Has a cat."
+
+    # Built again, the result names every entry. A failure at its last write leaves
+    # nothing behind either.
+    result = [designer, tea, entry("e4", "people", "Has a cat.")]
+    revision = store.revision()
     before = [_rows(store, table) for table in tables]
     meta = store._query("SELECT key, value FROM meta ORDER BY key")
-
-    assert (
-        store.apply_consolidation([designer, tea], merges, ["f3"], expected_revision=revision)
-        is False
-    )
-    assert [_rows(store, table) for table in tables] == before
-    assert store._query("SELECT key, value FROM meta ORDER BY key") == meta
-
-    # Built again, the result names the new entry. A failure at its last write leaves
-    # nothing behind either.
-    result = [designer, tea, entry("e3", "people", "Has a dog.")]
-    revision = store.revision()
     _fail_marking_consolidated(store)
     with pytest.raises(Exception, match="disk full"):
         store.apply_consolidation(result, merges, ["f3"], expected_revision=revision)
@@ -1451,7 +1479,9 @@ def test_apply_consolidation_is_all_or_nothing(store: MemoryStore, clock: FakeCl
     assert [_rows(store, table) for table in tables] == before
     assert store._query("SELECT key, value FROM meta ORDER BY key") == meta
 
-    # A malformed merge group is skipped, as a malformed fact id is.
+    # Then it applies whole, as one write: a malformed merge group is skipped, as a
+    # malformed fact id is.
+    clock.now = T0 + timedelta(days=1)
     malformed = [{"keep": "f1"}, "not a group", {"keep": ["f3"], "drop": ["f2"]}]
     assert (
         store.apply_consolidation(result, malformed + merges, ["f3", 7], expected_revision=revision)
@@ -1460,7 +1490,7 @@ def test_apply_consolidation_is_all_or_nothing(store: MemoryStore, clock: FakeCl
     assert [entry.text for entry in store.entries()] == [
         "Works as a senior designer.",
         "Likes tea.",
-        "Has a dog.",
+        "Has a cat.",
     ]
     assert [
         (fact.id, fact.superseded_by, fact.valid_until)
@@ -1468,7 +1498,7 @@ def test_apply_consolidation_is_all_or_nothing(store: MemoryStore, clock: FakeCl
     ] == [("f1", None, None), ("f2", "f1", None), ("f3", None, "2026-10-21")]
     assert store.changes_since_consolidation() == 0
     assert store._meta_value("last_consolidated_at") == at(86400)
-    assert store.revision() > revision
+    assert store.revision() == revision + 1
 
 
 # ── the store: settings, export and reset ──
