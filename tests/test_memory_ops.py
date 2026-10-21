@@ -5,22 +5,35 @@ Every test that takes ``store`` runs on each real backend, as test_memory_store'
 
 from __future__ import annotations
 
+import dataclasses
 import itertools
 import json
+import logging
+import sqlite3
 from dataclasses import replace
 from datetime import timedelta
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterator, List, Tuple
+from typing import Any, Callable, Dict, Iterator, List, Sequence, Tuple
 
 import pytest
 
-from talk2view.memory import Fact, MemoryEntry, MemoryStore, normalise_for_index
-from talk2view.memory.ops import apply_entry_ops
+from talk2view.memory import (
+    STOP_WORDS,
+    ConsolidationSnapshot,
+    Fact,
+    MemoryEntry,
+    MemoryStore,
+    index_tokens,
+    normalise_for_index,
+)
+from talk2view.memory import store as store_module
+from talk2view.memory.ops import FORGET_VAGUE_WORDS, apply_entry_ops
 
 from .test_memory_store import (
     BACKENDS,
     T0,
     FakeClock,
+    _conversation,
     _entry,
     _found,
     _indexed_facts,
@@ -80,9 +93,10 @@ def _rows(store: MemoryStore, table: str) -> List[Tuple[Any, ...]]:
 
 
 def _fail_last_write(store: MemoryStore) -> None:
-    """Make every count of changes fail, as a full disk would: a batch, a delete and an undo
-    each end with one. A temporary trigger on the store's own connection, kept out of the
-    file, so real SQLite rolls the transaction back. ``_stop_failing`` drops it."""
+    """Make every update of the count of changes fail, as a full disk would. A batch and a
+    delete make one as their last write, and an undo one just before it raises the
+    revision. A temporary trigger on the store's own connection, kept out of the file, so
+    real SQLite rolls the transaction back. ``_stop_failing`` drops it."""
     store._db.execute(
         "CREATE TEMP TRIGGER fail BEFORE UPDATE ON meta"
         " WHEN NEW.key = 'changes_since_consolidation'"
@@ -335,6 +349,11 @@ def test_ops_are_checked_as_the_engine_checks_them() -> None:
             {"op": "forget", "text": " ...! "},
             {"op": "forget", "text": " A. "},
             {"op": "forget", "text": "e" + chr(0x301)},
+            # And it must name something (R57): stop words and pro-forms alone, or no word
+            # at all, are too vague. "Forget it" is how people say "never mind".
+            {"op": "forget", "text": "it"},
+            {"op": "forget", "text": "That one."},
+            {"op": "forget", "text": "#$%"},
             # Accepted: the fields each op uses are well formed; the rest are ignored.
             {"op": "remove", "id": "e1", "topic": "pets", "text": 7},
             {"op": "add", "topic": "people", "text": "Has a cat.", "id": None, "extra": 1},
@@ -359,6 +378,9 @@ def test_ops_are_checked_as_the_engine_checks_them() -> None:
         "forget text too short",
         "forget text too short",
         "forget text too short",
+        "forget text too vague",
+        "forget text too vague",
+        "forget text too vague",
     ]
     assert applied == [
         {"op": "remove", "id": "e1"},
@@ -405,6 +427,36 @@ def test_forget_hides_entries_whose_normalised_text_holds_it() -> None:
         {"op": "forget", "text": "TE", "entry_ids": ["e3"]},
     ]
     assert dropped == ["locked"]
+
+
+def test_a_forget_must_name_something() -> None:
+    """R57: a forget whose tokens (``index_tokens``) are all FORGET_VAGUE_WORDS, the
+    STOP_WORDS and the pronouns and pro-forms that stand for something instead of naming it,
+    names nothing. It is dropped whole as "forget text too vague", so "it" never hides every
+    entry holding "it", as "Likes Italian food." does. One word that names something is
+    enough."""
+    italian = _entry("e1", "Likes Italian food.")
+    sam = _entry("e2", "Her ex is called Sam.")
+    entries, applied, dropped = apply_entry_ops(
+        [italian, sam],
+        [
+            {"op": "forget", "text": "it"},
+            {"op": "forget", "text": "That one!"},
+            {"op": "forget", "text": "all of them"},
+            {"op": "forget", "text": "Everything."},
+            {"op": "forget", "text": "her ex"},
+        ],
+        now=NOW,
+        next_id=ids(),
+    )
+    assert dropped == ["forget text too vague"] * 4
+    assert applied == [{"op": "forget", "text": "her ex", "entry_ids": ["e2"]}]
+    assert entries == [italian, replace(sam, hidden_at=NOW)]
+    # The words are written as index_tokens gives them, so every port can copy the set.
+    assert STOP_WORDS < FORGET_VAGUE_WORDS
+    assert {"one", "them", "everything"} <= FORGET_VAGUE_WORDS
+    for word in FORGET_VAGUE_WORDS:
+        assert index_tokens(word) == [word]
 
 
 def test_apply_entry_ops_is_pure_and_deterministic() -> None:
@@ -826,21 +878,77 @@ def test_forget_clears_the_memory_log(store: MemoryStore, clock: FakeClock) -> N
 
 
 def test_forget_matches_a_round_on_its_two_texts_joined(store: MemoryStore) -> None:
-    """A round is matched on its user text and its reply joined with a space, normalised:
-    a phrase the user started and the reply finished is found, and the same words apart
-    are not."""
+    """A round is matched on the tokens of its user text and its reply together, as the
+    index holds them: a phrase the user started and the reply finished is found, and the
+    same words apart are not. Punctuation parts tokens, so "Deep-dish" holds deep, dish."""
     store.record_round("c1", "I could eat deep", "Dish pizza, then?", at=T0)
     store.record_round("c1", "Deep breaths.", "Dish soap is under the sink.", at=T0)
     store.record_round("c1", "Deep-dish pizza.", "Noted.", at=T0)
 
     batch = store.forget("Deep dish")
-    assert batch.cleared_rounds == 1
+    assert batch.cleared_rounds == 2
     assert _round_texts(store) == [
         ("c1", 1, "", ""),
         ("c1", 2, "Deep breaths.", "Dish soap is under the sink."),
-        ("c1", 3, "Deep-dish pizza.", "Noted."),
+        ("c1", 3, "", ""),
     ]
-    assert [(c, i) for c, i, _ in _indexed_rounds(store)] == [("c1", 2), ("c1", 3)]
+    assert [(c, i) for c, i, _ in _indexed_rounds(store)] == [("c1", 2)]
+
+
+def test_forget_finds_its_phrase_in_the_log_as_whole_words(store: MemoryStore) -> None:
+    """R57: in the log (rounds, summaries and chat titles) a forget's phrase matches as its
+    tokens in order, whole (``index_tokens``, as the index splits text), the last allowed an
+    "s" or "es". So "ex" never blanks "for example", nor "cat" "category". A CJK phrase
+    matches inside a run, since segment_cjk sets each character apart, and Latin diacritics
+    fold away, as the index folds them. Entries and facts keep the substring rule (R48):
+    they are few, short and in sight."""
+    ca_phe = "c" + chr(0xE0) + " ph" + chr(0xEA)  # cà phê
+    tokyo = chr(0x4E1C) + chr(0x4EAC)  # 东京
+    store.record_round("c1", "My ex called.", "How did it go?", at=T0, title="My ex")
+    store.record_round("c1", "For example, this one.", "Sure.", at=T0)
+    store.set_summary("c1", "Exams", "The user's ex called about exams.")
+    store.record_round("c2", "I fed my cats.", "Good.", at=T0, title="Categories")
+    store.record_round("c2", "Which category?", "Books.", at=T0)
+    store.record_round("c2", "Pack the boxes.", "Done.", at=T0)
+    store.set_summary("c2", "Category", "The user asked about a category of books.")
+    store.record_round("c3", chr(0x6211) + chr(0x53BB) + tokyo + chr(0x4E86), "OK.", at=T0)
+    store.record_round("c3", tokyo[::-1], "OK.", at=T0)  # the same characters, reversed
+    store.record_round("c4", "Mot ly " + ca_phe + ".", "Ngon.", at=T0)
+    store.record_round("c4", "Uong ca phe sua da.", "Ngon.", at=T0)
+    store.apply_ops([add("Exercises daily.")])
+
+    def cleared(text: str) -> Tuple[int, int, int]:
+        batch = store.forget(text)
+        assert batch.dropped == []
+        return batch.cleared_rounds, batch.cleared_summaries, batch.cleared_titles
+
+    vague = store.forget("this one")  # names nothing: the log is left as it is
+    assert (vague.dropped, vague.applied) == (["forget text too vague"], [])
+    assert cleared("ex") == (1, 1, 1)
+    assert store.entries() == []  # "Exercises daily.": entries match by substring
+    assert cleared("cat") == (1, 0, 0)
+    assert cleared("box") == (1, 0, 0)
+    assert cleared(tokyo) == (1, 0, 0)
+    assert cleared(ca_phe) == (2, 0, 0)
+    assert _round_texts(store) == [
+        ("c1", 1, "", ""),
+        ("c1", 2, "For example, this one.", "Sure."),
+        ("c2", 1, "", ""),
+        ("c2", 2, "Which category?", "Books."),
+        ("c2", 3, "", ""),
+        ("c3", 1, "", ""),
+        ("c3", 2, tokyo[::-1], "OK."),
+        ("c4", 1, "", ""),
+        ("c4", 2, "", ""),
+    ]
+    assert [
+        (record.title, record.summary_title)
+        for record in (_conversation(store, "c1"), _conversation(store, "c2"))
+    ] == [("", None), ("Categories", "Category")]
+    # A phrase with no tokens, which apply_entry_ops drops, would find nothing at all,
+    # rather than the texts with an "s" token or none.
+    assert store_module._phrase("#$%").search(store_module._token_line("Its 5 s")) is None
+    assert store_module._phrase("box").search(store_module._token_line("Two boxes")) is not None
 
 
 def test_blank_rounds_are_left_out_of_rounds_and_unextracted(store: MemoryStore) -> None:
@@ -932,6 +1040,41 @@ def test_a_scrub_waits_for_the_outermost_write_to_commit(
     assert wal.stat().st_size > 0
 
 
+def test_a_scrub_that_fails_after_its_write_committed_is_retried(
+    store: MemoryStore, caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A deferred scrub runs once its write has committed, so its failure must not fail the
+    method: what the write did stands. It logs a warning, without text or counts, and the
+    scrub stays due: the next write that commits retries it, and one that rolls back keeps
+    it due. Every method that deletes text defers its scrub so."""
+    batch = store.apply_ops([add("My locker code is " + WORD + ".")])
+    store.record_round("c1", "Hello", "Hi.", at=T0)
+    execute = store._db.execute
+
+    def checkpoint_fails(sql: str, params: Sequence[Any] = ()) -> List[Tuple[Any, ...]]:
+        if sql.startswith("PRAGMA wal_checkpoint"):
+            raise sqlite3.OperationalError("disk I/O error")
+        return execute(sql, params)
+
+    monkeypatch.setattr(store._db, "execute", checkpoint_fails)
+    with caplog.at_level(logging.WARNING, logger="talk2view.memory"):
+        assert store.undo(batch.id) is True
+        store.delete_conversation("c1")
+    assert store.entries(include_hidden=True) == []
+    assert store.conversation("c1") is None
+    assert [record.getMessage() for record in caplog.records] == [
+        "Memory: scrubbing the store failed (OperationalError); the next write retries it"
+    ] * 2
+    monkeypatch.undo()
+    assert _in_files(store, WORD)  # not scrubbed yet
+    with pytest.raises(RuntimeError):
+        with store._write():
+            raise RuntimeError("disk full")
+    assert _in_files(store, WORD)
+    store.paused = True
+    assert not _in_files(store, WORD)
+
+
 def test_expired_entries_stay_in_entries_and_are_never_purged(
     store: MemoryStore, clock: FakeClock
 ) -> None:
@@ -999,6 +1142,15 @@ def test_edit_entry_locks_it(store: MemoryStore, clock: FakeClock) -> None:
         with pytest.raises(ValueError, match="^" + rule + "$"):
             store.edit_entry("e1", **fields)
     assert store.entries()[0] == edited
+    # None leaves a field as it is, so clear_valid_until is how the date comes off; asked
+    # for with a date as well, it is refused.
+    with pytest.raises(ValueError, match="^both valid_until and clear_valid_until$"):
+        store.edit_entry("e1", valid_until="2027-02-01", clear_valid_until=True)
+    assert store.entries()[0] == edited
+    clock.now = T0 + timedelta(minutes=2)
+    undated = store.edit_entry("e1", clear_valid_until=True)
+    assert undated == replace(edited, valid_until=None, updated_at=at(120))
+    assert store.entries()[0] == undated
     with pytest.raises(KeyError):
         store.edit_entry("e9", text="Has a cat.")
     store.apply_ops([add("Has a cat.")])
@@ -1119,6 +1271,7 @@ def test_merge_and_expire_facts(store: MemoryStore, clock: FakeClock) -> None:
     ]
 
     store.merge_facts("f5", ["f2"])  # superseded already: f2 keeps f1
+    store.merge_facts("f2", ["f4"])  # nor is anything merged into a superseded fact
     store.forget("vegetarian")  # hides f1 and f3
     store.merge_facts("f1", ["f5"])  # nothing is merged into a forgotten fact...
     store.expire_facts(["f1"])  # ...and a forgotten one is left as it is
@@ -1367,6 +1520,17 @@ def test_revision_rises_with_every_change_to_memory(tmp_path: Path, backend: str
         assert rise() == 1
         store.forget("dog")
         assert rise() == 1
+        # So does every forget, one that cleared only the log (rounds, summaries and titles)
+        # or matched nothing included (R55a): a consolidation built before it may hold the
+        # phrase, in a summary or a title, and would write it back.
+        store.record_round("c1", "Talked about zebras.", "Noted.", at=T0, title="Zebras")
+        store.set_summary("c1", "Zebras", "The user talked about zebras.")
+        assert rise() == 0
+        batch = store.forget("zebras")
+        assert (batch.cleared_rounds, batch.cleared_summaries, batch.cleared_titles) == (1, 1, 1)
+        assert rise() == 1
+        store.forget("matches nothing")
+        assert rise() == 1
         # ...once per committed write, however many changes it holds.
         with store._write():
             store.apply_ops([add("Likes coffee.")])
@@ -1374,14 +1538,11 @@ def test_revision_rises_with_every_change_to_memory(tmp_path: Path, backend: str
             store.forget("coffee")
         assert rise() == 1
 
-        # Writes that change no entry or fact leave it: a forget that cleared only the log
-        # (rounds, summaries and titles) among them.
-        store.record_round("c1", "Talked about zebras.", "Noted.", at=T0, title="Zebras")
-        store.set_summary("c1", "Zebras", "The user talked about zebras.")
-        batch = store.forget("zebras")
-        assert (batch.cleared_rounds, batch.cleared_summaries, batch.cleared_titles) == (1, 1, 1)
+        # Writes that change no entry or fact leave it: a forget dropped as too short or too
+        # vague among them, since it is never applied.
         store.apply_ops([add("Likes green tea."), {"op": "remove", "id": "e1"}])
-        store.forget("matches nothing")
+        store.forget("x")
+        store.forget("that one")
         assert store.delete_entry("e404") is None
         store.add_facts([{"text": "", "topic": "people"}], conversation_id=None, source="said")
         store.merge_facts("f3", ["f2"])  # f3 is forgotten
@@ -1499,6 +1660,149 @@ def test_apply_consolidation_is_all_or_nothing(store: MemoryStore, clock: FakeCl
     assert store.changes_since_consolidation() == 0
     assert store._meta_value("last_consolidated_at") == at(86400)
     assert store.revision() == revision + 1
+
+
+def _items(entries: Sequence[MemoryEntry]) -> List[Dict[str, Any]]:
+    """``entries`` as a consolidation result's items: each one's whole state."""
+    return [
+        {"id": entry.id, "topic": entry.topic, "text": entry.text, "valid_until": entry.valid_until}
+        for entry in entries
+    ]
+
+
+def test_consolidation_snapshot_is_one_read(
+    store: MemoryStore, clock: FakeClock, backend: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A consolidate request is built from one read of the store: the revision, the visible
+    entries (locked ones marked), the visible facts no newer fact superseded, newest first,
+    and the summaries of the most recently active conversations, newest first, never an
+    incognito one's. So the revision is the one its contents were read at: a write after it,
+    even from another connection between the snapshot's own reads, makes
+    apply_consolidation refuse the result."""
+    store.apply_ops([add("Works as a designer.", topic="work"), add("Likes tea.")])
+    store.edit_entry("e2", text="Likes green tea.")
+    store.add_facts(
+        [
+            {"text": "The user lives in Melbourne.", "topic": "identity"},
+            {"text": "The user has a cat.", "topic": "people"},
+            {"text": "The user's password hint is " + WORD + ".", "topic": "identity"},
+        ],
+        conversation_id="c1",
+        source="said",
+    )
+    store.forget(WORD)  # f3 is hidden
+    clock.now = T0 + timedelta(hours=1)
+    store.add_facts(
+        [
+            {"text": "The user moved to Sydney.", "topic": "identity", "supersedes": ["f1"]},
+            {"text": "The user's cat is called Miso.", "topic": "people"},
+        ],
+        conversation_id="c2",
+        source="said",
+    )
+    for minutes, conversation_id in ((10, "c1"), (40, "c2"), (30, "c3"), (50, "c4"), (20, "c5")):
+        store.record_round(conversation_id, "Hello", "Hi.", at=T0 + timedelta(minutes=minutes))
+    for conversation_id in ("c1", "c2", "c3", "c5"):
+        store.set_summary(conversation_id, "Chat " + conversation_id, "About " + conversation_id)
+    store.set_incognito("c3", True)  # its summary stays out; c4 has none
+    facts = {fact.id: fact for fact in store.facts()}
+
+    snapshot = store.consolidation_snapshot(facts_max=2, summaries_max=2)
+    assert snapshot == ConsolidationSnapshot(
+        revision=store.revision(),
+        entries=store.entries(),
+        facts=[facts["f5"], facts["f4"]],
+        summaries=[_conversation(store, "c2"), _conversation(store, "c5")],
+    )
+    assert [entry.locked for entry in snapshot.entries] == [False, True]
+    whole = store.consolidation_snapshot()  # 400 facts and 30 summaries at most
+    assert [fact.id for fact in whole.facts] == ["f5", "f4", "f2"]
+    assert [record.id for record in whole.summaries] == ["c2", "c5", "c1"]
+    with store._write():  # inside a write, its transaction serves
+        assert store.consolidation_snapshot() == whole
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        snapshot.revision = 0  # type: ignore[misc]
+
+    # A write after the snapshot: the result built from it is refused, and the entry the
+    # write added survives.
+    store.apply_ops([add("Has a dog.", topic="people")])
+    result = _items(snapshot.entries)
+    assert store.apply_consolidation(result, [], [], expected_revision=snapshot.revision) is False
+    assert store.entries()[-1].text == "Has a dog."
+
+    # Another connection writes after the snapshot's first read: the reads that follow see
+    # the store as that first read did, so the revision still matches what was read.
+    other = MemoryStore(store.path, backend=backend, clock=clock)  # type: ignore[arg-type]
+    first_read = store._query
+    wrote: List[str] = []
+
+    def write_after_first_read(sql: str, params: Sequence[Any] = ()) -> List[Tuple[Any, ...]]:
+        rows = first_read(sql, params)
+        if not wrote:
+            wrote.append(other.apply_ops([add("Has a cat.", topic="people")]).id)
+        return rows
+
+    revision = store.revision()
+    monkeypatch.setattr(store, "_query", write_after_first_read)
+    try:
+        snapshot = store.consolidation_snapshot()
+    finally:
+        monkeypatch.undo()
+        other.close()
+    assert wrote and store.revision() == revision + 1
+    assert snapshot.revision == revision
+    assert [entry.text for entry in snapshot.entries][-1] == "Has a dog."
+    result = _items(snapshot.entries)
+    assert store.apply_consolidation(result, [], [], expected_revision=snapshot.revision) is False
+    assert store.entries()[-1].text == "Has a cat."
+
+    # A read that fails ends the snapshot's transaction with it: the next write can begin.
+    def unreadable(sql: str, params: Sequence[Any] = ()) -> List[Tuple[Any, ...]]:
+        raise sqlite3.OperationalError("disk I/O error")
+
+    monkeypatch.setattr(store, "_query", unreadable)
+    with pytest.raises(sqlite3.OperationalError):
+        store.consolidation_snapshot()
+    monkeypatch.undo()
+    store.apply_ops([add("Has a fish.", topic="people")])
+    assert store.entries()[-1].text == "Has a fish."
+
+
+def test_replace_entries_adds_no_copy_of_an_entry_it_keeps(store: MemoryStore) -> None:
+    """A new item (id null) is skipped when a visible entry the call keeps has its
+    ``normalise_dedupe`` text, whichever item comes first, as is a second new item with the
+    same text: apply_entry_ops' rule for an add. One like an entry the call deletes is
+    added. apply_consolidation applies its result the same way."""
+    store.apply_ops(
+        [
+            add("Works as a designer.", topic="work"),
+            add("Likes tea."),
+            add("Has a dog.", topic="people"),
+        ]
+    )
+    store.edit_entry("e2", text="Likes green tea.")  # locked: kept, though no item names it
+    store.replace_entries(
+        [
+            {"id": None, "topic": "work", "text": "works as a senior designer"},
+            {"id": "e1", "topic": "work", "text": "Works as a senior designer."},
+            {"id": None, "topic": "preferences", "text": "Likes green tea"},
+            {"id": None, "topic": "people", "text": "Has a dog."},  # e3 is deleted
+            {"id": None, "topic": "ongoing", "text": "Studying."},
+            {"id": None, "topic": "ongoing", "text": "studying"},
+        ]
+    )
+    kept = [
+        ("e1", "Works as a senior designer."),
+        ("e2", "Likes green tea."),
+        ("e4", "Has a dog."),
+        ("e5", "Studying."),
+    ]
+    assert [(entry.id, entry.text) for entry in store.entries()] == kept
+
+    result = _items(store.entries()) + [{"id": None, "topic": "people", "text": "has a dog"}]
+    revision = store.consolidation_snapshot().revision
+    assert store.apply_consolidation(result, [], [], expected_revision=revision) is True
+    assert [(entry.id, entry.text) for entry in store.entries()] == kept
 
 
 # ── the store: settings, export and reset ──

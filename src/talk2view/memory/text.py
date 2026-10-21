@@ -7,8 +7,10 @@ backend), and search queries go through the same function.
 
 from __future__ import annotations
 
+import itertools
+import re
 import unicodedata
-from typing import FrozenSet, List, Tuple
+from typing import Dict, FrozenSet, List, Tuple
 
 
 def code_points(text: str) -> int:
@@ -67,6 +69,44 @@ def normalise_for_index(text: str) -> str:
     would split the word around it."""
     folded = unicodedata.normalize("NFKC", text).casefold()
     return segment_cjk("".join(ch for ch in folded if unicodedata.category(ch) != "Mn"))
+
+
+def _latin_fold() -> Dict[int, int]:
+    """unicode61's ``remove_diacritics 2`` as a ``str.translate`` table: each Latin letter
+    whose canonical decomposition is an ASCII letter and combining marks, to that letter."""
+    table: Dict[int, int] = {}
+    for point in itertools.chain(range(0x00C0, 0x0250), range(0x1E00, 0x1F00)):
+        decomposed = unicodedata.normalize("NFD", chr(point))
+        if len(decomposed) > 1 and decomposed[0].isascii() and decomposed[0].isalpha():
+            table[point] = ord(decomposed[0])
+    return table
+
+
+_LATIN_FOLD = _latin_fold()
+# unicode61's token characters: letters and numbers (categories L* and N*, the str.isalnum
+# characters, which [^\W_] matches) and private use (Co).
+_TOKEN = re.compile(
+    r"(?:[^\W_]|["
+    + chr(0xE000)
+    + "-"
+    + chr(0xF8FF)
+    + chr(0xF0000)
+    + "-"
+    + chr(0xFFFFD)
+    + chr(0x100000)
+    + "-"
+    + chr(0x10FFFD)
+    + "])+"
+)
+
+
+def index_tokens(text: str) -> List[str]:
+    """The tokens the search index makes of ``text``: FTS5's ``unicode61 remove_diacritics
+    2`` over ``normalise_for_index(text)``. A token is a run of letters, numbers and
+    private-use characters, so punctuation and spaces part tokens ("Deep-dish" gives deep,
+    dish), and a Latin letter loses its diacritics ("cà phê" gives ca, phe). A CJK or Thai
+    character is a token of its own, as ``segment_cjk`` sets it apart."""
+    return _TOKEN.findall(normalise_for_index(text).translate(_LATIN_FOLD))
 
 
 def normalise_dedupe(text: str) -> str:

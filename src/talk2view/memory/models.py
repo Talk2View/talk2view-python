@@ -26,6 +26,8 @@ RECALLED_CHARS_MAX = 4000
 RESULT_CHARS_MAX = 8000
 SUMMARY_TITLE_MAX = 120
 SUMMARY_TEXT_MAX = 600
+CONSOLIDATE_FACTS_MAX = 400  # the facts a consolidate request carries
+CONSOLIDATE_SUMMARIES_MAX = 30  # and its summaries (the engine's SUMMARIES_MAX)
 
 # ── timing (seconds) ──
 UNDO_WINDOW_S = 30
@@ -117,9 +119,25 @@ class AppliedBatch:
     cleared_titles: int = 0
 
 
+@dataclass(frozen=True)
+class ConsolidationSnapshot:
+    """What a consolidate request carries, read from the store in one read
+    (``MemoryStore.consolidation_snapshot``): the visible entries, locked ones marked; the
+    visible facts no newer one superseded, newest first; the summaries of the most recently
+    active conversations, newest first; and the ``revision`` they were read at, for
+    ``apply_consolidation``'s ``expected_revision``."""
+
+    revision: int
+    entries: List[MemoryEntry]
+    facts: List[Fact]
+    summaries: List[ConversationRecord]
+
+
 __all__ = [
     "CONSOLIDATE_EVERY_S",
+    "CONSOLIDATE_FACTS_MAX",
     "CONSOLIDATE_MIN_CHANGES",
+    "CONSOLIDATE_SUMMARIES_MAX",
     "ENTRIES_CHARS_MAX",
     "ENTRY_MAX",
     "ENTRY_TEXT_MAX",
@@ -136,6 +154,7 @@ __all__ = [
     "TOPICS",
     "UNDO_WINDOW_S",
     "AppliedBatch",
+    "ConsolidationSnapshot",
     "ConversationRecord",
     "Fact",
     "MemoryEntry",

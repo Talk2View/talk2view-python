@@ -15,14 +15,25 @@ from __future__ import annotations
 
 import re
 from dataclasses import replace
-from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, FrozenSet, List, Optional, Sequence, Tuple
 
 from .models import ENTRY_TEXT_MAX, FORGET_TEXT_MIN, TOPICS, MemoryEntry
-from .text import normalise_dedupe
+from .text import STOP_WORDS, index_tokens, normalise_dedupe
 
 # The engine's patterns, applied with fullmatch. re.ASCII keeps \d to 0-9.
 ID_RE = re.compile(r"[A-Za-z0-9_-]{1,32}")
 DATE_RE = re.compile(r"\d{4}-\d{2}-\d{2}", re.ASCII)
+
+#: The words that name nothing in a forget's phrase: the STOP_WORDS, and the pronouns and
+#: pro-forms they leave out, which stand for something said before ("that one", "them"). A
+#: phrase of these alone is "forget text too vague": "forget it" is how people say "never
+#: mind", and it would reach every text that holds "it".
+FORGET_VAGUE_WORDS: FrozenSet[str] = STOP_WORDS | frozenset(
+    """
+    anything everything he her hers him his its mine nothing one ones ours she something
+    stuff theirs them these thing things those us yours
+    """.split()
+)
 
 _OPS = ("add", "update", "remove", "forget")
 
@@ -80,7 +91,9 @@ def apply_entry_ops(
     - ``remove`` hides the entry: it stays in the list with ``hidden_at`` set to ``now``.
     - ``forget`` hides every unlocked visible entry whose ``normalise_dedupe`` text holds
       its own. That must be at least FORGET_TEXT_MIN (2) code points ("forget text too
-      short"): one letter is in nearly every text. It is applied even when nothing
+      short"): one letter is in nearly every text. And it must name something: a phrase
+      whose tokens (``index_tokens``) are all FORGET_VAGUE_WORDS, or that has none, such as
+      "it" or "that one", is "forget text too vague". It is applied even when nothing
       matches; its record lists the ids it hid (``entry_ids``).
 
     ``update`` and ``remove`` need the id of a visible entry ("missing" otherwise) that is
@@ -220,6 +233,8 @@ def _forget(
     key = normalise_dedupe(text)
     if len(key) < FORGET_TEXT_MIN:
         return ["forget text too short"]
+    if all(token in FORGET_VAGUE_WORDS for token in index_tokens(text)):
+        return ["forget text too vague"]
     hidden: List[str] = []
     passed: List[str] = []
     for position, entry in enumerate(state):
@@ -251,6 +266,7 @@ def _record(op: str, **fields: Optional[str]) -> Dict[str, Any]:
 
 __all__ = [
     "DATE_RE",
+    "FORGET_VAGUE_WORDS",
     "ID_RE",
     "apply_entry_ops",
     "date_problem",

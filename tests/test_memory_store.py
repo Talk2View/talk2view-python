@@ -30,6 +30,7 @@ from talk2view.memory import (
     MemoryEntry,
     MemoryStore,
     code_points,
+    index_tokens,
     normalise_dedupe,
     normalise_for_index,
     segment_cjk,
@@ -861,6 +862,42 @@ def test_normalise_dedupe_folds_case_space_and_trailing_punctuation() -> None:
     assert normalise_dedupe("Likes green tea!?") == "likes green tea"
     assert normalise_dedupe(chr(0xFB01) + "ne, thanks ;:") == "fine, thanks"
     assert normalise_dedupe("Dr. Lee, the dentist") == "dr. lee, the dentist"
+
+
+@pytest.mark.skipif(not SQLITE3_HAS_FTS5, reason="sqlite3 lacks FTS5")
+def test_index_tokens_are_the_tokens_fts5_makes() -> None:
+    """index_tokens gives what the index's tokenizer, unicode61 with remove_diacritics 2,
+    makes of normalise_for_index's text, read back through fts5vocab, so the scan backend
+    and the forget rules split text as FTS5 does."""
+    ca_phe = "c" + chr(0xE0) + " ph" + chr(0xEA)  # cà phê
+    sua_da = "s" + chr(0x1EEF) + "a " + chr(0x111) + chr(0xE1)  # sữa đá: đ has no decomposition
+    texts = [
+        "Uong " + ca_phe + " " + sua_da,
+        "O" + chr(0xF9) + " est le caf" + chr(0xE9) + "? " + chr(0xC9) + "T" + chr(0xC9) + "!",
+        "Vie" + chr(0x323) + chr(0x302) + "t Nam",  # decomposed marks
+        "Deep-dish pizza; don't, C# and C++, e_mail a.b@c.d 2026-10-21 3.5",
+        chr(0x6211) + chr(0x53BB) + chr(0x4E1C) + chr(0x4EAC) + "Python" + chr(0x65C5),
+        chr(0xFF34) + "OKYO " + chr(0xFB01) + "le STRA" + chr(0xDF) + "E",  # NFKC and casefold
+        chr(0x643) + chr(0x64E) + chr(0x62A) + chr(0x64E) + chr(0x628) + chr(0x64E) + " book",
+        chr(0xC11C) + chr(0xC6B8) + chr(0xC5D0) + " " + chr(0xAC14) + chr(0xC5B4),  # Korean
+        "I " + chr(0x2764) + " tea " + chr(0x1F375) + " and " + chr(0xE001) + "x",
+        "",
+    ]
+    with closing(sqlite3.connect(":memory:")) as conn:
+        conn.execute(
+            "CREATE VIRTUAL TABLE t USING fts5(x, tokenize='unicode61 remove_diacritics 2')"
+        )
+        conn.execute("CREATE VIRTUAL TABLE v USING fts5vocab(t, 'instance')")
+        conn.executemany(
+            "INSERT INTO t (rowid, x) VALUES (?, ?)",
+            [(number, normalise_for_index(text)) for number, text in enumerate(texts)],
+        )
+        for number, text in enumerate(texts):
+            made = conn.execute(
+                "SELECT term FROM v WHERE doc = ? ORDER BY offset", (number,)
+            ).fetchall()
+            assert index_tokens(text) == [term for (term,) in made], text
+    assert index_tokens("Deep-dish pizza.") == ["deep", "dish", "pizza"]
 
 
 def test_stop_words_are_48_normalised_function_words() -> None:

@@ -6,21 +6,38 @@ it a bounded slice, the engine sends back changes for the device to apply, and t
 answers the agent's memory searches from its own index.
 """
 
-from .models import TOPICS, AppliedBatch, ConversationRecord, Fact, MemoryEntry, SearchHit
+from .models import (
+    TOPICS,
+    AppliedBatch,
+    ConsolidationSnapshot,
+    ConversationRecord,
+    Fact,
+    MemoryEntry,
+    SearchHit,
+)
 from .store import Backend, MemoryStore
-from .text import STOP_WORDS, code_points, normalise_dedupe, normalise_for_index, segment_cjk
+from .text import (
+    STOP_WORDS,
+    code_points,
+    index_tokens,
+    normalise_dedupe,
+    normalise_for_index,
+    segment_cjk,
+)
 
 __all__ = [
     "STOP_WORDS",
     "TOPICS",
     "AppliedBatch",
     "Backend",
+    "ConsolidationSnapshot",
     "ConversationRecord",
     "Fact",
     "MemoryEntry",
     "MemoryStore",
     "SearchHit",
     "code_points",
+    "index_tokens",
     "normalise_dedupe",
     "normalise_for_index",
     "segment_cjk",

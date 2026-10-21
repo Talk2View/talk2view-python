@@ -22,6 +22,7 @@ import importlib
 import json
 import logging
 import os
+import re
 import sqlite3
 import threading
 from dataclasses import asdict, dataclass, replace
@@ -47,7 +48,9 @@ from typing import (
 from ..storage import _DIR_MODE, _FILE_MODE, _POSIX_PERMISSIONS
 from .models import (
     CONSOLIDATE_EVERY_S,
+    CONSOLIDATE_FACTS_MAX,
     CONSOLIDATE_MIN_CHANGES,
+    CONSOLIDATE_SUMMARIES_MAX,
     ENTRIES_CHARS_MAX,
     ENTRY_MAX,
     FACT_TEXT_MAX,
@@ -56,12 +59,13 @@ from .models import (
     TOPICS,
     UNDO_WINDOW_S,
     AppliedBatch,
+    ConsolidationSnapshot,
     ConversationRecord,
     Fact,
     MemoryEntry,
 )
 from .ops import apply_entry_ops, date_problem, text_problem, topic_problem
-from .text import code_points, normalise_dedupe, normalise_for_index
+from .text import code_points, index_tokens, normalise_dedupe, normalise_for_index
 
 logger = logging.getLogger("talk2view.memory")
 
@@ -311,6 +315,27 @@ def _round_text(user_text: str, assistant_text: str) -> str:
     return normalise_for_index(user_text + "\n" + assistant_text)
 
 
+def _token_line(text: str) -> str:
+    """``text``'s tokens (``index_tokens``) between single spaces, with a space at each end,
+    as ``_phrase`` searches them. A token never holds a space, so the spaces mark exactly
+    where tokens begin and end."""
+    return " " + " ".join(index_tokens(text)) + " "
+
+
+_NOWHERE = re.compile("(?!)")  # a pattern that matches no text
+
+
+def _phrase(text: str) -> re.Pattern[str]:
+    """What finds a forget's phrase in the log (R57): its tokens in order, whole, in a
+    ``_token_line``, the last allowed an "s" or "es" ("cat" finds "cats", "box" "boxes"),
+    so "ex" never finds "for example". A phrase with no tokens finds nothing, rather than
+    nearly every text; apply_entry_ops drops one as too vague anyway."""
+    tokens = index_tokens(text)
+    if not tokens:
+        return _NOWHERE
+    return re.compile(" " + re.escape(" ".join(tokens)) + "(?:e?s)? ")
+
+
 def _create_private_file(path: Path) -> None:
     """Create the store's file 0600 before SQLite opens it, so it never exists with looser
     permissions; SQLite gives its ``-wal`` and ``-shm`` files the same mode. A directory this
@@ -394,6 +419,21 @@ _SELECT_VISIBLE_FACTS = (
     "SELECT id, text, topic, recorded_at, occurred_at, valid_until, conversation_id,"
     " superseded_by, superseded_at, source, hidden_at FROM facts"
     " WHERE hidden_at IS NULL ORDER BY rowid"
+)
+# What a consolidate request carries (consolidation_snapshot): the newest visible facts no
+# other superseded, and the newest summaries, never an incognito conversation's. Each takes
+# a LIMIT.
+_SELECT_NEWEST_FACTS = (
+    "SELECT id, text, topic, recorded_at, occurred_at, valid_until, conversation_id,"
+    " superseded_by, superseded_at, source, hidden_at FROM facts"
+    " WHERE hidden_at IS NULL AND superseded_by IS NULL"
+    " ORDER BY recorded_at DESC, rowid DESC LIMIT ?"
+)
+_SELECT_NEWEST_SUMMARIES = (
+    "SELECT id, title, started_at, last_active_at, summary_title, summary_text,"
+    " extracted_through, incognito FROM conversations"
+    " WHERE incognito = 0 AND (summary_title IS NOT NULL OR summary_text IS NOT NULL)"
+    " ORDER BY last_active_at DESC, rowid DESC LIMIT ?"
 )
 # The rounds, summaries and chat titles a forget can clear, as undo keeps them: a round as
 # [conversation_id, idx, user_text, assistant_text], a summary as [id, title, text], a
@@ -618,14 +658,15 @@ class MemoryStore:
         A removed entry is hidden, not deleted: ``undo`` can bring it back for
         UNDO_WINDOW_S (30) seconds, and ``purge`` deletes it after that. A ``forget`` also
         hides every fact, superseded ones included, whose ``normalise_dedupe`` text holds its
-        own, and clears it from the log of the chats: both texts of each round whose user
-        text and reply, joined with a space, hold it once normalised are blanked, and the
-        round's index row deleted, each summary whose title or text holds it is cleared, and
-        each chat title that holds it is blanked. Its record gains the facts' ids
-        (``fact_ids``) and the counts (``cleared_rounds``, ``cleared_summaries``,
-        ``cleared_titles``). The batch keeps each entry row it changed as it was before and
-        after, the facts it hid, and the rounds, summaries and titles as they were, for
-        ``undo``. A batch that changed entries or facts raises the ``revision``."""
+        own, and clears its phrase from the log of the chats, where it matches as whole
+        tokens (see ``_phrase``): both texts of each round whose user text and reply hold it
+        are blanked, and the round's index row deleted, each summary whose title or text
+        holds it is cleared, and each chat title that holds it is blanked. Its record gains
+        the facts' ids (``fact_ids``) and the counts (``cleared_rounds``,
+        ``cleared_summaries``, ``cleared_titles``). The batch keeps each entry row it changed
+        as it was before and after, the facts it hid, and the rounds, summaries and titles
+        as they were, for ``undo``. A batch that changed entries or facts, or applied a
+        forget, raises the ``revision``."""
         if source not in _SOURCES:
             raise ValueError("source must be one of " + ", ".join(_SOURCES))
         now = _timestamp(self._clock())
@@ -671,7 +712,9 @@ class MemoryStore:
                     titles=titles,
                     changes=changes,
                 )
-            if images or removed_facts:
+            # Every forget (R55a): a consolidation built before it may hold the phrase in a
+            # summary or a title, even when it matched nothing here, and would write it back.
+            if images or removed_facts or forgets:
                 self._raise_revision()
             self._add_changes(changes)
         return AppliedBatch(
@@ -687,12 +730,14 @@ class MemoryStore:
 
     def forget(self, text: str) -> AppliedBatch:
         """Hide every unlocked entry and every fact whose ``normalise_dedupe`` text holds
-        ``text``'s, and clear it from the log of the chats, as one batch ``undo`` can
-        reverse: ``apply_ops`` with one ``forget``. The batch's ``removed_entries`` and
-        ``removed_facts`` are exactly what went; ``cleared_rounds``, ``cleared_summaries``
-        and ``cleared_titles`` count what was cleared. A locked entry it holds is passed
-        by, with "locked" in ``dropped``, and a phrase under FORGET_TEXT_MIN (2) code points
-        once normalised is dropped whole, as "forget text too short"."""
+        ``text``'s, and clear it, as whole tokens, from the log of the chats, as one batch
+        ``undo`` can reverse: ``apply_ops`` with one ``forget``. The batch's
+        ``removed_entries`` and ``removed_facts`` are exactly what went;
+        ``cleared_rounds``, ``cleared_summaries`` and ``cleared_titles`` count what was
+        cleared. A locked entry it holds is passed by, with "locked" in ``dropped``. A
+        phrase under FORGET_TEXT_MIN (2) code points once normalised is dropped whole, as
+        "forget text too short", and one that names nothing ("it", "that one") as "forget
+        text too vague"."""
         return self.apply_ops([{"op": "forget", "text": text}])
 
     def delete_entry(self, entry_id: str) -> Optional[str]:
@@ -798,13 +843,24 @@ class MemoryStore:
         text: Optional[str] = None,
         topic: Optional[str] = None,
         valid_until: Optional[str] = None,
+        clear_valid_until: bool = False,
     ) -> MemoryEntry:
         """The user's own edit of an entry: set the fields given, ``updated_at``, source
-        "edited" and ``locked``, so changes the engine proposes never touch it again. Raises
-        KeyError for an entry that doesn't exist or is hidden, and ValueError, naming the
-        rule, for text that isn't 1 to ENTRY_TEXT_MAX (300) code points, a topic not in
-        TOPICS or a date that isn't YYYY-MM-DD."""
-        problem = text_problem(text) or topic_problem(topic) or date_problem(valid_until)
+        "edited" and ``locked``, so changes the engine proposes never touch it again. A field
+        left None stays as it is; ``clear_valid_until`` takes the date off. Raises KeyError
+        for an entry that doesn't exist or is hidden, and ValueError, naming the rule, for
+        text that isn't 1 to ENTRY_TEXT_MAX (300) code points, a topic not in TOPICS, a date
+        that isn't YYYY-MM-DD, or a ``valid_until`` with ``clear_valid_until``."""
+        problem = (
+            text_problem(text)
+            or topic_problem(topic)
+            or date_problem(valid_until)
+            or (
+                "both valid_until and clear_valid_until"
+                if clear_valid_until and valid_until is not None
+                else None
+            )
+        )
         if problem is not None:
             raise ValueError(problem)
         now = _timestamp(self._clock())
@@ -813,11 +869,12 @@ class MemoryStore:
             entry = _entry_from_row(rows[0]) if rows else None
             if entry is None or entry.hidden_at is not None:
                 raise KeyError(entry_id)
+            until = entry.valid_until if valid_until is None else valid_until
             edited = replace(
                 entry,
                 topic=entry.topic if topic is None else topic,
                 text=entry.text if text is None else text,
-                valid_until=entry.valid_until if valid_until is None else valid_until,
+                valid_until=None if clear_valid_until else until,
                 updated_at=now,
                 source="edited",
                 locked=True,
@@ -886,12 +943,14 @@ class MemoryStore:
     def merge_facts(self, keep: str, drop: Sequence[str]) -> None:
         """Consolidation's merge of facts that say the same thing: each fact in ``drop`` is
         superseded by ``keep``, so it stays as history, as a superseded fact does. Nothing
-        happens when ``keep`` is not a visible fact; a fact in ``drop`` that is hidden or
+        happens when ``keep`` is not a visible fact or is superseded itself, which would
+        take the merged facts out of sight with it; a fact in ``drop`` that is hidden or
         superseded already is left as it is."""
         now = _timestamp(self._clock())
         with self._write():
             if not self._db.execute(
-                "SELECT 1 FROM facts WHERE id = ? AND hidden_at IS NULL", (keep,)
+                "SELECT 1 FROM facts WHERE id = ? AND hidden_at IS NULL AND superseded_by IS NULL",
+                (keep,),
             ):
                 return
             merged = False
@@ -930,13 +989,13 @@ class MemoryStore:
         expected_revision: int,
     ) -> bool:
         """Apply a consolidation's result, all or nothing, in one transaction: consolidation
-        applies its result only through this. ``expected_revision`` is the ``revision`` read
-        when its request was built. If memory has changed since, the result would undo that
-        change, so nothing is written and it returns False. Otherwise it replaces the entries
-        (``replace_entries``), merges each ``{"keep": id, "drop": [ids]}`` group of facts
-        (``merge_facts``; a malformed group is skipped), expires the facts named
-        (``expire_facts``), records the consolidation (``mark_consolidated``) and returns
-        True."""
+        applies its result only through this. ``expected_revision`` is the ``revision`` of
+        the ``consolidation_snapshot`` its request was built from. If memory has changed
+        since, the result would undo that change, so nothing is written and it returns
+        False. Otherwise it replaces the entries (``replace_entries``), merges each
+        ``{"keep": id, "drop": [ids]}`` group of facts (``merge_facts``; a malformed group is
+        skipped), expires the facts named (``expire_facts``), records the consolidation
+        (``mark_consolidated``) and returns True."""
         with self._write():
             if self.revision() != expected_revision:
                 return False
@@ -950,12 +1009,46 @@ class MemoryStore:
             self.mark_consolidated()
         return True
 
+    def consolidation_snapshot(
+        self,
+        *,
+        facts_max: int = CONSOLIDATE_FACTS_MAX,
+        summaries_max: int = CONSOLIDATE_SUMMARIES_MAX,
+    ) -> ConsolidationSnapshot:
+        """What a consolidate request carries, with the ``revision`` it was read at, in one
+        read: under the lock and in one read transaction, so no write, from this store or
+        another connection to the file, lands between its reads. Build the request only
+        from this, and give its ``revision`` to ``apply_consolidation`` as
+        ``expected_revision``.
+
+        It holds the visible entries, locked ones marked; the visible facts no newer one
+        superseded, the ``facts_max`` (400) recorded last, newest first; and the summaries
+        of the ``summaries_max`` (30) most recently active conversations that have one,
+        newest first, never an incognito one's."""
+        with self._read():
+            revision = self.revision()
+            entries = self.entries()
+            facts = self._query(_SELECT_NEWEST_FACTS, (facts_max,))
+            summaries = self._query(_SELECT_NEWEST_SUMMARIES, (summaries_max,))
+        return ConsolidationSnapshot(
+            revision=revision,
+            entries=entries,
+            facts=[_fact_from_row(row) for row in facts],
+            summaries=[_conversation_from_row(row) for row in summaries],
+        )
+
     def revision(self) -> int:
         """A count, kept in the file, that each committed write changing the visible entries
-        or facts raises by one, however many changes it holds, and nothing lowers. An undo
-        and a reset raise it too. The log's writes (rounds, summaries and titles, a forget's
-        clearing of them included, and extraction's marks), purge, incognito and the
-        switches leave it. ``apply_consolidation`` checks it."""
+        or facts raises by one, however many changes it holds, and nothing lowers. Every
+        forget raises it too, one that cleared only the log or matched nothing included, as
+        do an undo and a reset. The log's other writes (rounds, summaries, titles and
+        extraction's marks), purge, incognito and the switches leave it.
+
+        ``apply_consolidation`` checks it. Build a consolidate request only from
+        ``consolidation_snapshot``, which reads it with the request's entries, facts and
+        summaries in one read. Read on its own after the entries, it would let an entry
+        added in between pass the check, and the result, which never saw that entry, would
+        delete it."""
         return int(self._meta_value("revision") or 0)
 
     def replace_entries(self, entries: Sequence[Dict[str, Any]]) -> None:
@@ -964,21 +1057,23 @@ class MemoryStore:
         An item is the entry's whole state. One with the id of a visible entry rewrites its
         topic, text and ``valid_until`` (``updated_at`` too when they change), keeping its
         id and ``created_at``; a ``valid_until`` it leaves out, or null, means no date. An
-        item with id None, or none, becomes a new entry, source "inferred". A visible
-        entry no item names is deleted, and the file scrubbed of it. Locked entries come
-        through verbatim whatever the items say, and hidden ones (in their undo window) are
-        left alone. As the engine does, an existing entry whose item breaks a rule (a topic
-        in TOPICS, text of 1 to ENTRY_TEXT_MAX code points, a YYYY-MM-DD ``valid_until``)
-        stays as it was, and a new one is dropped. Only the first item with an id counts,
-        and an id that is no longer a visible entry is skipped rather than brought back."""
+        item with id None, or none, becomes a new entry, source "inferred", unless an entry
+        the call keeps, or a new one added before it, has the same ``normalise_dedupe``
+        text, as apply_entry_ops' add rule has it. A visible entry no item names is deleted,
+        and the file scrubbed of it. Locked entries come through verbatim whatever the items
+        say, and hidden ones (in their undo window) are left alone. As the engine does, an
+        existing entry whose item breaks a rule (a topic in TOPICS, text of 1 to
+        ENTRY_TEXT_MAX code points, a YYYY-MM-DD ``valid_until``) stays as it was, and a new
+        one is dropped. Only the first item with an id counts, and an id that is no longer
+        a visible entry is skipped rather than brought back."""
         now = _timestamp(self._clock())
         with self._write():
             current = {
                 row[0]: _entry_from_row(row)
                 for row in self._db.execute(_SELECT_VISIBLE_ENTRY_IMAGES)
             }
-            named: Set[str] = set()
-            changed = False
+            kept: Dict[str, MemoryEntry] = {}  # each entry an item names, as the call leaves it
+            new: List[Tuple[Any, Any, Any]] = []  # each new item's topic, text and valid_until
             for item in entries:
                 if not isinstance(item, dict):
                     continue
@@ -993,34 +1088,48 @@ class MemoryStore:
                 )
                 if entry_id is None:
                     if not broken:
-                        self._insert_entry(
-                            MemoryEntry(
-                                id=self._new_id("entry"),
-                                topic=topic,
-                                text=text,
-                                created_at=now,
-                                updated_at=now,
-                                valid_until=valid_until,
-                                source="inferred",
-                                locked=False,
-                                source_conversation_id=None,
-                            )
-                        )
-                        changed = True
+                        new.append((topic, text, valid_until))
                     continue
                 entry = current.get(entry_id) if isinstance(entry_id, str) else None
-                if entry is None or entry.id in named:
+                if entry is None or entry.id in kept:
                     continue
-                named.add(entry.id)
-                if entry.locked or broken:
-                    continue
-                rewritten = replace(entry, topic=topic, text=text, valid_until=valid_until)
-                if rewritten != entry:
-                    image = _entry_image(replace(rewritten, updated_at=now), None)
+                kept[entry.id] = (
+                    entry
+                    if entry.locked or broken
+                    else replace(entry, topic=topic, text=text, valid_until=valid_until)
+                )
+            changed = False
+            for entry in kept.values():
+                if entry != current[entry.id]:
+                    image = _entry_image(replace(entry, updated_at=now), None)
                     self._db.execute(_UPDATE_ENTRY_IMAGE, image[1:] + [entry.id])
                     changed = True
+            # A locked entry stays whether an item names it or not.
+            texts = {
+                normalise_dedupe(kept.get(entry.id, entry).text)
+                for entry in current.values()
+                if entry.id in kept or entry.locked
+            }
+            for topic, text, valid_until in new:
+                if normalise_dedupe(text) in texts:
+                    continue
+                texts.add(normalise_dedupe(text))
+                self._insert_entry(
+                    MemoryEntry(
+                        id=self._new_id("entry"),
+                        topic=topic,
+                        text=text,
+                        created_at=now,
+                        updated_at=now,
+                        valid_until=valid_until,
+                        source="inferred",
+                        locked=False,
+                        source_conversation_id=None,
+                    )
+                )
+                changed = True
             gone = [
-                entry.id for entry in current.values() if entry.id not in named and not entry.locked
+                entry.id for entry in current.values() if entry.id not in kept and not entry.locked
             ]
             for entry_id in gone:
                 self._db.execute("DELETE FROM entries WHERE id = ?", (entry_id,))
@@ -1171,7 +1280,7 @@ class MemoryStore:
             self._db.execute(self._index.delete_rounds, (conversation_id,))
             # Its rounds go with it: ON DELETE CASCADE.
             self._db.execute("DELETE FROM conversations WHERE id = ?", (conversation_id,))
-        self._scrub()
+            self._scrub()
 
     def unextracted(self, *, idle_for_s: Optional[float] = None) -> List[ConversationRecord]:
         """Conversations with rounds extraction has not seen, least recently active first.
@@ -1306,12 +1415,10 @@ class MemoryStore:
                 ),
             )
             recorded = self._db.execute("SELECT value FROM meta WHERE key = 'index_kind'")
-            rebuilt = recorded != [(self._index.kind,)]
-            if rebuilt:
+            if recorded != [(self._index.kind,)]:
                 self._rebuild_index()
-        if rebuilt:
-            # The cleared index's segments still hold its old text, deleted rows' included.
-            self._scrub()
+                # The cleared index's segments still hold its old text, deleted rows' included.
+                self._scrub()
 
     def _rebuild_index(self) -> None:
         """Fill this store's kind of index afresh from ``facts`` and ``rounds``, in the
@@ -1346,7 +1453,8 @@ class MemoryStore:
 
         A checkpoint fails inside a transaction, so inside a ``_write`` this only marks the
         scrub due: the outermost ``_write`` runs it once it has committed, and never after a
-        rollback, which deleted nothing."""
+        rollback, which deleted nothing. Every method that deletes text asks for it that
+        way, so a scrub that fails never fails the method (see ``_write``)."""
         with self._lock:
             if self._in_write:
                 self._scrub_due = True
@@ -1392,24 +1500,24 @@ class MemoryStore:
         self, forgets: List[Dict[str, Any]]
     ) -> Tuple[List[List[Any]], List[List[Any]], List[List[Any]]]:
         """In the caller's write: for each forget record in ``forgets``, blank both texts of
-        every round whose user text and reply, joined with a space and normalised
-        (``normalise_dedupe``), hold the forget's normalised text, so a phrase split between
-        them is found too, and delete the round's index row; clear every summary whose
-        title or text holds it; and blank every chat title that holds it. Record the counts
-        in its ``cleared_rounds``, ``cleared_summaries`` and ``cleared_titles``. Returns the
+        every round whose user text and reply hold its phrase, as whole tokens (``_phrase``)
+        of the two together, as the index holds them, so a phrase split between them is
+        found too, and delete the round's index row; clear every summary whose title or
+        text holds it; and blank every chat title that holds it. Record the counts in its
+        ``cleared_rounds``, ``cleared_summaries`` and ``cleared_titles``. Returns the
         rounds, summaries and titles as they were, for undo, as _SELECT_ROUNDS_WITH_TEXT,
         _SELECT_SUMMARIES and _SELECT_TITLES give them."""
         if not forgets:
             return [], [], []
         rounds = [
-            (list(row), normalise_dedupe(row[2] + " " + row[3]))
+            (list(row), _token_line(row[2] + "\n" + row[3]))
             for row in self._db.execute(_SELECT_ROUNDS_WITH_TEXT)
         ]
         summaries = [
-            (list(row), normalise_dedupe(row[1] or ""), normalise_dedupe(row[2] or ""))
+            (list(row), _token_line(row[1] or ""), _token_line(row[2] or ""))
             for row in self._db.execute(_SELECT_SUMMARIES)
         ]
-        titles = [(list(row), normalise_dedupe(row[1])) for row in self._db.execute(_SELECT_TITLES)]
+        titles = [(list(row), _token_line(row[1])) for row in self._db.execute(_SELECT_TITLES)]
         cleared_rounds: List[List[Any]] = []
         cleared_summaries: List[List[Any]] = []
         cleared_titles: List[List[Any]] = []
@@ -1417,9 +1525,11 @@ class MemoryStore:
         taken_summaries: Set[str] = set()
         taken_titles: Set[str] = set()
         for record in forgets:
-            key = normalise_dedupe(record["text"])
+            phrase = _phrase(record["text"])
             blanked = [
-                row for row, text in rounds if (row[0], row[1]) not in taken_rounds and key in text
+                row
+                for row, line in rounds
+                if (row[0], row[1]) not in taken_rounds and phrase.search(line)
             ]
             for conversation_id, idx, _, _ in blanked:
                 self._db.execute(
@@ -1432,7 +1542,7 @@ class MemoryStore:
             cleared = [
                 row
                 for row, title, text in summaries
-                if row[0] not in taken_summaries and (key in title or key in text)
+                if row[0] not in taken_summaries and (phrase.search(title) or phrase.search(text))
             ]
             for conversation_id, _, _ in cleared:
                 self._db.execute(
@@ -1441,7 +1551,9 @@ class MemoryStore:
                     (conversation_id,),
                 )
                 taken_summaries.add(conversation_id)
-            untitled = [row for row, title in titles if row[0] not in taken_titles and key in title]
+            untitled = [
+                row for row, line in titles if row[0] not in taken_titles and phrase.search(line)
+            ]
             for conversation_id, _ in untitled:
                 self._db.execute(
                     "UPDATE conversations SET title = '' WHERE id = ?", (conversation_id,)
@@ -1597,18 +1709,23 @@ class MemoryStore:
     def _write(self) -> Iterator[None]:
         """Hold the lock and one write transaction for the block. A ``_write`` inside
         another joins it, so the private helpers compose into one transaction. A scrub asked
-        for inside runs once the outermost ``_write`` has committed (see ``_scrub``)."""
+        for inside runs once the outermost ``_write`` has committed (see ``_scrub``).
+
+        The write has committed by then, so a scrub that fails must not fail the method
+        that wrote: it logs a warning, and the scrub stays due for the next write to
+        retry."""
         with self._lock:
             if self._in_write:
                 yield
                 return
             self._db.execute("BEGIN IMMEDIATE")
             self._in_write = True
+            retry = self._scrub_due  # one that failed after an earlier write
             try:
                 yield
                 self._db.execute("COMMIT")
             except BaseException:
-                self._scrub_due = False
+                self._scrub_due = retry  # what this write asked for, it never deleted
                 with contextlib.suppress(Exception):  # SQLite may have rolled back already
                     self._db.execute("ROLLBACK")
                 raise
@@ -1617,4 +1734,29 @@ class MemoryStore:
                 self._revision_raised = False
             if self._scrub_due:
                 self._scrub_due = False
-                self._scrub()
+                try:
+                    self._scrub()
+                except Exception as error:
+                    self._scrub_due = True
+                    logger.warning(
+                        "Memory: scrubbing the store failed (%s); the next write retries it",
+                        type(error).__name__,
+                    )
+
+    @contextlib.contextmanager
+    def _read(self) -> Iterator[None]:
+        """Hold the lock and one read transaction for the block, so all its reads see the
+        file as it was at the first, whatever another connection commits meanwhile. Inside
+        a ``_write``, that write's transaction serves."""
+        with self._lock:
+            if self._in_write:
+                yield
+                return
+            self._db.execute("BEGIN")
+            try:
+                yield
+            except BaseException:
+                with contextlib.suppress(Exception):  # SQLite may have ended it already
+                    self._db.execute("ROLLBACK")
+                raise
+            self._db.execute("COMMIT")
