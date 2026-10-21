@@ -26,13 +26,17 @@ Example:
 
 from __future__ import annotations
 
+import dataclasses
+import hashlib
 import logging
 import mimetypes
+import os
+import re
 import threading
 import uuid
 from pathlib import Path
 from types import TracebackType
-from typing import Any, Callable, Dict, Iterator, List, Optional, Type, Union
+from typing import TYPE_CHECKING, Any, Callable, Dict, Iterator, List, Optional, Tuple, Type, Union
 from urllib.parse import quote
 
 from .auth import T2VAuth
@@ -116,6 +120,9 @@ from .types import (
 )
 from .voice import T2VVoice
 
+if TYPE_CHECKING:
+    from .memory import T2VMemory
+
 DEFAULT_BASE_URL = "https://engine.talk2view.com"
 __version__ = SDK_VERSION
 
@@ -123,6 +130,18 @@ logger = logging.getLogger("talk2view")
 
 SessionRecoveredCallback = Callable[[str], None]
 AnonymousUnavailableCallback = Callable[[str], None]
+
+
+#: A user id that names its memory file as it is (D22); any other is hashed.
+_MEMORY_FILE_ID = re.compile(r"[A-Za-z0-9_-]{1,128}")
+
+
+def _memory_file(user_id: str) -> str:
+    """The name of the user's memory file under ``memory_path``: ``<user id>.sqlite3``, or
+    for an id that couldn't name a file safely, the start of its SHA-256."""
+    if _MEMORY_FILE_ID.fullmatch(user_id) is None:
+        user_id = hashlib.sha256(user_id.encode("utf-8")).hexdigest()[:32]
+    return user_id + ".sqlite3"
 
 
 #: warm_up()'s claim while nobody is signed in (no user id or access token is empty).
@@ -210,6 +229,13 @@ class Talk2View:
             up to 300 s between bytes, whatever this is.
         upload_timeout: Seconds for an upload: attachments and audio (default 120, as
             the TypeScript SDK).
+        memory_path: A directory for on-device memory (spec §10.2). Each user, a guest
+            included, keeps their memory there in a file of their own,
+            ``<user id>.sqlite3``, that only they can read, and ``memory`` is the signed-in
+            user's ``T2VMemory``. The ``memory`` and ``memory_search`` capabilities are set
+            on top of ``capabilities`` and kept across ``set_chat_defaults``; each turn
+            sends the user's memory, and the agent's ``search_memory`` calls are answered
+            from it. None (the default): no memory, and nothing changes.
     """
 
     def __init__(
@@ -224,6 +250,7 @@ class Talk2View:
         anonymous_auto_start: bool = False,
         request_timeout: float = DEFAULT_TIMEOUT,
         upload_timeout: float = DEFAULT_UPLOAD_TIMEOUT,
+        memory_path: Optional[Union[str, "os.PathLike[str]"]] = None,
     ) -> None:
         _refuse_default_model(model, "Talk2View(model=...)")
         if storage is None:
@@ -239,7 +266,8 @@ class Talk2View:
             upload_timeout=upload_timeout,
         )
         self._model = model
-        self._capabilities = capabilities
+        self._memory_path = Path(memory_path) if memory_path is not None else None
+        self._capabilities = self._with_memory(capabilities)
         self._current_session: Optional[T2VSession] = None
         # set_chat_defaults(model=DEFAULT_MODEL) replaced a model: chat() starts a fresh
         # engine session first (the engine keeps a session's model; see there). Pending
@@ -277,9 +305,18 @@ class Talk2View:
         # notifies no one; the lock orders that store against close().
         self._close_lock = threading.Lock()
         self._closed = False
+        # The signed-in user's memory (memory_path): opened on first use, closed when the
+        # identity changes or the client closes. The lock guards both fields; no request
+        # runs under it.
+        self._memory_lock = threading.Lock()
+        self._memory: Optional["T2VMemory"] = None
+        self._memory_user: Optional[str] = None
 
         self.auth = T2VAuth(self._client)
         self.tools = T2VTools(self._client, dispatcher=dispatcher)
+        if self._memory_path is not None:
+            # Engine-defined: answered here, its schema never registered (B5).
+            self.tools.handle("search_memory", self._search_memory)
         self.voice = T2VVoice(self._client, require_session=self._require_session)
         self.skills = T2VSkills(self._client, self._data_storage)
         self.preferences = T2VPreferences(self._data_storage)
@@ -309,7 +346,8 @@ class Talk2View:
         warm-up thread or whichever thread met the rejected refresh, possibly while
         the other callers of a shared anonymous start are already on their way. So it
         only updates local state — no request, no listener, no lock held beyond a
-        field update.
+        field update. Closing the previous user's memory waits at most for a store
+        read or write in progress, never for an engine call.
         """
         self.invalidate_config_cache()
         user_id = user.id if user is not None else None
@@ -325,6 +363,9 @@ class Talk2View:
             # chat() does not reuse (it would only 404 and be resent).
             self._defaults_version += 1
             self._current_session = None
+            # The previous user's memory stops at once: its queued calls are dropped, and
+            # the next use opens the new user's file.
+            self._retire_memory()
 
     @property
     def storage(self) -> TokenStorage:
@@ -349,6 +390,82 @@ class Talk2View:
     def data_storage(self) -> TokenStorage:
         """The store for skills and preferences (``storage`` unless one was given)."""
         return self._data_storage
+
+    @property
+    def memory(self) -> Optional["T2VMemory"]:
+        """The signed-in user's on-device memory (``memory_path``): their ``T2VMemory``,
+        over ``<memory_path>/<user id>.sqlite3``, opened on first use. None without
+        ``memory_path``, with nobody signed in, or once closed. Signing in as someone else
+        closes the previous user's; a guest has one of their own. Raises when the file
+        can't be opened."""
+        if self._memory_path is None:
+            return None
+        user_id = self._auth_user_id
+        with self._memory_lock:
+            if self._closed:  # read under the lock: close() retires the memory after setting it
+                return None
+            if self._memory is not None and self._memory_user == user_id:
+                return self._memory
+            previous, self._memory, self._memory_user = self._memory, None, None
+            if previous is not None:
+                previous.close()
+            if user_id is None:
+                return None
+            from .memory import MemoryStore, T2VMemory
+
+            store = MemoryStore(self._memory_path / _memory_file(user_id))
+            capabilities = self._capabilities
+            self._memory = T2VMemory(
+                self._client,
+                store,
+                timezone=capabilities.timezone if capabilities is not None else None,
+                is_anonymous=self.auth.is_anonymous,
+            )
+            self._memory_user = user_id
+            return self._memory
+
+    def _with_memory(self, capabilities: Optional[Capabilities]) -> Optional[Capabilities]:
+        """``capabilities`` with the memory flags set, when this client keeps memory: they
+        go with the memory field every turn sends."""
+        if self._memory_path is None:
+            return capabilities
+        return dataclasses.replace(capabilities or Capabilities(), memory=True, memory_search=True)
+
+    def _retire_memory(self) -> None:
+        """Close the open memory, if any: the next use opens the signed-in user's."""
+        with self._memory_lock:
+            memory, self._memory, self._memory_user = self._memory, None, None
+        if memory is not None:
+            memory.close()
+
+    def _search_memory(self, **arguments: Any) -> str:
+        """The ``search_memory`` handler: the signed-in user's memory answers it."""
+        try:
+            memory = self.memory
+        except Exception as error:
+            logger.warning("Memory: opening the memory failed (%s)", type(error).__name__)
+            memory = None
+        if memory is None:
+            return '{"results":[]}'
+        return memory.handle_search(arguments)
+
+    def _memory_turn(self, message: str) -> Tuple[Optional["T2VMemory"], Optional[Dict[str, Any]]]:
+        """The memory a turn goes with, and its ``memory`` field, once what is due is queued
+        (``run_due`` never waits). Neither without ``memory_path``, or when the memory can't
+        be opened (logged); never the field without the ``memory`` capability."""
+        capabilities = self._capabilities
+        if self._memory_path is None or capabilities is None or not capabilities.memory:
+            return None, None
+        try:
+            memory = self.memory
+        except Exception as error:
+            logger.warning("Memory: opening the memory failed (%s)", type(error).__name__)
+            return None, None
+        if memory is None:
+            return None, None
+        memory.timezone = capabilities.timezone  # R64: the turn's
+        memory.run_due()
+        return memory, memory.turn_payload(message)
 
     def create_session(self, model: Optional[str] = None) -> T2VSession:
         """Create a new chat session.
@@ -810,6 +927,8 @@ class Talk2View:
             self._model = model
             self._fresh_session = False  # an explicit choice supersedes a pending reset
             stale = True
+        if capabilities is not None:
+            capabilities = self._with_memory(capabilities)
         if capabilities is not None and capabilities != self._capabilities:
             self._capabilities = capabilities
             stale = True
@@ -882,9 +1001,12 @@ class Talk2View:
                     # once — at most once a turn, so this cannot loop — and run the turn
                     # on the new one. A reset whose DELETE fails again waits for the next.
                     session = self.recycle_session()
-            yield from self._send_with_session_recovery(
-                session, token, message, system_prompt, history, attachments
+            # Once per turn: the same field rides /messages, every /resume and the resend.
+            memory, field = self._memory_turn(message)
+            events = self._send_with_session_recovery(
+                session, token, message, system_prompt, history, attachments, field
             )
+            yield from memory.observe_turn(message, events) if memory is not None else events
         except Cancelled:
             return
         finally:
@@ -899,13 +1021,15 @@ class Talk2View:
         system_prompt: Optional[str],
         history: Optional[List[ChatMessage]],
         attachments: Optional[List[Attachment]],
+        memory: Optional[Dict[str, Any]] = None,
     ) -> Iterator[ChatEvent]:
         """Send a turn, and recover once if the engine has lost the chat session.
 
         A new session rebuilds the conversation from the history this turn
         replays, so resending is safe — but only before any event has been
         yielded: once the reply has started, a client tool handler may already
-        have run, and resending could run it twice.
+        have run, and resending could run it twice. ``memory``, the turn's memory
+        field, goes with the resend as it went the first time.
         """
         started = False
         try:
@@ -915,6 +1039,7 @@ class Talk2View:
                 history=history,
                 attachments=attachments,
                 cancel=cancel,
+                memory=memory,
             ):
                 started = True
                 yield event
@@ -953,6 +1078,7 @@ class Talk2View:
             history=history,
             attachments=attachments,
             cancel=cancel,
+            memory=memory,
         )
 
     def respond_to_approval(
@@ -975,8 +1101,10 @@ class Talk2View:
             raise SessionError("No active session. Start a conversation first.")
         token = cancel if cancel is not None else CancelToken()
         self._active_cancel = token
+        memory = self._memory  # an approval pauses a turn only an open memory follows
         try:
-            yield from session.respond_to_approval(approval, decision, cancel=token)
+            events = session.respond_to_approval(approval, decision, cancel=token)
+            yield from memory.observe_approval(events) if memory is not None else events
         except Cancelled:
             return
         except T2VError as err:
@@ -1095,8 +1223,13 @@ class Talk2View:
         """Clear the current session so the next chat() creates a new one.
 
         Also deletes the session on the server so conversation history is reset.
+        With ``memory_path``, the memory starts a new conversation too, and the one
+        that ended is queued for extraction (``T2VMemory.new_conversation``).
         """
         self._delete_session()
+        memory = self._memory
+        if memory is not None:
+            memory.new_conversation()
 
     def _delete_session(self) -> bool:
         """``clear_session``. True only when the engine confirmed the DELETE: the
@@ -1129,15 +1262,17 @@ class Talk2View:
 
         Skills are closed first, so their debounce timer cannot fire a register
         call into the closed client. A skill edit still waiting for that timer is
-        dropped: call ``skills.flush()`` before ``close()`` to send it. With a
-        ``ChatController`` on this client, close the controller before the
-        Talk2View.
+        dropped: call ``skills.flush()`` before ``close()`` to send it. The memory
+        closes before them: its queued engine calls are dropped, and one in flight
+        is not waited for. With a ``ChatController`` on this client, close the
+        controller before the Talk2View.
 
         Long-lived integrations (e.g. a desktop app) should call this on
         shutdown, or use ``Talk2View`` as a context manager.
         """
         with self._close_lock:
             self._closed = True  # an anonymous start still in flight now stores nothing
+        self._retire_memory()
         self.skills.close()
         self._client.close()
 

@@ -3,9 +3,11 @@
 ``MemoryStore`` keeps one user's memory entries, facts and the log of their chats in a
 SQLite file only they can read. The engine never keeps any of it: each turn the SDK sends
 it a bounded slice, the engine sends back changes for the device to apply, and the device
-answers the agent's memory searches from its own index.
+answers the agent's memory searches from its own index. ``T2VMemory`` does that for a
+``Talk2View`` client given ``memory_path``.
 """
 
+from .client import T2VMemory
 from .models import (
     TOPICS,
     AppliedBatch,
@@ -36,6 +38,7 @@ __all__ = [
     "MemoryEntry",
     "MemoryStore",
     "SearchHit",
+    "T2VMemory",
     "code_points",
     "index_tokens",
     "normalise_dedupe",
