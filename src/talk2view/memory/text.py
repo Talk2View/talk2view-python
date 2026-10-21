@@ -7,10 +7,11 @@ backend), and search queries go through the same function.
 
 from __future__ import annotations
 
+import functools
 import itertools
 import re
 import unicodedata
-from typing import Dict, FrozenSet, List, Tuple
+from typing import Dict, FrozenSet, Iterator, List, Tuple
 
 
 def code_points(text: str) -> int:
@@ -37,7 +38,9 @@ _SEGMENTED: Tuple[Tuple[int, int], ...] = (
 )
 
 
-def _segmented(ch: str) -> bool:
+def is_segmented(ch: str) -> bool:
+    """Whether ``segment_cjk`` sets the code point ``ch`` apart: a CJK or Thai one, which
+    the index makes a token of its own."""
     point = ord(ch)
     return point >= 0x0E00 and any(low <= point <= high for low, high in _SEGMENTED)
 
@@ -52,7 +55,7 @@ def segment_cjk(text: str) -> str:
     out: List[str] = []
     previous = False
     for ch in text:
-        current = _segmented(ch)
+        current = is_segmented(ch)
         if (current or previous) and out and not (ch.isspace() or out[-1].isspace()):
             out.append(" ")
         out.append(ch)
@@ -83,11 +86,8 @@ def _latin_fold() -> Dict[int, int]:
 
 
 _LATIN_FOLD = _latin_fold()
-# unicode61's token characters: letters and numbers (categories L* and N*, the str.isalnum
-# characters, which [^\W_] matches) and private use (Co).
-_TOKEN = re.compile(
-    r"(?:[^\W_]|["
-    + chr(0xE000)
+_PRIVATE_USE = (
+    chr(0xE000)
     + "-"
     + chr(0xF8FF)
     + chr(0xF0000)
@@ -96,8 +96,19 @@ _TOKEN = re.compile(
     + chr(0x100000)
     + "-"
     + chr(0x10FFFD)
-    + "])+"
 )
+#: One of unicode61's token characters, as a regular expression: a letter or number
+#: (categories L* and N*, the str.isalnum characters, which [^\W_] matches) or private use
+#: (Co).
+TOKEN_CHAR = r"(?:[^\W_]|[" + _PRIVATE_USE + "])"
+#: One character that parts tokens: any other.
+SEPARATOR = r"(?:(?![" + _PRIVATE_USE + r"])[\W_])"
+_TOKEN = re.compile(TOKEN_CHAR + "+")
+
+
+def is_token_char(ch: str) -> bool:
+    """Whether the code point ``ch`` is one of unicode61's token characters (TOKEN_CHAR)."""
+    return ch.isalnum() or unicodedata.category(ch) == "Co"
 
 
 def index_tokens(text: str) -> List[str]:
@@ -106,7 +117,68 @@ def index_tokens(text: str) -> List[str]:
     private-use characters, so punctuation and spaces part tokens ("Deep-dish" gives deep,
     dish), and a Latin letter loses its diacritics ("cà phê" gives ca, phe). A CJK or Thai
     character is a token of its own, as ``segment_cjk`` sets it apart."""
-    return _TOKEN.findall(normalise_for_index(text).translate(_LATIN_FOLD))
+    return fts_tokens(normalise_for_index(text))
+
+
+def fold_latin(text: str) -> str:
+    """unicode61's ``remove_diacritics 2`` over ``text``: each Latin letter with diacritics
+    to its base letter. ASCII text, which has none, comes back as it is."""
+    return text if text.isascii() else text.translate(_LATIN_FOLD)
+
+
+def fts_tokens(seg_text: str) -> List[str]:
+    """``index_tokens`` of text that ``normalise_for_index`` has made already, such as the
+    index's ``seg_text``, without normalising it again: just the tokenizer's own step."""
+    return _TOKEN.findall(fold_latin(seg_text))
+
+
+_ASCII_TOKEN = re.compile(r"[A-Za-z0-9]+")  # unicode61's token characters in ASCII
+
+
+@functools.lru_cache(maxsize=4096)
+def _folded(ch: str) -> str:
+    """The code point ``ch`` as the index sees it on its own: ``normalise_for_index`` and
+    the Latin fold, with a space for each separator and a space on each side of a CJK or
+    Thai character, a token of its own. Nothing for a combining mark, which normalising
+    removes without parting the token around it."""
+    pieces: List[str] = []
+    for folded in fold_latin(normalise_for_index(ch)):
+        if is_segmented(folded):
+            pieces.append(" " + folded + " ")
+        else:
+            pieces.append(folded if is_token_char(folded) else " ")
+    return "".join(pieces)
+
+
+def index_token_spans(text: str) -> Iterator[Tuple[str, int, int]]:
+    """The tokens of ``text`` with the span each came from, ``(token, start, end)`` in code
+    points of ``text`` as written, lazily, in order: for finding a term in the text itself.
+
+    Each code point is normalised on its own, so the spans are exact. The tokens are
+    ``index_tokens(text)`` whenever NFKC of the whole text is NFKC of each code point
+    joined, as it is for text in NFKC already; where NFKC composes across code points
+    (conjoining Hangul jamo, for one) they can differ."""
+    if text.isascii():
+        for match in _ASCII_TOKEN.finditer(text):
+            yield match.group().lower(), match.start(), match.end()
+        return
+    token: List[str] = []
+    start = end = 0
+    for position, ch in enumerate(text):
+        folded = _folded(ch)
+        if not folded and token:
+            end = position + 1  # a combining mark inside the token
+        for piece in folded:
+            if piece != " ":
+                if not token:
+                    start = position
+                token.append(piece)
+                end = position + 1
+            elif token:
+                yield "".join(token), start, end
+                token = []
+    if token:
+        yield "".join(token), start, end
 
 
 def normalise_dedupe(text: str) -> str:

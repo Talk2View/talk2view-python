@@ -22,8 +22,10 @@ FORGET_TEXT_MIN = 2  # a forget's phrase, once normalised: one letter is in near
 RECENT_MAX = 8
 RECENT_CHARS_MAX = 3000
 RECALLED_MAX = 4
+RECALLED_TEXT_MAX = 1000
 RECALLED_CHARS_MAX = 4000
 RESULT_CHARS_MAX = 8000
+RESULT_LIMIT_MAX = 20  # the most results a search_memory call may ask for
 SUMMARY_TITLE_MAX = 120
 SUMMARY_TEXT_MAX = 600
 CONSOLIDATE_FACTS_MAX = 400  # the facts a consolidate request carries
@@ -146,9 +148,11 @@ __all__ = [
     "IDLE_EXTRACT_S",
     "RECALLED_CHARS_MAX",
     "RECALLED_MAX",
+    "RECALLED_TEXT_MAX",
     "RECENT_CHARS_MAX",
     "RECENT_MAX",
     "RESULT_CHARS_MAX",
+    "RESULT_LIMIT_MAX",
     "SUMMARY_TEXT_MAX",
     "SUMMARY_TITLE_MAX",
     "TOPICS",

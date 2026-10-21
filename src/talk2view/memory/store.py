@@ -46,6 +46,7 @@ from typing import (
 )
 
 from ..storage import _DIR_MODE, _FILE_MODE, _POSIX_PERMISSIONS
+from . import payload
 from .models import (
     CONSOLIDATE_EVERY_S,
     CONSOLIDATE_FACTS_MAX,
@@ -54,6 +55,7 @@ from .models import (
     ENTRIES_CHARS_MAX,
     ENTRY_MAX,
     FACT_TEXT_MAX,
+    RESULT_LIMIT_MAX,
     SUMMARY_TEXT_MAX,
     SUMMARY_TITLE_MAX,
     TOPICS,
@@ -63,8 +65,21 @@ from .models import (
     ConversationRecord,
     Fact,
     MemoryEntry,
+    SearchHit,
 )
 from .ops import apply_entry_ops, date_problem, text_problem, topic_problem
+from .search import (
+    best_first,
+    bm25_scan,
+    conversation_title,
+    fact_hit,
+    fts_query,
+    fuse,
+    query_terms,
+    result_json,
+    round_hit,
+    round_ref,
+)
 from .text import code_points, index_tokens, normalise_dedupe, normalise_for_index
 
 logger = logging.getLogger("talk2view.memory")
@@ -448,6 +463,67 @@ _SELECT_SUMMARIES = (
 )
 _SELECT_TITLES = "SELECT id, title FROM conversations WHERE title != '' ORDER BY rowid"
 
+# Search's reads (search.py ranks and fuses). A search lists the facts and the rounds that
+# match, each list best first: bm25() ascending (FTS5's sign: lower is better), then the
+# newer, then the later row. It lists only visible facts, superseded ones only when asked,
+# and only rounds with text from conversations that aren't incognito; a date filter takes
+# the UTC day a fact was recorded or a round said, both ends included. The FTS5 lists take
+# the query, (for facts, whether superseded ones count,) the two dates, (for rounds, the
+# conversation to leave out,) and a LIMIT.
+_FTS_FACTS = (
+    "SELECT f.id, f.recorded_at FROM facts_index JOIN facts AS f ON f.id = facts_index.fact_id"
+    " WHERE facts_index MATCH ?1 AND f.hidden_at IS NULL AND (?2 OR f.superseded_by IS NULL)"
+    " AND (?3 IS NULL OR substr(f.recorded_at, 1, 10) >= ?3)"
+    " AND (?4 IS NULL OR substr(f.recorded_at, 1, 10) <= ?4)"
+    " ORDER BY bm25(facts_index), f.recorded_at DESC, f.rowid DESC LIMIT ?5"
+)
+_FTS_ROUNDS = (
+    "SELECT r.conversation_id, r.idx, r.at FROM rounds_index"
+    " JOIN rounds AS r ON r.conversation_id = rounds_index.conversation_id"
+    " AND r.idx = rounds_index.idx"
+    " JOIN conversations AS c ON c.id = r.conversation_id"
+    " WHERE rounds_index MATCH ?1 AND c.incognito = 0"
+    " AND (r.user_text != '' OR r.assistant_text != '')"
+    " AND (?2 IS NULL OR substr(r.at, 1, 10) >= ?2)"
+    " AND (?3 IS NULL OR substr(r.at, 1, 10) <= ?3)"
+    " AND r.conversation_id IS NOT ?4"
+    " ORDER BY bm25(rounds_index), r.at DESC, r.rowid DESC LIMIT ?5"
+)
+# The scan backend reads every index row, since bm25_scan measures the whole table as FTS5
+# does, each with its time, its row and whether the same filters list it (and, for a fact,
+# whether it is superseded). They take the two dates (and, for rounds, the conversation to
+# leave out).
+_SCAN_FACTS = (
+    "SELECT fs.fact_id, fs.seg_text, f.recorded_at, f.rowid,"
+    " f.id IS NOT NULL AND f.hidden_at IS NULL"
+    " AND (?1 IS NULL OR substr(f.recorded_at, 1, 10) >= ?1)"
+    " AND (?2 IS NULL OR substr(f.recorded_at, 1, 10) <= ?2),"
+    " f.superseded_by IS NOT NULL"
+    " FROM facts_scan AS fs LEFT JOIN facts AS f ON f.id = fs.fact_id"
+)
+_SCAN_ROUNDS = (
+    "SELECT rs.conversation_id, rs.idx, rs.seg_text, r.at, r.rowid,"
+    " r.rowid IS NOT NULL AND c.incognito = 0"
+    " AND (r.user_text != '' OR r.assistant_text != '')"
+    " AND (?1 IS NULL OR substr(r.at, 1, 10) >= ?1)"
+    " AND (?2 IS NULL OR substr(r.at, 1, 10) <= ?2)"
+    " AND r.conversation_id IS NOT ?3"
+    " FROM rounds_scan AS rs"
+    " LEFT JOIN rounds AS r ON r.conversation_id = rs.conversation_id AND r.idx = rs.idx"
+    " LEFT JOIN conversations AS c ON c.id = r.conversation_id"
+)
+# A hit's text, time and conversation names. A fact whose conversation has since turned
+# incognito takes no name from it.
+_FACT_HIT = (
+    "SELECT f.text, f.recorded_at, c.title, c.summary_title, c.incognito FROM facts AS f"
+    " LEFT JOIN conversations AS c ON c.id = f.conversation_id WHERE f.id = ?"
+)
+_ROUND_HIT = (
+    "SELECT r.user_text, r.assistant_text, r.at, c.title, c.summary_title FROM rounds AS r"
+    " JOIN conversations AS c ON c.id = r.conversation_id"
+    " WHERE r.conversation_id = ? AND r.idx = ?"
+)
+
 # Where a change the engine proposed came from. An entry's source can also be "edited",
 # which only the user's own edit (edit_entry) sets, as it locks the entry.
 _SOURCES = ("said", "inferred", "imported")
@@ -553,8 +629,12 @@ class MemoryStore:
         self._clock = clock
         self._lock = threading.RLock()
         self._in_write = False
+        self._in_read = False
         self._scrub_due = False  # a _scrub asked for inside the current _write
         self._revision_raised = False  # the current _write has raised the revision
+        # The scan backend's token counts and folded text of the index rows, by their text,
+        # from one search to the next (see bm25_scan); emptied whenever text is deleted.
+        self._scan_cache: Dict[str, Dict[str, Tuple[int, str]]] = {"facts": {}, "rounds": {}}
         apsw = _import_apsw() if self.backend == "apsw" else None
         if self.backend == "apsw" and apsw is None:
             raise ImportError(
@@ -1258,7 +1338,12 @@ class MemoryStore:
 
     def set_incognito(self, conversation_id: str, incognito: bool) -> None:
         """Mark a conversation incognito, so its rounds are never written, or not. Marking
-        an unknown conversation creates its record; unmarking one does nothing."""
+        an unknown conversation creates its record; unmarking one does nothing.
+
+        Marking one that has rounds already deletes them, with their index rows, and its
+        summary, and starts its log over (``extracted_through`` 0), then scrubs the file of
+        their text: an incognito chat's rounds are never kept (spec §7.1). Its title stays;
+        facts and entries drawn from it stay, as they do when the chat is deleted."""
         now = _timestamp(self._clock())
         with self._write():
             if incognito:
@@ -1267,6 +1352,23 @@ class MemoryStore:
                     " VALUES (?, ?, ?)",
                     (conversation_id, now, now),
                 )
+                kept = self._db.execute(
+                    "SELECT EXISTS (SELECT 1 FROM rounds WHERE conversation_id = ?1)"
+                    " OR summary_title IS NOT NULL OR summary_text IS NOT NULL"
+                    " FROM conversations WHERE id = ?1",
+                    (conversation_id,),
+                )
+                if kept[0][0]:
+                    self._db.execute(self._index.delete_rounds, (conversation_id,))
+                    self._db.execute(
+                        "DELETE FROM rounds WHERE conversation_id = ?", (conversation_id,)
+                    )
+                    self._db.execute(
+                        "UPDATE conversations SET summary_title = NULL, summary_text = NULL,"
+                        " extracted_through = 0 WHERE id = ?",
+                        (conversation_id,),
+                    )
+                    self._scrub()  # once this write has committed
             self._db.execute(
                 "UPDATE conversations SET incognito = ? WHERE id = ?",
                 (int(incognito), conversation_id),
@@ -1314,6 +1416,201 @@ class MemoryStore:
             (conversation_id, after),
         )
         return [(row[0], row[1], row[2], row[3]) for row in rows]
+
+    # ── search and the turn payload (the rules are search.py's and payload.py's) ──
+
+    def search(
+        self,
+        query: str,
+        *,
+        from_date: Optional[str] = None,
+        to_date: Optional[str] = None,
+        limit: int = 8,
+    ) -> List[SearchHit]:
+        """Search the facts and the log of the chats for ``query`` (spec §7.2), in one read:
+        at most ``limit`` hits, best first.
+
+        The query's terms (``search.query_terms``: stop words and single letters left out,
+        at most 12) are looked up in the facts and, separately, in the rounds, each list
+        ranked by BM25. Superseded facts are left out unless nothing else matches; hidden
+        facts, rounds a forget blanked and incognito conversations' rounds never show. With
+        ``from_date`` or ``to_date`` (YYYY-MM-DD, both included; ValueError otherwise),
+        only what was recorded or said on those UTC days. The two lists are fused by
+        reciprocal rank fusion (k = 60), a tie going to the newer. A fact comes whole; a
+        round as an excerpt of about 600 code points around its first match. Each hit has
+        its date and its conversation's name ("" when it has none). A query with no terms
+        finds nothing."""
+        return [
+            hit
+            for hit, _ in self._found(
+                query_terms(query), from_date=from_date, to_date=to_date, limit=limit
+            )
+        ]
+
+    def search_result_json(
+        self,
+        query: str,
+        *,
+        from_date: Optional[str] = None,
+        to_date: Optional[str] = None,
+        limit: int = 8,
+    ) -> str:
+        """The ``search_memory`` tool's result for these arguments (spec §8.4): ``search``,
+        with ``limit`` kept within 1 to RESULT_LIMIT_MAX (20), as ``{"results": [{"date",
+        "conversation", "kind", "text"}]}`` JSON of at most RESULT_CHARS_MAX (8,000) code
+        points, with ``"note": "truncated"`` when results were dropped to fit."""
+        hits = self.search(
+            query,
+            from_date=from_date,
+            to_date=to_date,
+            limit=max(1, min(limit, RESULT_LIMIT_MAX)),
+        )
+        return result_json(hits)
+
+    def turn_payload(
+        self, latest_user_message: Optional[str], *, exclude_conversation: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """The ``memory`` field for a turn (spec §8.1), read in one read: ``{"status",
+        "entries", "recent", "recalled"}``, every list within the engine's caps (see
+        payload.py). ``exclude_conversation`` is the current conversation.
+
+        Status "paused" while memory is paused, or "incognito" when the current conversation
+        is, both with empty lists. Otherwise "on": the visible entries not yet expired; the
+        recent conversations but the current one and incognito ones; and the hits of a search
+        for ``latest_user_message`` in older conversations (the current one's rounds left
+        out) that clear the pre-selection floor."""
+        today = _utc(self._clock()).date().isoformat()
+        with self._read():
+            if self.paused:
+                return payload.empty("paused")
+            current = (
+                self.conversation(exclude_conversation)
+                if exclude_conversation is not None
+                else None
+            )
+            if current is not None and current.incognito:
+                return payload.empty("incognito")
+            entries = self.entries()
+            recent = self.recent_conversations(payload.RECENT_WINDOW, exclude=exclude_conversation)
+            terms = query_terms(latest_user_message or "")
+            found = self._found(
+                terms,
+                from_date=None,
+                to_date=None,
+                limit=payload.PRESELECT_SEARCH_LIMIT,
+                exclude_conversation=exclude_conversation,
+            )
+        return {
+            "status": "on",
+            "entries": payload.entry_items(entries, today),
+            "recent": payload.recent_items(recent),
+            "recalled": payload.recalled_items(found, terms),
+        }
+
+    def _found(
+        self,
+        terms: List[str],
+        *,
+        from_date: Optional[str],
+        to_date: Optional[str],
+        limit: int,
+        exclude_conversation: Optional[str] = None,
+    ) -> List[Tuple[SearchHit, str]]:
+        """``search``'s hits for ``terms``, each with the whole text it was indexed by
+        (pre-selection's floor counts the terms in it), leaving out the rounds of
+        ``exclude_conversation``."""
+        for name, value in (("from_date", from_date), ("to_date", to_date)):
+            if date_problem(value):
+                raise ValueError(name + " must be a YYYY-MM-DD date")
+        if not terms or limit < 1:
+            return []
+        with self._read():
+            rounds = self._ranked_rounds(terms, from_date, to_date, exclude_conversation, limit)
+            facts = self._ranked_facts(terms, from_date, to_date, False, limit)
+            if not facts and not rounds:  # superseded facts only when nothing else matches
+                facts = self._ranked_facts(terms, from_date, to_date, True, limit)
+            lists = [[ref for ref, _ in facts], [ref for ref, _ in rounds]]
+            fused = fuse(lists, dict(facts + rounds))[:limit]
+            return [self._hit(ref, score, terms) for ref, score in fused]
+
+    def _ranked_facts(
+        self,
+        terms: List[str],
+        from_date: Optional[str],
+        to_date: Optional[str],
+        superseded: bool,
+        limit: int,
+    ) -> List[Tuple[str, str]]:
+        """The facts that match, best first, at most ``limit``, as ``(id, recorded_at)``."""
+        if self.backend != "scan":
+            return [
+                (fact_id, recorded_at)
+                for fact_id, recorded_at in self._query(
+                    _FTS_FACTS, (fts_query(terms), int(superseded), from_date, to_date, limit)
+                )
+            ]
+        rows = self._query(_SCAN_FACTS, (from_date, to_date))
+        scores = dict(
+            bm25_scan([(row[0], row[1]) for row in rows], terms, cache=self._scan_cache["facts"])
+        )
+        return best_first(
+            [
+                (scores[fact_id], recorded_at, rowid, fact_id)
+                for fact_id, _, recorded_at, rowid, listed, replaced in rows
+                if fact_id in scores and listed and (superseded or not replaced)
+            ],
+            limit,
+        )
+
+    def _ranked_rounds(
+        self,
+        terms: List[str],
+        from_date: Optional[str],
+        to_date: Optional[str],
+        exclude_conversation: Optional[str],
+        limit: int,
+    ) -> List[Tuple[str, str]]:
+        """The rounds that match, best first, at most ``limit``, as ``(round_ref, at)``."""
+        if self.backend != "scan":
+            return [
+                (round_ref(conversation_id, idx), at)
+                for conversation_id, idx, at in self._query(
+                    _FTS_ROUNDS,
+                    (fts_query(terms), from_date, to_date, exclude_conversation, limit),
+                )
+            ]
+        rows = self._query(_SCAN_ROUNDS, (from_date, to_date, exclude_conversation))
+        refs = [round_ref(row[0], row[1]) for row in rows]
+        scores = dict(
+            bm25_scan(
+                [(ref, row[2]) for ref, row in zip(refs, rows)],
+                terms,
+                cache=self._scan_cache["rounds"],
+            )
+        )
+        return best_first(
+            [
+                (scores[ref], row[3], row[4], ref)
+                for ref, row in zip(refs, rows)
+                if ref in scores and row[5]
+            ],
+            limit,
+        )
+
+    def _hit(self, ref: str, score: float, terms: List[str]) -> Tuple[SearchHit, str]:
+        """The hit ``ref`` (a fact's id or a ``round_ref``) with its fused ``score``, and
+        the whole text it was indexed by."""
+        if ref.startswith("r:"):
+            conversation_id, idx = ref[2:].rsplit(":", 1)
+            user_text, assistant_text, at, title, summary_title = self._query(
+                _ROUND_HIT, (conversation_id, int(idx))
+            )[0]
+            name = conversation_title(title, summary_title)
+            hit = round_hit(ref, score, user_text, assistant_text, at, name, terms)
+            return hit, user_text + "\n" + assistant_text
+        text, recorded_at, title, summary_title, incognito = self._query(_FACT_HIT, (ref,))[0]
+        name = "" if incognito else conversation_title(title, summary_title)
+        return fact_hit(ref, score, text, recorded_at, name), text
 
     # ── settings and lifecycle ──
 
@@ -1454,8 +1751,11 @@ class MemoryStore:
         A checkpoint fails inside a transaction, so inside a ``_write`` this only marks the
         scrub due: the outermost ``_write`` runs it once it has committed, and never after a
         rollback, which deleted nothing. Every method that deletes text asks for it that
-        way, so a scrub that fails never fails the method (see ``_write``)."""
+        way, so a scrub that fails never fails the method (see ``_write``). It empties the
+        scan backend's search cache too, so no deleted text stays in it."""
         with self._lock:
+            for cache in self._scan_cache.values():
+                cache.clear()
             if self._in_write:
                 self._scrub_due = True
                 return
@@ -1713,11 +2013,17 @@ class MemoryStore:
 
         The write has committed by then, so a scrub that fails must not fail the method
         that wrote: it logs a warning, and the scrub stays due for the next write to
-        retry."""
+        retry.
+
+        Inside a ``_read`` it raises RuntimeError before writing anything. A read can't
+        become a write: under WAL, a read transaction whose snapshot is stale gets
+        SQLITE_BUSY when it tries to write."""
         with self._lock:
             if self._in_write:
                 yield
                 return
+            if self._in_read:
+                raise RuntimeError("a write can't start inside a read: finish the read first")
             self._db.execute("BEGIN IMMEDIATE")
             self._in_write = True
             retry = self._scrub_due  # one that failed after an earlier write
@@ -1746,17 +2052,21 @@ class MemoryStore:
     @contextlib.contextmanager
     def _read(self) -> Iterator[None]:
         """Hold the lock and one read transaction for the block, so all its reads see the
-        file as it was at the first, whatever another connection commits meanwhile. Inside
-        a ``_write``, that write's transaction serves."""
+        file as it was at the first, whatever another connection commits meanwhile. A
+        ``_read`` inside another ``_read`` or a ``_write`` joins its transaction, so readers
+        compose; a ``_write`` inside one raises (see ``_write``)."""
         with self._lock:
-            if self._in_write:
+            if self._in_write or self._in_read:
                 yield
                 return
             self._db.execute("BEGIN")
+            self._in_read = True
             try:
                 yield
             except BaseException:
                 with contextlib.suppress(Exception):  # SQLite may have ended it already
                     self._db.execute("ROLLBACK")
                 raise
+            finally:
+                self._in_read = False
             self._db.execute("COMMIT")
