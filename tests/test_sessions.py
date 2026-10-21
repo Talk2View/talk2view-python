@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from typing import Any, Dict, List, Optional
+from typing import TYPE_CHECKING, Any, Dict, List, Optional
 from unittest.mock import MagicMock
 
 import pytest
@@ -26,6 +26,9 @@ from talk2view.types import (
     ToolCallInterrupt,
     ToolEvent,
 )
+
+if TYPE_CHECKING:
+    from .ui_engine import AccountEngine
 
 
 def _make_session(
@@ -529,6 +532,46 @@ class TestClientToolApproval:
         assert _body(client, 0)["is_error"] is True
 
 
+# ── A builtin's own description reaches its approval card ───────────────────────────────
+
+
+class TestBuiltinToolApprovalDescription:
+    def test_save_skill_approval_required_carries_its_schema_description(self) -> None:
+        """save_skill is installed through T2VTools.add_builtin(), not the host's own
+        register()/register_from_functions() -- so this drives a REAL T2VTools (not the
+        MagicMock the other tests here use) to pin that get_description() (sessions.py's
+        approval_required event, line ~331) still finds it via _all_schemas()."""
+        from talk2view.skill_tool import SAVE_SKILL, SAVE_SKILL_SCHEMA, save_skill_handler
+
+        from .test_skills_store_integration import skills as make_skills
+
+        client = MagicMock()
+        client.stream_request.return_value = iter(
+            [_interrupt(SAVE_SKILL, "tc1", {"name": "a"})]
+        )
+        real_tools = T2VTools(MagicMock())
+        real_tools.add_builtin(
+            SAVE_SKILL_SCHEMA, save_skill_handler(make_skills()), permission=True
+        )
+        session = T2VSession(
+            session_id="ses_1", thread_id="thr_1", model="m", client=client, tools=real_tools
+        )
+
+        events = list(session.send_message("save this"))
+
+        assert events == [
+            ChatEvent(
+                type="approval_required",
+                kind="client",
+                tool_name=SAVE_SKILL,
+                tool_call_id="tc1",
+                arguments={"name": "a"},
+                description=SAVE_SKILL_SCHEMA.description,
+            )
+        ]
+        assert SAVE_SKILL_SCHEMA.description  # the fix is meaningless if this is empty
+
+
 class TestEngineApproval:
     def _approval_chunk(self) -> ChatCompletionChunk:
         return ChatCompletionChunk(
@@ -674,3 +717,30 @@ class TestNewEventTypes:
         assert all(c[1]["cancel"] is token for c in client.stream_request.call_args_list)
         tools.check_permission.assert_called_once_with("delete_volume", {}, token)
         tools.execute_tool_call.assert_called_once_with("delete_volume", {}, token)
+
+
+def test_detach_session_forgets_without_a_delete(account_engine: "AccountEngine") -> None:
+    from talk2view import Talk2View
+
+    t2v = Talk2View("pk_test", base_url=account_engine.url())
+    try:
+        t2v.auth.login("ana@example.com", "pw")
+        assert t2v.partner_key == "pk_test"
+        first = t2v._create_session()
+        assert first.id is not None
+        deletes_before = [
+            line for line in account_engine.paths() if line.startswith("DELETE /v1/sessions/")
+        ]
+        deletes_count_before = t2v._deletes
+        t2v.detach_session()
+        assert t2v.get_session() is None
+        # A session recovery in flight sees the change, exactly as it does after a delete.
+        assert t2v._deletes == deletes_count_before + 1
+        deletes_after = [
+            line for line in account_engine.paths() if line.startswith("DELETE /v1/sessions/")
+        ]
+        assert deletes_after == deletes_before  # no DELETE went out
+        second = t2v._create_session()
+        assert second.id is not None
+    finally:
+        t2v.close()

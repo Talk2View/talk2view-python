@@ -25,9 +25,16 @@ from __future__ import annotations
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Any, Callable, Dict, List, Optional, Tuple, cast
+from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple, cast
 
-from .state import DisplayMessage, OpRecorder, PendingApproval, ToolStep
+from .state import (
+    DisplayMessage,
+    OpRecorder,
+    PendingApproval,
+    ToolStep,
+    counter_suffix,
+    is_safe_counter_digits,
+)
 from .tools import strip_null_args
 from .types import ChatEvent
 
@@ -81,8 +88,19 @@ class TurnReducer:
     """The event handlers, the step helpers and the message half of finalize. No locks: the
     caller holds the controller's state lock around every method here."""
 
-    def __init__(self, rec: OpRecorder) -> None:
+    def __init__(
+        self, rec: OpRecorder, *, allows_always: Optional[Callable[[str], bool]] = None
+    ) -> None:
         self._rec = rec
+        # Whether a CLIENT tool's "always" memory may auto-consume an approval at all
+        # (``save_skill`` says no). Defaults to always-True -- unchanged
+        # behaviour -- so a reducer built with no argument (every existing caller) is
+        # untouched; ``ChatController`` passes ``T2VTools.allows_always`` (defensively
+        # wrapped). Checked even though ``alwaysAllowedTools`` itself is only ever meant
+        # to hold a name that allows it (``approve()``'s own guard) -- belt and braces:
+        # a name that got in there some other way (a restored conversation, a test) must
+        # still never auto-consume a no-always tool's approval.
+        self._allows_always: Callable[[str], bool] = allows_always or (lambda _name: True)
         self._message_counter = 0
         # Explicit, so a wire type can only ever reach a handler listed here. Unknown types
         # (``reasoning``, or one from a newer engine) are ignored by ``reduce``.
@@ -103,6 +121,18 @@ class TurnReducer:
     def next_message_id(self) -> str:
         self._message_counter += 1
         return "msg_{}_{}".format(self._message_counter, int(time.time() * 1000))
+
+    def bump_message_counter(self, ids: Iterable[str]) -> None:
+        """Move the counter past every ``msg_<n>_…`` id in ``ids``, so a message minted
+        after a restore can never repeat a restored one's number. An id whose digit run is
+        not safe to read (not ASCII, or longer than cpython's own ``int()`` limit) is
+        skipped rather than raised on, the same as an id with no digit run at all --
+        ``restore_conversation`` validates the ids it accepts before this ever runs, but
+        this stays safe on its own regardless of the caller."""
+        for message_id in ids:
+            digits = counter_suffix(message_id)
+            if digits is not None and is_safe_counter_digits(digits):
+                self._message_counter = max(self._message_counter, int(digits))
 
     def append_assistant(self) -> str:
         message: DisplayMessage = {
@@ -237,7 +267,11 @@ class TurnReducer:
             "source": "client" if kind == "client" else "platform",
         }
         self._append_step(cursor.assistant_id, step)
-        if kind == "client" and name in self._rec.state["alwaysAllowedTools"]:
+        if (
+            kind == "client"
+            and name in self._rec.state["alwaysAllowedTools"]
+            and self._allows_always(name)
+        ):
             return _Consumed(True, approval, cursor.assistant_id)
         set_top(self._rec, "pendingApproval", approval)
         return _Consumed(True, None, cursor.assistant_id)
@@ -262,7 +296,12 @@ class TurnReducer:
                 lambda s: s["status"] == "running" and s["name"] == name
             ) or self._find_step(lambda s: s["name"] == name)
         if found is not None:
-            self._update_step(found, {"status": status})
+            changes: Dict[str, Any] = {"status": status}
+            # Only a builtin installed with result_on_step (save_skill) carries its result
+            # here (sessions.py); a host tool's approval_result has no content.
+            if status == "used" and event.content is not None:
+                changes["result"] = event.content
+            self._update_step(found, changes)
         cursor.had_tool = True
         return None
 

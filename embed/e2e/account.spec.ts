@@ -1,10 +1,17 @@
 import type { Page } from '@playwright/test';
-import { commandAnswered, expect, holdCommands, lastReply, postToServer, sendMessage, test } from './fixtures';
+import { commandAnswered, expect, fillSignIn, holdCommands, lastReply, postToServer, sendMessage, test } from './fixtures';
 
-async function signIn(page: Page, email: string, password: string): Promise<void> {
-  await page.getByLabel('Email').fill(email);
-  await page.getByLabel('Password').fill(password);
-  await page.getByRole('button', { name: 'Sign in', exact: true }).click();
+/** A computed property of the first element matching `selector` (looks.spec.ts's own
+ * helper, duplicated rather than imported: importing a spec file re-registers its tests). */
+async function computed(page: Page, selector: string, property: string): Promise<string> {
+  return page.evaluate(
+    ([sel, prop]) => {
+      const el = document.querySelector(sel!);
+      if (!el) throw new Error('no element matches ' + sel);
+      return getComputedStyle(el).getPropertyValue(prop!);
+    },
+    [selector, property],
+  );
 }
 
 const TOO_LONG = 'That took too long. Try again.';
@@ -20,9 +27,9 @@ test.describe('the guest gate (FakeController)', () => {
 
     test('sign-in replaces the thread, and a refusal shows under the form', async ({ page, backend }) => {
       await page.goto(backend.url);
-      await expect(page.getByRole('heading', { name: 'Sign in' })).toBeVisible();
+      await expect(page.getByRole('heading', { name: 'Welcome to Talk2View' })).toBeVisible();
       await expect(page.getByRole('textbox', { name: 'Message' })).toBeHidden();
-      await signIn(page, 'ana@example.com', 'pw');
+      await fillSignIn(page, 'ana@example.com', 'pw');
       await expect(page.getByRole('alert')).toHaveText('This chat is not connected to a Talk2View account.');
     });
   });
@@ -62,7 +69,7 @@ test.describe('an account (real Talk2View + ChatController)', () => {
   test('a wrong password, then a sign-in, a chat and a sign-out', async ({ page, backend }) => {
     await page.goto(backend.url);
     await page.getByRole('button', { name: 'Account' }).click();
-    await signIn(page, 'ana@example.com', 'wrong');
+    await fillSignIn(page, 'ana@example.com', 'wrong');
     await expect(page.getByRole('alert')).toHaveText('Invalid email or password');
     // The submit button disabled itself while busy; focus is handed back to the
     // field the end-user has to retype, not dropped to <body>.
@@ -80,7 +87,7 @@ test.describe('an account (real Talk2View + ChatController)', () => {
     await page.getByRole('button', { name: 'Account' }).click();
     await expect(page.getByText('ana@example.com')).toBeVisible();
     await page.getByRole('button', { name: 'Sign out' }).click();
-    await expect(page.getByRole('heading', { name: 'Sign in' })).toBeVisible();
+    await expect(page.getByRole('heading', { name: 'Welcome to Talk2View' })).toBeVisible();
     await expect(page.locator('.t2v-dot')).toHaveCount(0);
   });
 
@@ -109,13 +116,13 @@ test.describe('an account (real Talk2View + ChatController)', () => {
     const released = new Promise<void>((resolve) => (release = resolve));
     await page.goto(backend.url);
     await page.getByRole('button', { name: 'Account' }).click();
-    await expect(page.getByRole('heading', { name: 'Sign in' })).toBeVisible(); // settled
+    await expect(page.getByRole('heading', { name: 'Welcome to Talk2View' })).toBeVisible(); // settled
     await page.route('**/command', async (route) => {
       const body = route.request().postDataJSON() as { type?: string } | null;
       if (body?.type === 'login') await released;
       await route.continue();
     });
-    await signIn(page, 'ana@example.com', 'pw');
+    await fillSignIn(page, 'ana@example.com', 'pw');
     await expect(page.getByRole('button', { name: 'Signing in…' })).toBeDisabled();
     for (const field of [page.getByLabel('Email'), page.getByLabel('Password')]) {
       // readOnly keeps focus on the field; disabled would drop it to <body>.
@@ -130,11 +137,11 @@ test.describe('an account (real Talk2View + ChatController)', () => {
   test('a sign-in whose result never comes frees the form after WATCH_MS, and not before', async ({ page, backend }) => {
     await page.goto(backend.url);
     await page.getByRole('button', { name: 'Account' }).click();
-    await expect(page.getByRole('heading', { name: 'Sign in' })).toBeVisible(); // settled
+    await expect(page.getByRole('heading', { name: 'Welcome to Talk2View' })).toBeVisible(); // settled
     await holdCommands(page, 'login');
     await page.clock.install();
     const answered = commandAnswered(page, 'login');
-    await signIn(page, 'ana@example.com', 'pw');
+    await fillSignIn(page, 'ana@example.com', 'pw');
     const submit = page.locator('.t2v-account form button[type="submit"]');
     await expect(submit).toHaveText('Signing in…');
     await answered;
@@ -149,11 +156,11 @@ test.describe('an account (real Talk2View + ChatController)', () => {
   test('a failure arriving after the timeout shows its real reason, not the timeout', async ({ page, backend }) => {
     await page.goto(backend.url);
     await page.getByRole('button', { name: 'Account' }).click();
-    await expect(page.getByRole('heading', { name: 'Sign in' })).toBeVisible(); // settled
+    await expect(page.getByRole('heading', { name: 'Welcome to Talk2View' })).toBeVisible(); // settled
     const held = await holdCommands(page, 'login');
     await page.clock.install();
     const answered = commandAnswered(page, 'login');
-    await signIn(page, 'ana@example.com', 'wrong');
+    await fillSignIn(page, 'ana@example.com', 'wrong');
     await answered;
     await page.clock.fastForward(61000);
     await expect(page.getByRole('alert')).toHaveText(TOO_LONG);
@@ -165,11 +172,11 @@ test.describe('an account (real Talk2View + ChatController)', () => {
   test('a lost result does not greet a later sign-out with "That took too long"', async ({ page, backend }) => {
     await page.goto(backend.url);
     await page.getByRole('button', { name: 'Account' }).click();
-    await expect(page.getByRole('heading', { name: 'Sign in' })).toBeVisible(); // settled
+    await expect(page.getByRole('heading', { name: 'Welcome to Talk2View' })).toBeVisible(); // settled
     const held = await holdCommands(page, 'login');
     await page.clock.install();
     const answered = commandAnswered(page, 'login');
-    await signIn(page, 'ana@example.com', 'pw');
+    await fillSignIn(page, 'ana@example.com', 'pw');
     await answered;
     // The sign-in happens, but under another id: the auth slice signs ana in, and the
     // result the page is waiting for never comes.
@@ -178,14 +185,14 @@ test.describe('an account (real Talk2View + ChatController)', () => {
     await expect(page.getByText('ana@example.com')).toBeVisible();
     await page.clock.fastForward(61000); // the lost result's WATCH_MS passes while signed in
     await page.getByRole('button', { name: 'Sign out' }).click();
-    await expect(page.getByRole('heading', { name: 'Sign in' })).toBeVisible();
+    await expect(page.getByRole('heading', { name: 'Welcome to Talk2View' })).toBeVisible();
     await expect(page.getByRole('alert')).toHaveCount(0);
   });
 
   test('a sign-out whose result never comes frees the button after WATCH_MS', async ({ page, backend }) => {
     await page.goto(backend.url);
     await page.getByRole('button', { name: 'Account' }).click();
-    await signIn(page, 'ana@example.com', 'pw');
+    await fillSignIn(page, 'ana@example.com', 'pw');
     await expect(page.locator('.t2v-dot')).toBeVisible();
     await page.getByRole('button', { name: 'Account' }).click();
     await expect(page.getByText('ana@example.com')).toBeVisible(); // settled
@@ -207,7 +214,7 @@ test.describe('an account (real Talk2View + ChatController)', () => {
   test('a failed sign-out shows why, and the button works again', async ({ page, backend }) => {
     await page.goto(backend.url);
     await page.getByRole('button', { name: 'Account' }).click();
-    await signIn(page, 'ana@example.com', 'pw');
+    await fillSignIn(page, 'ana@example.com', 'pw');
     await expect(page.locator('.t2v-dot')).toBeVisible();
     await page.route('**/command', async (route) => {
       const body = route.request().postDataJSON() as { type?: string } | null;
@@ -261,7 +268,7 @@ test.describe('an account (real Talk2View + ChatController)', () => {
   test('a notice about the visitor before goes when that visitor signs out', async ({ page, backend }) => {
     await page.goto(backend.url);
     await page.getByRole('button', { name: 'Account' }).click();
-    await signIn(page, 'ana@example.com', 'pw');
+    await fillSignIn(page, 'ana@example.com', 'pw');
     await expect(page.getByRole('heading', { name: 'Ask about your scene' })).toBeVisible();
     const chooser = page.waitForEvent('filechooser');
     await page.getByRole('button', { name: 'Attach a file' }).click();
@@ -269,7 +276,7 @@ test.describe('an account (real Talk2View + ChatController)', () => {
     await expect(page.locator('.t2v-notice-text')).toHaveText('Attach a PNG, JPEG, WebP, GIF or PDF file.');
     await page.getByRole('button', { name: 'Account' }).click();
     await page.getByRole('button', { name: 'Sign out' }).click();
-    await expect(page.getByRole('heading', { name: 'Sign in' })).toBeVisible();
+    await expect(page.getByRole('heading', { name: 'Welcome to Talk2View' })).toBeVisible();
     await expect(page.locator('.t2v-notice')).toHaveCount(0); // the thread never unmounts
   });
 
@@ -323,7 +330,7 @@ test.describe('a refused guest (real Talk2View + ChatController)', () => {
     await page.goto(backend.url);
     await sendMessage(page, 'hello');
     await expect(page.locator('.t2v-reason')).toHaveText('Guest chat isn’t available right now. Sign in to keep going.');
-    await signIn(page, 'ana@example.com', 'pw');
+    await fillSignIn(page, 'ana@example.com', 'pw');
     await expect(page.locator('.t2v-msg-user .t2v-bubble')).toHaveText('hello');
     await expect(lastReply(page)).toHaveText(/^ok/);
   });
@@ -341,11 +348,51 @@ test.describe('gated with no way to chat (real Talk2View + ChatController)', () 
     await expect(page.getByRole('heading', { name: 'Check your email' })).toBeVisible();
     await expect(page.getByText('You can keep chatting in the meantime')).toHaveCount(0);
     await page.getByRole('button', { name: 'Back to sign in' }).click();
-    await expect(page.getByRole('heading', { name: 'Sign in' })).toBeVisible();
+    await expect(page.getByRole('heading', { name: 'Welcome to Talk2View' })).toBeVisible();
     await expect(page.getByLabel('Email')).toHaveValue('new@example.com');
     // Usable, not a dead end: a real sign-in from here reaches the chat.
     await page.getByLabel('Password').fill('pw');
     await page.getByRole('button', { name: 'Sign in', exact: true }).click();
     await expect(page.getByRole('heading', { name: 'Ask about your scene' })).toBeVisible();
+  });
+
+  test('the gate with no reason: says why the chat is gone', async ({ page, backend }) => {
+    await page.goto(backend.url);
+    await expect(page.locator('.t2v-reason')).toHaveText('This app asks you to sign in before you chat.');
+    expect(await computed(page, '.t2v-reason', 'border-left-color')).toBe('rgb(38, 200, 184)');
+    expect(await computed(page, '.t2v-reason', 'background-color')).toBe('rgba(2, 28, 37, 0.04)');
+  });
+});
+
+test.describe('the Account view (account mode)', () => {
+  test.use({ backendArgs: ['--mode', 'account', '--desktop-sign-in'] });
+
+  test('18px title, 13px labels, 36px inputs and block buttons, the error under its field, an identity row when signed in', async ({ page, backend }) => {
+    await page.goto(backend.url);
+    await page.getByRole('button', { name: 'Account', exact: true }).click();
+    expect(await computed(page, '.t2v-view-title', 'font-size')).toBe('18px');
+    expect(await computed(page, '.t2v-field label', 'font-size')).toBe('13px');
+    expect((await page.getByLabel('Email').boundingBox())!.height).toBe(36);
+    for (const name of ['Continue with Apple', 'Continue with Google', 'Sign in']) {
+      expect((await page.getByRole('button', { name, exact: true }).boundingBox())!.height).toBe(36);
+    }
+    await page.getByLabel('Email').fill('ana@example.com');
+    await page.getByLabel('Password').fill('wrong');
+    await page.getByRole('button', { name: 'Sign in', exact: true }).click();
+    const err = page.getByRole('alert');
+    await expect(err).toHaveText('Invalid email or password');
+    expect(await computed(page, '.t2v-form-error', 'font-size')).toBe('13px');
+    const pw = (await page.getByLabel('Password').boundingBox())!;
+    const eb = (await err.boundingBox())!;
+    expect(eb.y).toBeGreaterThan(pw.y + pw.height);
+    expect(eb.y).toBeLessThan((await page.getByRole('button', { name: 'Sign in', exact: true }).boundingBox())!.y);
+    await page.getByLabel('Password').fill('pw');
+    await page.getByRole('button', { name: 'Sign in', exact: true }).click();
+    await expect(page.getByRole('button', { name: 'Account', exact: true }).locator('.t2v-dot')).toBeVisible();
+    await page.getByRole('button', { name: 'Account', exact: true }).click();
+    await expect(page.locator('.t2v-avatar')).toHaveText('A');
+    expect(await computed(page, '.t2v-avatar', 'border-radius')).toBe('50%');
+    expect(await computed(page, '.t2v-who', 'background-color')).toBe('rgba(2, 28, 37, 0.04)');
+    expect((await page.getByRole('button', { name: 'Sign out' }).boundingBox())!.height).toBe(36);
   });
 });

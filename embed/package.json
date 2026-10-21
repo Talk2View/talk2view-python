@@ -11,6 +11,7 @@
     "build": "tsc --noEmit -p tsconfig.json && vite build && node scripts/check-dist.mjs ../src/talk2view/ui/static",
     "build:guard": "tsc --noEmit -p tsconfig.json && vite build --mode guard && node scripts/check-dist.mjs dist-guard",
     "lint:css": "stylelint \"src/**/*.css\" && node scripts/check-css.mjs src/styles/app.css",
+    "check:tokens": "node scripts/check-token-parity.mjs",
     "test:e2e": "playwright test"
   },
   "dependencies": {

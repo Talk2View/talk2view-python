@@ -38,11 +38,26 @@ off), ``oauth_unavailable`` (the engine does not offer that provider for the par
 attempt that has not stored its session yet: one that lands while the session is being
 stored does not undo the sign-in (the account shows, and ``oauthError`` stays null);
 after a ``login`` or ``logout`` the account that command chose is the one that stays.
+
+``threadNew``, ``threadSwitch``, ``threadRename`` and ``threadDelete`` drive the thread
+list; without one (``ChatFeatures.thread_list`` off) they end in ``thread_list_disabled``,
+and an id the list does not have in ``unknown_thread``.
+
+**Turn timings** (``talk2view.metrics``). ``send`` may carry ``timing: true``: the page
+will report its own part of that turn afterwards with one ``metrics`` command, naming the
+turn by its user message id (``messageId``) and giving ``sendToPostMs`` (Send pressed to
+this command's POST), ``firstOpToPaintMs`` (the first text op received to it painted) and
+``firstOpAtMs`` (when that op arrived, ``Date.now()``), each a number or ``null``. The
+server holds such a turn's timing back until the report arrives, for a few seconds at
+most. A report for a turn that is unknown or already delivered still succeeds; it is
+dropped. Nothing in it is shown to anyone: it only goes to the host's turn listeners.
 """
 
 from __future__ import annotations
 
+import math
 import re
+import time
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, FrozenSet, Optional
 
@@ -89,6 +104,17 @@ ERROR_TYPES: FrozenSet[str] = frozenset(
         "anonymous_not_allowed",
         "engine_error",
         "internal_error",
+        "thread_list_disabled",
+        "unknown_thread",
+        "microphone_denied",
+        "no_microphone",
+        "nothing_heard",
+        "transcription_failed",
+        "invalid_skill",
+        "skill_exists",
+        "skills_unavailable",
+        "import_unavailable",
+        "io_error",
     }
 )
 
@@ -150,6 +176,9 @@ class Command:
     #: Left out of ``repr``: it holds passwords, captcha tokens and the end-user's text,
     #: and traceback tools (Sentry's local variables, ``pytest -l``) print locals by repr.
     args: Dict[str, Any] = field(repr=False)
+    #: ``time.monotonic()`` when it was parsed (on the HTTP thread): a turn's timing counts
+    #: the router's queue from here.
+    received: float = field(default_factory=time.monotonic, repr=False, compare=False)
 
 
 Reader = Callable[[Dict[str, Any], str], Any]
@@ -209,13 +238,31 @@ def _text(
     return read
 
 
-def _choice(*values: Optional[str]) -> Reader:
+def _choice(*values: Optional[str], required: bool = True) -> Reader:
     def read(obj: Dict[str, Any], name: str) -> Any:
         if name not in obj:
-            raise CommandError("{} is required".format(name))
+            if required:
+                raise CommandError("{} is required".format(name))
+            return None
         value = obj[name]
         if value not in values or isinstance(value, bool):
             raise CommandError("{} must be one of {}".format(name, list(values)))
+        return value
+
+    return read
+
+
+def _bool(*, required: bool = True) -> Reader:
+    """A boolean field. ``required=False`` returns None when absent, same as ``_text``."""
+
+    def read(obj: Dict[str, Any], name: str) -> Any:
+        if name not in obj:
+            if required:
+                raise CommandError("{} is required".format(name))
+            return None
+        value = obj[name]
+        if not isinstance(value, bool):
+            raise CommandError("{} must be true or false".format(name))
         return value
 
     return read
@@ -232,6 +279,34 @@ def _ids(obj: Dict[str, Any], name: str) -> Any:
     return list(value)
 
 
+def _flag(obj: Dict[str, Any], name: str) -> Any:
+    value = obj.get(name, False)
+    if not isinstance(value, bool):
+        raise CommandError("{} must be true or false".format(name))
+    return value
+
+
+def _number(maximum: float) -> Reader:
+    """An optional finite number from 0 to ``maximum``, or ``null``."""
+
+    def read(obj: Dict[str, Any], name: str) -> Any:
+        value = obj.get(name)
+        if value is None:
+            return None
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise CommandError("{} must be a number or null".format(name))
+        if not math.isfinite(value) or not 0 <= value <= maximum:
+            raise CommandError("{} must be from 0 to {}".format(name, maximum))
+        return float(value)
+
+    return read
+
+
+#: A page duration (at most a day), and a ``Date.now()`` (up to the year 5138).
+_MILLIS = _number(86_400_000)
+_EPOCH_MILLIS = _number(1e14)
+
+
 def _object(obj: Dict[str, Any], name: str) -> Any:
     value = obj.get(name)
     if value is not None and not isinstance(value, dict):
@@ -242,7 +317,11 @@ def _object(obj: Dict[str, Any], name: str) -> Any:
 #: Every command type and its fields. Nothing else is accepted.
 COMMANDS: Dict[str, Dict[str, Reader]] = {
     # Chat (the ChatController).
-    "send": {"text": _text(max_chars=1_000_000, user=True), "attachmentIds": _ids},
+    "send": {
+        "text": _text(max_chars=1_000_000, user=True),
+        "attachmentIds": _ids,
+        "timing": _flag,
+    },
     "cancel": {},
     "approve": {
         "toolCallId": _text(max_chars=256, non_empty=True),
@@ -257,6 +336,14 @@ COMMANDS: Dict[str, Dict[str, Reader]] = {
     },
     "newSession": {},
     "clearError": {},
+    # The thread list (talk2view.ui.threads).
+    "threadNew": {},
+    "threadSwitch": {"threadId": _text(max_chars=MAX_ID_CHARS, non_empty=True)},
+    "threadRename": {
+        "threadId": _text(max_chars=MAX_ID_CHARS, non_empty=True),
+        "title": _text(max_chars=200, user=True),
+    },
+    "threadDelete": {"threadId": _text(max_chars=MAX_ID_CHARS, non_empty=True)},
     # Account (Talk2View).
     # null: "Default", the partner's model.
     "selectModel": {"modelId": _text(max_chars=256, non_empty=True, nullable=True)},
@@ -275,15 +362,44 @@ COMMANDS: Dict[str, Dict[str, Reader]] = {
     "oauthDismissError": {},
     "warmUp": {},
     "setFontSize": {"fontSize": _choice("small", "medium", "large", None)},
+    # null: "Default"/"Automatic" (the partner's model, auto-detected language).
+    "selectSttModel": {"modelId": _text(max_chars=128, non_empty=True, nullable=True)},
+    "selectSttLanguage": {"language": _text(max_chars=16, non_empty=True, nullable=True)},
     # Host.
     "copy": {"text": _text(max_chars=1_000_000, user=True)},
     "openLink": {"url": _text(max_chars=4096, non_empty=True)},
     "dictationStart": {},
     "dictationStop": {},
+    "dictationCancel": {},
     # Skills.
     "skillsList": {},
     "skillEnable": {"name": _text(max_chars=255, non_empty=True)},
     "skillDisable": {"name": _text(max_chars=255, non_empty=True)},
+    "skillSave": {
+        "name": _text(max_chars=255, required=False),
+        "description": _text(max_chars=4096, required=False, user=True),
+        "instructions": _text(max_chars=8_000_000, required=False, user=True),
+        "markdown": _text(max_chars=8_000_000, required=False, user=True),
+        "replaces": _text(max_chars=255, non_empty=True, required=False),
+        "overwrite": _bool(required=False),
+    },
+    "skillDelete": {"name": _text(max_chars=255, non_empty=True)},
+    "skillRestore": {"name": _text(max_chars=255, non_empty=True)},
+    "skillCustomize": {"name": _text(max_chars=255, non_empty=True)},
+    "skillImport": {
+        "resolve": _choice("replace", "keepBoth", required=False),
+        # The end-user's description for a picked file that had none.
+        "description": _text(max_chars=1024, required=False, user=True),
+    },
+    "skillOpenFolder": {},
+    "skillRead": {"name": _text(max_chars=255, non_empty=True)},
+    # Turn timings (talk2view.metrics): the page's part of a turn it sent with `timing`.
+    "metrics": {
+        "messageId": _text(max_chars=MAX_ID_CHARS, non_empty=True),
+        "sendToPostMs": _MILLIS,
+        "firstOpToPaintMs": _MILLIS,
+        "firstOpAtMs": _EPOCH_MILLIS,
+    },
 }
 
 

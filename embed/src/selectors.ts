@@ -10,7 +10,9 @@ import type {
   OAuthProvider,
   PageState,
   SkillsState,
+  ThreadItem,
   ToolPresentation,
+  WireAudioModel,
   WireMessage,
   WirePendingApproval,
   WireToolStep,
@@ -53,6 +55,22 @@ export const REASON_COPY: Record<Exclude<GateReason, null>, string> = {
 
 /** What a busy latch says when its result has not come within `WATCH_MS` (store.ts). */
 export const TOO_LONG = 'That took too long. Try again.';
+
+/** The gate reason line when there is none of `REASON_COPY`'s own (gated by
+ * `!options.allowAnonymous` alone, with no demo/guest limit reached to name). */
+export const SIGN_IN_REQUIRED = 'This app asks you to sign in before you chat.';
+
+/** The Account view's avatar letters: the first letter of each of the first two
+ * `.`/`_`/`-`-separated parts of the email's local part, uppercased. */
+export function initials(email: string): string {
+  const local = email.split('@')[0] ?? '';
+  return local
+    .split(/[._-]+/)
+    .filter(Boolean)
+    .slice(0, 2)
+    .map((p) => p.charAt(0).toUpperCase())
+    .join('');
+}
 
 export const PROVIDER_NAMES: Record<OAuthProvider, string> = { apple: 'Apple', google: 'Google' };
 const PROVIDER_ORDER: OAuthProvider[] = ['apple', 'google'];
@@ -153,7 +171,10 @@ export function failureText(result: Pick<CommandResult, 'type' | 'error'>): stri
   const type = error?.type ?? 'unknown';
   switch (type) {
     case 'busy':
-      return 'The assistant is still working on the last message.';
+      // A dictationStart refused while one is already running is
+      // not the send-queue's own "busy" — a double tap on the mic must never say the
+      // assistant is working on a message.
+      return result.type === 'dictationStart' ? 'A dictation is already in progress.' : 'The assistant is still working on the last message.';
     case 'closed':
     case 'stopped':
       return 'This chat has stopped. Open it again from the app.';
@@ -163,6 +184,16 @@ export function failureText(result: Pick<CommandResult, 'type' | 'error'>): stri
       return 'This app does not take attachments.';
     case 'unknown_attachment':
       return 'An attachment was lost. Attach the file again.';
+    case 'unknown_thread':
+      return 'That chat is gone. Open Chats to pick another.';
+    case 'thread_list_disabled':
+      return 'This app keeps no chat history.';
+    case 'skill_exists':
+      // `skillRestore` (Undo) after the name was taken again; its message is the name.
+      if (result.type === 'skillRestore') {
+        return `A skill named ${error?.message ?? ''} exists again, so Undo can't bring the deleted one back.`;
+      }
+      return error?.message ? `A skill named ${error.message} already exists.` : 'That skill name is taken.';
     case 'network_error':
       return 'Talk2View could not be reached. Check your connection and try again.';
     default:
@@ -355,4 +386,109 @@ export function uploadFailureText(type: string, message: string): string {
 export function mayAlwaysAllow(kind: string | undefined, presentation: ToolPresentation | undefined): boolean {
   const client = kind === undefined || kind === 'client';
   return client && !presentation?.destructive;
+}
+
+/** TS conversation-store.ts UNTITLED. */
+export const UNTITLED_THREAD = 'New chat';
+const DAY_MS = 86_400_000;
+
+/** The header's title: the current thread's, else "New chat" (TS chat.tsx:212). */
+export function threadTitle(s: PageState): string {
+  const threads = s.threads;
+  if (!threads || threads.currentId === null) return UNTITLED_THREAD;
+  const current = threads.items.find((item) => item.id === threads.currentId);
+  return current?.title || UNTITLED_THREAD;
+}
+
+/** The threads the list shows: an empty conversation is not one yet (use-conversations.ts:247-253). */
+export function listedThreads(s: PageState): ThreadItem[] {
+  return (s.threads?.items ?? []).filter((item) => item.messageCount > 0);
+}
+
+/** A thread row's time, at the right: the time today, the weekday this week, else the date. */
+export function whenLabel(updatedAt: number, now: number): string {
+  const at = new Date(updatedAt);
+  const today = new Date(now);
+  const sameDay = at.getFullYear() === today.getFullYear() && at.getMonth() === today.getMonth() && at.getDate() === today.getDate();
+  // The locale's own AM/PM casing ("8:50 AM" on this machine) isn't
+  // what the mockup shows ("2:14 pm", en-GB) — normalise it rather than leave it locale-
+  // dependent, so the row reads the same regardless of where the host runs.
+  if (sameDay) return at.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }).replace(/\s?(AM|PM)$/, (m) => m.toLowerCase());
+  if (now - updatedAt < 6 * 24 * 60 * 60 * 1000) return at.toLocaleDateString([], { weekday: 'short' });
+  return at.toLocaleDateString([], { day: 'numeric', month: 'short' });
+}
+
+export type ThreadGroup = { label: 'Today' | 'Yesterday' | 'Earlier'; items: ThreadItem[] };
+
+/** vendor/thread-list.aui.tsx useThreadListGroups: filter by title, bucket by day, newest first. */
+export function threadGroups(items: ThreadItem[], now: number, query: string): ThreadGroup[] {
+  const q = query.trim().toLowerCase();
+  const date = new Date(now);
+  const startOfToday = new Date(date.getFullYear(), date.getMonth(), date.getDate()).getTime();
+  const label = (at: number): ThreadGroup['label'] => (at >= startOfToday ? 'Today' : at >= startOfToday - DAY_MS ? 'Yesterday' : 'Earlier');
+  const matched = items
+    .filter((item) => !q || (item.title || UNTITLED_THREAD).toLowerCase().includes(q))
+    .slice()
+    .sort((a, b) => b.updatedAt - a.updatedAt);
+  const groups: ThreadGroup[] = [];
+  for (const item of matched) {
+    const name = label(item.updatedAt);
+    const last = groups[groups.length - 1];
+    if (last && last.label === name) last.items.push(item);
+    else groups.push({ label: name, items: [item] });
+  }
+  return groups;
+}
+
+/* Offered when the voice model does not restrict its languages (the wire's own
+ * `supported_languages` is null or empty). TS settings.tsx's own list. */
+export const COMMON_LANGUAGES = ['en', 'vi', 'zh', 'ja', 'ko', 'fr', 'de', 'es'];
+
+/** The engine's fallback voice model — `DEFAULT_DICTATION_MODEL` in the SDK. */
+export const FALLBACK_STT_MODEL = 'faster-whisper-base';
+
+const displayNames = typeof Intl !== 'undefined' && 'DisplayNames' in Intl ? new Intl.DisplayNames(['en'], { type: 'language' }) : null;
+
+/** "vi" → "Vietnamese"; the code itself when Intl does not know it (Chromium 83 has
+ * DisplayNames since 81). */
+export function languageName(code: string): string {
+  try {
+    return displayNames?.of(code) ?? code;
+  } catch {
+    return code;
+  }
+}
+
+/** The languages to offer for a voice model, A–Z by name (TS settings.tsx `languagesFor`). */
+export function languagesFor(model: WireAudioModel | undefined): Array<[string, string]> {
+  const codes = model?.supported_languages?.length ? model.supported_languages : COMMON_LANGUAGES;
+  return Array.from(new Set(codes)).map((code): [string, string] => [code, languageName(code)]).sort((x, y) => x[1].localeCompare(y[1]));
+}
+
+/** The voice model actually in use: the end-user's own choice, else the partner's default,
+ * else the engine's fallback (TS settings.tsx). */
+export function activeVoiceModel(s: PageState): WireAudioModel | undefined {
+  const wanted = s.preferences.sttModel || s.config?.default_stt_model || FALLBACK_STT_MODEL;
+  return s.audioModels.list.find((m) => m.id === wanted);
+}
+
+/** What the page tells the end-user about a failed dictation (TS settings.tsx / composer-extras.tsx). */
+export function dictationFailureText(type: string, message: string): string {
+  switch (type) {
+    case 'microphone_denied':
+      return 'The app was not allowed to use the microphone. Allow it in the system’s privacy settings, then try again.';
+    case 'no_microphone':
+      return 'No microphone was found.';
+    case 'nothing_heard':
+      return 'Nothing was heard. Check the microphone and its permission, then try again.';
+    case 'sign_in_required':
+      return 'Sign in, or send a message first, to dictate.';
+    case 'dictation_unavailable':
+      return 'Dictation is not available in this app.';
+    case 'model_not_allowed':
+    case 'model_gated':
+      return message || 'This voice model is not available.';
+    default:
+      return message || 'The recording could not be transcribed.';
+  }
 }

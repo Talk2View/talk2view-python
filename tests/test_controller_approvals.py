@@ -324,6 +324,132 @@ class TestAlwaysApprove:
         assert t2v.approval_calls[0]["approval"].kind == "engine"
 
 
+# ── A tool that disallows "always" at all (save_skill) ──────────────────────────────────
+
+
+class TestNoAlwaysTools:
+    def test_a_no_always_tool_runs_once_but_is_never_remembered(self) -> None:
+        """An "always" decision on a tool T2VTools.allows_always() refuses runs exactly
+        like "once": approved this one time, never written to alwaysAllowedTools."""
+        t2v = FakeT2V()
+        t2v.tools.no_always.add("save_skill")
+        t2v.chat_scripts = [[interrupt_chunk("save_skill", "call_1", {"name": "a"}, "Save")]]
+        t2v.approval_scripts = [
+            [approval_result_chunk("save_skill", "always"), text_chunk("Saved!"), stop_chunk()]
+        ]
+        controller = make_controller(t2v)
+
+        controller.send("save this")
+        controller.approve(Decision(action="always"))
+
+        snap = controller.snapshot()
+        assert snap["alwaysAllowedTools"] == []
+        # ...but the decision itself travels unchanged, so this one call is approved --
+        # exactly the same shape as test_always_on_an_engine_approval_is_not_remembered.
+        assert t2v.approval_calls[0]["decision"] == Decision(action="always")
+        assistants = [m for m in snap["messages"] if m["role"] == "assistant"]
+        assert assistants[0]["steps"][0]["status"] == "used"
+
+    def test_a_no_always_tool_is_never_auto_approved_on_the_next_call(self) -> None:
+        """Even granting the "always" memory should never help here: a fresh card must
+        show up for the very next call, with no auto-approved status posted."""
+        t2v = FakeT2V()
+        t2v.tools.no_always.add("save_skill")
+        t2v.chat_scripts = [
+            [interrupt_chunk("save_skill", "call_1", {"name": "a"}, "Save")],
+            [interrupt_chunk("save_skill", "call_2", {"name": "b"}, "Save")],
+        ]
+        t2v.approval_scripts = [[text_chunk("Saved 1"), stop_chunk()]]
+        controller = make_controller(t2v)
+        controller.send("save the first one")
+        controller.approve(Decision(action="always"))
+
+        log = BatchLog()
+        controller.subscribe(log)
+        controller.send("save the second one")
+
+        snap = controller.snapshot()
+        assert snap["pendingApproval"] == {
+            "toolCallId": "call_2",
+            "toolName": "save_skill",
+            "arguments": {"name": "b"},
+            "description": "Save",
+        }
+        assert {"type": "auto-approved", "message": "Auto-approved save_skill"} not in log.values(
+            "agentStatus"
+        )
+        assert len(t2v.approval_calls) == 1  # only the first, manually approved call
+
+    def test_a_normal_tool_still_auto_approves_after_always_regression(self) -> None:
+        """Regression: a tool T2VTools.allows_always() does not name (the default for
+        every host tool, ``FakeTools.no_always`` empty) keeps today's behaviour --
+        unaffected by the no-always machinery above."""
+        t2v = FakeT2V()
+        assert t2v.tools.no_always == set()
+        t2v.chat_scripts = [
+            [interrupt_chunk("send_email", "call_1", {}, "Send")],
+            [interrupt_chunk("send_email", "call_2", {}, "Send")],
+        ]
+        t2v.approval_scripts = [
+            [text_chunk("Sent 1"), stop_chunk()],
+            [text_chunk("Sent 2"), stop_chunk()],
+        ]
+        controller = make_controller(t2v)
+        controller.send("send first email")
+        controller.approve(Decision(action="always"))
+
+        log = BatchLog()
+        controller.subscribe(log)
+        controller.send("send second email")
+
+        assert controller.snapshot()["alwaysAllowedTools"] == ["send_email"]
+        assert {"type": "auto-approved", "message": "Auto-approved send_email"} in log.values(
+            "agentStatus"
+        )
+        assert controller.snapshot()["pendingApproval"] is None
+
+
+class TestResultOnStep:
+    """A builtin installed with result_on_step (save_skill) carries its handler's
+    sentence on the approval_result event's `content` (sessions.py); the reducer records
+    it as the step's `result`, the field the page's settled line reads. A host tool's
+    approval_result has no content, so its step keeps no result, as before."""
+
+    def _run(self, tool: str, result: "ChatEvent") -> dict:  # type: ignore[type-arg]
+        t2v = FakeT2V()
+        t2v.chat_scripts = [[interrupt_chunk(tool, "call_1", {"name": "a"}, "Save")]]
+        t2v.approval_scripts = [[result, text_chunk("Done."), stop_chunk()]]
+        controller = make_controller(t2v)
+        controller.send("go")
+        controller.approve(Decision(action="once"))
+        assistants = [m for m in controller.snapshot()["messages"] if m["role"] == "assistant"]
+        return assistants[0]["steps"][0]  # type: ignore[no-any-return]
+
+    def test_a_saved_skill_sentence_lands_on_the_step(self) -> None:
+        sentence = "Saved skill 'a'. It applies from the user's next message."
+        step = self._run(
+            "save_skill",
+            ChatEvent(type="approval_result", tool_name="save_skill", tool_call_id="call_1",
+                      decision="once", content=sentence),
+        )
+        assert step["status"] == "used"
+        assert step["result"] == sentence
+
+    def test_a_not_saved_sentence_lands_on_the_step(self) -> None:
+        sentence = "Not saved. The user already has a skill named 'a'; pass replaces='a'."
+        step = self._run(
+            "save_skill",
+            ChatEvent(type="approval_result", tool_name="save_skill", tool_call_id="call_1",
+                      decision="once", content=sentence),
+        )
+        assert step["result"] == sentence
+
+    def test_a_host_tool_step_keeps_no_result(self) -> None:
+        step = self._run("send_email", approval_result_chunk("send_email", "once", "call_1"))
+        assert step["status"] == "used"
+        assert "result" not in step
+
+
 class TestConversationHistoryIntegrity:
     def test_rolls_back_orphan_user_turn_when_deny_resume_stream_errors(self) -> None:
         t2v = FakeT2V()

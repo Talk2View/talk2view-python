@@ -32,6 +32,7 @@ inside that window.
 
 from __future__ import annotations
 
+import copy
 import logging
 import threading
 from dataclasses import dataclass
@@ -51,16 +52,24 @@ from typing import (
 from ._reducer import DEMO_LIMIT_REACHED, TurnReducer, _Consumed, _Cursor, now_iso, set_top
 from .cancel import Cancelled, CancelToken
 from .dispatch import Dispatcher
+from .metrics import TurnMetrics, _TurnRecorder, bind_turn, current_turn
 from .sessions import build_user_content
 from .state import (
+    VALID_HISTORY_ROLES,
     AttachmentDict,
     ChatSnapshot,
+    ConversationSnapshot,
     DisplayMessage,
+    HistoryEntry,
     OpBatch,
     OpRecorder,
     PendingApproval,
     SkillsState,
+    counter_suffix,
     initial_snapshot,
+    is_hostile_counter_digits,
+    valid_attachment_dict,
+    valid_tool_step_dict,
 )
 from .types import Attachment, Capabilities, ChatEvent, ChatMessage, Decision, User
 
@@ -76,6 +85,7 @@ __all__ = [
     "ControllerBusyError",
     "ControllerClosedError",
     "Decision",
+    "IdentityChange",
 ]
 
 logger = logging.getLogger("talk2view.controller")
@@ -90,8 +100,11 @@ _REFLUSH_LIMIT = 100
 
 BatchCallback = Callable[[OpBatch], None]
 StreamOpener = Callable[[], Iterator[ChatEvent]]
-#: ``(run id, assistant segment id, job)``: a turn ``_prepare_send`` started, to launch.
-_Prepared = Tuple[int, str, Callable[[], None]]
+#: ``(run id, assistant segment id, job, turn timing)``: a turn ``_prepare_send`` started,
+#: to launch.
+_Prepared = Tuple[int, str, Callable[[], None], _TurnRecorder]
+#: What ``_drain`` reports: the turn's outcome, or that it waits for an approval.
+_PAUSED = "paused"
 
 
 class ControllerBusyError(RuntimeError):
@@ -100,6 +113,34 @@ class ControllerBusyError(RuntimeError):
 
 class ControllerClosedError(RuntimeError):
     """The controller was closed."""
+
+
+@dataclass(frozen=True)
+class IdentityChange:
+    """One change of the signed-in user id, as ``follow_identity`` reports it.
+
+    ``epoch`` counts the changes this controller has applied (``follow_identity``'s
+    baseline is the count so far). ``forgotten`` is the conversation this change dropped
+    from the screen, exported in the same locked section that dropped it -- so nothing
+    that reached the conversation before the drop is missing from it -- or None when the
+    conversation was kept (a sign-in from signed out, a guest becoming an account)."""
+
+    epoch: int
+    user_id: Optional[str]
+    anonymous: bool
+    forgotten: Optional[ConversationSnapshot] = None
+
+
+@dataclass(frozen=True)
+class _Restore:
+    """A snapshot ``_prepare_restore`` validated and copied, ready to apply under the lock."""
+
+    messages: List[DisplayMessage]
+    history: List[ChatMessage]
+    marks: Dict[str, int]
+    thread_id: Optional[str]
+    last_user_text: Optional[str]
+    last_user_attachments: Optional[List[Attachment]]
 
 
 @dataclass(eq=False)
@@ -124,6 +165,219 @@ def _attachment_dict(attachment: Attachment) -> AttachmentDict:
         "mime_type": attachment.mime_type,
         "size_bytes": attachment.size_bytes,
     }
+
+
+def _history_entry(message: ChatMessage) -> HistoryEntry:
+    entry: HistoryEntry = {"role": message.role, "content": copy.deepcopy(message.content)}
+    if message.tool_call_id is not None:
+        entry["tool_call_id"] = message.tool_call_id
+    return entry
+
+
+def _chat_message(entry: HistoryEntry) -> ChatMessage:
+    # A stored or hand-built entry's tool_call_id is untyped
+    # JSON -- kept only when it is actually a string, the same guard every other
+    # optional field on a restored entry gets.
+    tool_call_id = entry.get("tool_call_id")
+    return ChatMessage(
+        role=entry["role"], content=copy.deepcopy(entry["content"]),
+        tool_call_id=tool_call_id if isinstance(tool_call_id, str) else None,
+    )
+
+
+def _entry_text(content: Any) -> str:
+    """The text a user display message's ``content`` would equal for this history entry:
+    the string itself, or the ``text`` part of a structured (attachments) payload
+    (``build_user_content``), or ``""`` when there is none -- matching what
+    ``build_user_content`` omits for empty text."""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        for part in content:
+            if isinstance(part, dict) and part.get("type") == "text":
+                text = part.get("text")
+                return text if isinstance(text, str) else ""
+    return ""
+
+
+def _marks_for(messages: List[DisplayMessage], history: List[ChatMessage]) -> Dict[str, int]:
+    """``_history_marks`` for a restored transcript that carries none of its own (a
+    TS-written or older snapshot; see ``restore_conversation``), reproducing what a live
+    turn would have marked (``_prepare_send``'s
+    ``self._history_marks[user["id"]] = len(self._history)``, taken before that turn's own
+    entry is appended).
+
+    Display messages and history entries are not parallel: a rolled-back turn
+    (``_rollback_orphan_turn``) stays on screen with no history entry of its own, so pairing
+    the i-th user message with the i-th user entry drifts by one for every such turn before
+    it, misplacing every later mark. This pairs them by content instead: for each user
+    display message, the next user history entry (from ``cursor``) with the same text is
+    its match -- mark = that entry's index, and the cursor moves past it.
+
+    Content alone is not enough when a rolled-back turn's text repeats a later, successful
+    one's (four "hi"s, the second failing, say): a match is only trusted -- "matched and
+    consumed" -- for a user message directly followed by an assistant display message,
+    which every live, paused or mid-turn user entry has (``_prepare_send`` appends the
+    assistant message in the same call) and a rolled-back one never does (its would-be
+    assistant reply never arrived). A user message with nothing to match, or not followed
+    by an assistant message, marks the next user entry at or after ``cursor`` *without*
+    consuming it -- exactly the length history had when that turn was appended, since a
+    rollback pops its entry back out to that point -- or the end of history if none is
+    left, so a retry or edit of it cuts nothing earlier. (One residual blind spot: a
+    completed turn with no text, no steps and no plan at all keeps its history entry but
+    drops its empty assistant message, so it reads as "not followed by an assistant" too --
+    rare enough, and safe enough a fallback, that it is left as-is.)
+    """
+    marks: Dict[str, int] = {}
+    cursor = 0
+    for position, message in enumerate(messages):
+        if message["role"] != "user":
+            continue
+        followed_by_assistant = (
+            position + 1 < len(messages) and messages[position + 1]["role"] == "assistant"
+        )
+        index = None
+        if followed_by_assistant:
+            text = message["content"]
+            index = next(
+                (
+                    i
+                    for i in range(cursor, len(history))
+                    if history[i].role == "user" and _entry_text(history[i].content) == text
+                ),
+                None,
+            )
+        if index is not None:
+            marks[message["id"]] = index
+            cursor = index + 1
+            continue
+        fallback = next((i for i in range(cursor, len(history)) if history[i].role == "user"), None)
+        marks[message["id"]] = fallback if fallback is not None else len(history)
+    return marks
+
+
+def _valid_stored_marks(
+    messages: List[DisplayMessage], history_length: int, marks: Any
+) -> bool:
+    """Whether a snapshot's carried ``marks`` may be trusted as-is instead of recomputing
+    them with ``_marks_for``. Valid means: a dict with exactly one integer entry per user
+    display message (the same set of ids, no more, no fewer -- "the right count"), each
+    within ``0..history_length``, and non-decreasing in the order those messages appear on
+    screen -- the invariant a live turn's own bookkeeping always produces
+    (``_prepare_send``'s mark can repeat across a rolled-back turn but never goes
+    backwards). TS ignores this key entirely, so a TS-written or pre-this-change snapshot
+    simply has none and always falls back to ``_marks_for``."""
+    if not isinstance(marks, dict):
+        return False
+    user_ids = [m["id"] for m in messages if m["role"] == "user"]
+    if set(marks.keys()) != set(user_ids):
+        return False
+    values: List[int] = []
+    for user_id in user_ids:
+        value = marks[user_id]
+        if not isinstance(value, int) or isinstance(value, bool):
+            return False
+        if not (0 <= value <= history_length):
+            return False
+        values.append(value)
+    return all(values[i] <= values[i + 1] for i in range(len(values) - 1))
+
+
+_VALID_DISPLAY_ROLES = ("user", "assistant")
+
+
+def _valid_restore_snapshot(messages: List[DisplayMessage], history: List[HistoryEntry]) -> bool:
+    """Whether ``restore_conversation`` may safely mutate on this snapshot, checked whole
+    before anything is touched: every display message has a role/content the wire format
+    allows, an id that is not one of the two hostile counter shapes (a Unicode digit run,
+    or one too long for ``int()`` -- either marks the whole snapshot invalid rather than
+    being silently dropped, a snapshot this malformed is corrupt, not partially
+    trustworthy; an id that is merely not a counter id at all, such as a host-assigned
+    ``"msg_welcome"``, is opaque and always accepted), only well-shaped attachments, a
+    ``plan`` that is a string when present, and only well-shaped ``steps``
+    (``valid_tool_step_dict`` -- the page's ``convert.ts`` reads every step's ``status``
+    and ``name`` unguarded, so one bad one blanks the whole chat, not just this message,
+    since the newest stored conversation is restored at every start); every history entry
+    has a role the client ever replays (``VALID_HISTORY_ROLES`` -- never ``tool``, so
+    stored data can never inject a tool result the engine would trust on replay) and text
+    or structured content.
+
+    TS has no equivalent case: it never parses an id or constructs an attachment object, so
+    nothing in a snapshot can raise there in the first place."""
+    ids: List[str] = []
+    for message in messages:
+        if message.get("role") not in _VALID_DISPLAY_ROLES:
+            return False
+        if not isinstance(message.get("content"), str):
+            return False
+        message_id = message.get("id")
+        if not isinstance(message_id, str):
+            return False
+        digits = counter_suffix(message_id)
+        if digits is not None and is_hostile_counter_digits(digits):
+            return False
+        attachments = message.get("attachments")
+        if attachments is not None:
+            if not isinstance(attachments, list) or not all(
+                valid_attachment_dict(a) for a in attachments
+            ):
+                return False
+        plan = message.get("plan")
+        if plan is not None and not isinstance(plan, str):
+            return False
+        steps = message.get("steps")
+        if steps is not None:
+            if not isinstance(steps, list) or not all(valid_tool_step_dict(s) for s in steps):
+                return False
+        ids.append(message_id)
+    if len(ids) != len(set(ids)):
+        # Live never mints a duplicate; a message id backs both `marks` (one entry could
+        # not mean two things) and edit()/retry()'s id lookup (which would find whichever
+        # duplicate comes first).
+        return False
+    for entry in history:
+        if not isinstance(entry, dict) or entry.get("role") not in VALID_HISTORY_ROLES:
+            return False
+        if not isinstance(entry.get("content"), (str, list)):
+            return False
+    return True
+
+
+def _prepare_restore(snapshot: ConversationSnapshot) -> Optional[_Restore]:
+    """Copy and validate ``snapshot`` for ``restore_conversation``, outside the lock; None
+    when it fails ``_valid_restore_snapshot``."""
+    messages = [cast(DisplayMessage, copy.deepcopy(dict(m))) for m in snapshot["messages"]]
+    for message in messages:
+        message.pop("isStreaming", None)
+    if not _valid_restore_snapshot(messages, snapshot["history"]):
+        return None
+    history = [_chat_message(entry) for entry in snapshot["history"]]
+    stored_marks = snapshot.get("marks")
+    marks = (
+        dict(stored_marks)
+        if stored_marks is not None and _valid_stored_marks(messages, len(history), stored_marks)
+        else _marks_for(messages, history)
+    )
+    last_user = next((m for m in reversed(messages) if m["role"] == "user"), None)
+    return _Restore(
+        messages=messages,
+        history=history,
+        marks=marks,
+        thread_id=snapshot["threadId"],
+        last_user_text=last_user["content"] if last_user is not None else None,
+        last_user_attachments=(
+            [Attachment(**a) for a in last_user.get("attachments", [])] or None
+            if last_user is not None
+            else None
+        ),
+    )
+
+
+def _error_type(exc: BaseException) -> str:
+    """An exception's type for a turn timing: a ``T2VError``'s ``type``, else its class
+    name. Never its message."""
+    kind = getattr(exc, "type", None)
+    return kind if isinstance(kind, str) and kind else type(exc).__name__
 
 
 def _close_stream(stream: Optional[Iterator[ChatEvent]]) -> None:
@@ -159,7 +413,12 @@ class ChatController:
     conversation is kept when someone signs in from signed out (the anonymous start a
     send makes included: that send carries on) and when the anonymous demo becomes an
     account (``signup()``'s convert, or its sign-in to an existing account), so the next
-    turn replays it into the account's session.
+    turn replays it into the account's session -- unless a conversation list said that
+    conversation may not follow into an account (``exchange_conversation(carry=False)``:
+    one it read back from storage may be an earlier visitor's). Nobody becoming a guest
+    always keeps it: that is the person at the keyboard, often the guest start inside
+    this controller's own send, which is never abandoned for it. ``follow_identity``
+    reports each change, with the conversation it dropped.
 
     State reaches a view two ways, and they are two halves of one protocol: ``snapshot()``
     returns the whole state with the ``seq`` of the batch it was cut on, and each subscriber
@@ -221,10 +480,22 @@ class ChatController:
         # The object subscribed to below; `set_skills_state` reads its live state.
         self._skills = skills
         self._rec = OpRecorder(snapshot)
-        self._reducer = TurnReducer(self._rec)  # message ids and event handling live here
+        # message ids and event handling live here; `allows_always` guards its own
+        # auto-consume of `alwaysAllowedTools` the same way `approve()` guards writing to
+        # it (a tool like `save_skill` never gets a silent "always").
+        self._reducer = TurnReducer(self._rec, allows_always=self._allows_always)
         self._subscribers: List[_Subscriber] = []
         self._listeners: Dict[str, List[Callable[[], None]]] = {}
         self._notices: List[str] = []
+        # `follow_identity`: who hears of a change of user id; the changes recorded (under
+        # the lock, where they happen) and not yet delivered (`_flush` delivers them, in
+        # order, ahead of the batch that carries their ops); how many there have been; and
+        # whether the conversation on screen may follow the end-user across a sign-in
+        # (`exchange_conversation(carry=...)`; True unless a conversation list says not).
+        self._identity_followers: List[Callable[[IdentityChange], None]] = []
+        self._identity_changes: List[IdentityChange] = []
+        self._identity_epoch = 0
+        self._carry_on_sign_in = True
 
         # LLM history: clean user/assistant alternation (display messages are segmented).
         self._history: List[ChatMessage] = []
@@ -240,6 +511,13 @@ class ChatController:
         self._idle = threading.Event()
         self._idle.set()
         self._closed = False
+        # Turn timings go to `t2v.metrics` (a private hub on the test fakes). `_turn` is the
+        # turn in progress, kept across an approval pause; `_dropped_turns` are turns
+        # `_forget_conversation` dropped, ended (as abandoned) once the lock is released.
+        metrics = getattr(t2v, "metrics", None)
+        self._metrics = metrics if isinstance(metrics, TurnMetrics) else TurnMetrics()
+        self._turn: Optional[_TurnRecorder] = None
+        self._dropped_turns: List[_TurnRecorder] = []
         # Last, once every attribute `set_skills_state` reads exists: the skills debounce
         # timer may call it from its own thread the moment it is registered.
         self._skills_off: Optional[Callable[[], None]] = (
@@ -270,6 +548,12 @@ class ChatController:
                 self._set_top("isAnonymous", self._auth_anonymous)
 
     # ── Public API ──────────────────────────────────────────────────────────
+
+    @property
+    def metrics(self) -> TurnMetrics:
+        """Where this controller's turn timings go: ``t2v.metrics`` (``talk2view.metrics``).
+        ``metrics.on_turn(callback)`` hears of every turn as it ends."""
+        return self._metrics
 
     @property
     def t2v(self) -> "Talk2View":
@@ -354,7 +638,14 @@ class ChatController:
         return unsubscribe
 
     def on(self, event: str, callback: Callable[[], None]) -> Callable[[], None]:
-        """Listen for a one-shot notice that is not chat state. Events: ``demoLimitReached``.
+        """Listen for a one-shot notice that is not chat state. Events: ``demoLimitReached``;
+        ``conversationReplaced`` -- a conversation was just put on screen, replacing
+        whatever was there, whichever of ``restore_conversation`` or
+        ``exchange_conversation`` did it (a host that only overrides
+        ``restore_conversation`` misses every switch a list of conversations makes with
+        ``exchange_conversation``). Not raised for an export-only ``exchange_conversation``
+        (``snapshot=None``) or one refused for a stale ``epoch`` -- nothing was replaced
+        either way.
 
         The callback always runs on the emitting thread (there is no ``deliver_on_main`` for
         notices), just before that batch reaches the subscribers, so ``subscribe()``'s rules
@@ -370,6 +661,34 @@ class ChatController:
                     callbacks.remove(callback)
 
         return off
+
+    def follow_identity(
+        self, callback: Callable[[IdentityChange], None]
+    ) -> Tuple[IdentityChange, Callable[[], None]]:
+        """Hear of every change of the signed-in user id this controller applies, with the
+        conversation it dropped (``IdentityChange.forgotten``) when it dropped one. For a
+        list of conversations kept per end-user (``talk2view.ui.ThreadsState``): the
+        outgoing user's conversation arrives exactly as it stood when it left the screen,
+        so it never has to be read back after the fact.
+
+        Returns the identity now (``forgotten`` None) and the function that stops the
+        callback. Every later change reaches ``callback`` once, in ``epoch`` order, on the
+        emitting thread ahead of the batch carrying its ops -- so ``subscribe()``'s rules
+        for a callback apply. A change at or below the returned ``epoch`` may still arrive
+        (it was recorded before this call and not yet delivered); ignore it. Raises
+        ``ControllerClosedError`` once closed."""
+        with self._lock:
+            if self._closed:
+                raise ControllerClosedError("ChatController is closed")
+            self._identity_followers.append(callback)
+            now = IdentityChange(self._identity_epoch, self._auth_user_id, self._auth_anonymous)
+
+        def off() -> None:
+            with self._lock:
+                if callback in self._identity_followers:
+                    self._identity_followers.remove(callback)
+
+        return now, off
 
     def clear_error(self) -> None:
         with self._lock:
@@ -401,13 +720,49 @@ class ChatController:
             self._listeners = {}
             skills_off, self._skills_off = self._skills_off, None
             auth_off, self._auth_off = self._auth_off, None
+            # Changes recorded and not yet delivered still reach their followers (below):
+            # a list waiting on one must not wait for ever, nor lose its conversation.
+            undelivered, self._identity_changes = self._identity_changes, []
+            followers = tuple(self._identity_followers)
+            self._identity_followers = []
+            if self._turn is not None:
+                self._dropped_turns.append(self._turn)
+                self._turn = None
             self._idle.set()
+        self._end_dropped_turns()
         if skills_off is not None:
             skills_off()
         if auth_off is not None:
             auth_off()
         if token is not None:
             token.cancel()
+        if undelivered and followers:
+            self._deliver_identity_changes(undelivered, followers)
+
+    def _deliver_identity_changes(
+        self,
+        changes: List[IdentityChange],
+        followers: Tuple[Callable[[IdentityChange], None], ...],
+    ) -> None:
+        """For ``close()``: in the emit window, so in order with any delivery under way
+        (inside it already when ``close()`` is called from a callback)."""
+        if self._emit_owner == threading.get_ident():
+            self._call_followers(changes, followers)
+            return
+        with self._emit_lock:
+            self._call_followers(changes, followers)
+
+    @staticmethod
+    def _call_followers(
+        changes: List[IdentityChange],
+        followers: Tuple[Callable[[IdentityChange], None], ...],
+    ) -> None:
+        for change in changes:
+            for follower in followers:
+                try:
+                    follower(change)
+                except Exception:
+                    logger.exception("identity follower raised")
 
     def set_skills_state(self, state: SkillsState) -> None:
         """Record the skills slice as ONE ``set ["skills"]`` op and deliver it.
@@ -570,10 +925,15 @@ class ChatController:
             # malformed action is a denial, and an engine-gated call — or any kind this SDK
             # does not know — must still be asked about next time. An absent `kind` is a
             # client tool (its PendingApproval carries the four TS keys and nothing else).
+            # A tool that disallows "always" at all (``save_skill``) is handled
+            # exactly like "once" here: the decision still approves THIS call (unchanged
+            # below/in respond_to_approval), it is simply never written to memory, so the
+            # next call gets a fresh card.
             if (
                 decision.action == "always"
                 and decision.approved
                 and approval.get("kind", "client") == "client"
+                and self._allows_always(approval["toolName"])
             ):
                 allowed = list(self._rec.state["alwaysAllowedTools"])
                 if approval["toolName"] not in allowed:
@@ -582,14 +942,15 @@ class ChatController:
             self._set_top("pendingApproval", None)
             self._set_top("isLoading", True)
             assistant_id: str = self._last_assistant_id() or self._reducer.append_assistant()
+            turn = self._turn  # the turn that paused for this approval
 
         def open_stream() -> Iterator[ChatEvent]:
             return self._open_approval_stream(approval, decision, token)
 
         def job() -> None:
-            self._run(run_id, token, open_stream, assistant_id)
+            self._run(run_id, token, open_stream, assistant_id, turn)
 
-        self._launch(run_id, job, assistant_id)
+        self._launch_turn(run_id, job, assistant_id, turn)
 
     def retry(self) -> None:
         """Remove the last user turn and everything after it, then send it again."""
@@ -651,12 +1012,14 @@ class ChatController:
                 raise ControllerClosedError("ChatController is closed")
             stale = self._forget_conversation()
             self._set_top("alwaysAllowedTools", [])
+            self._carry_on_sign_in = True  # a conversation started here from now on
             # Cannot raise: the closed check is above and the run was just abandoned.
             run_id, _token = self._start_run()
             # Busy until the DELETE returns, so a quick send cannot race onto the old session.
             self._set_top("isLoading", True)
         if stale is not None:
             stale.cancel()
+        self._end_dropped_turns()
 
         def job() -> None:
             try:
@@ -673,6 +1036,143 @@ class ChatController:
                 self._flush()
 
         self._launch(run_id, job)
+
+    def export_conversation(self) -> ConversationSnapshot:
+        """Everything needed to put this conversation back later (TS ``exportConversation``):
+        deep copies of the messages (``isStreaming`` dropped: a stored copy must never
+        show a cursor nothing writes to), the replay history, ``threadId``, and ``marks``
+        (a Python extension: one entry per user message, the index into ``history`` a live
+        turn marked it at -- ``restore_conversation`` prefers these over reconstructing them,
+        since content alone cannot always tell two identical user messages apart; TS
+        ignores the key). Take one before switching away; see ``restore_conversation``, and
+        ``exchange_conversation`` for the two in one step."""
+        with self._lock:
+            return self._export_locked()
+
+    def restore_conversation(self, snapshot: ConversationSnapshot) -> None:
+        """Put a conversation on screen, replacing whatever is there (TS
+        ``restoreConversation``). The engine is not consulted: the transcript travels with
+        the next message. Everything that belonged to the conversation being replaced goes
+        with it — the run in flight (abandoned), the error, a pending approval, the agent
+        status, and the tools the end-user allowed for the rest of the session ("always
+        allow" is a grant to a session, not a property of a conversation, so a restored one
+        asks again). The engine session is detached, not deleted. Allowed while busy, as
+        ``clear`` is; raises ``ControllerClosedError`` after ``close()``.
+
+        ``snapshot`` is validated whole, before anything is touched: a bad message id, an
+        attachment shaped wrong, or a role the wire never carries would otherwise raise
+        from inside the locked mutation, half-applied (``ConversationStore.read`` already
+        filters what it hands back, but a hand-built or future-caller snapshot may not).
+        Failed validation is a no-op, logged -- the conversation on screen is unchanged, and
+        nothing here ever hands stored data a role or a tool result the engine would trust
+        on replay (``_valid_restore_snapshot``).
+
+        ``snapshot``'s optional ``marks`` are used as-is when present and well-formed
+        (``_valid_stored_marks``); a snapshot with none, or with marks that fail that check,
+        falls back to reconstructing them (``_marks_for``) -- never a reason to refuse the
+        restore itself, only to recompute one field of it."""
+        prepared = _prepare_restore(snapshot)
+        if prepared is None:
+            logger.warning(
+                "restore_conversation: the snapshot failed validation (a bad message id, "
+                "attachment or role); the conversation on screen is unchanged"
+            )
+            return
+        with self._lock:
+            if self._closed:
+                raise ControllerClosedError("ChatController is closed")
+            stale = self._apply_restore_locked(prepared)
+            self._carry_on_sign_in = True
+        self._after_restore(stale)
+
+    def exchange_conversation(
+        self,
+        snapshot: Optional[ConversationSnapshot],
+        *,
+        epoch: int,
+        carry: Optional[bool] = None,
+    ) -> Optional[ConversationSnapshot]:
+        """``export_conversation`` and ``restore_conversation(snapshot)`` in one locked
+        step, so nothing can reach the outgoing conversation between the two -- for a list
+        of conversations, which must never lose the tail of the one it switches away from.
+        ``snapshot`` None exports only.
+
+        ``epoch`` is the identity ``follow_identity`` last reported to the caller: if the
+        signed-in user has changed since, nothing is done and None comes back (the change,
+        with the conversation it dropped, is on its way to the caller's callback). ``carry``
+        says whether the conversation on screen afterwards may follow the end-user across a
+        sign-in out of a guest session or out of none into an account (None leaves it as it
+        is); False makes such a sign-in drop it, and report it in
+        ``IdentityChange.forgotten``, as a sign-out would. Nobody becoming a guest always
+        carries it: that is the person at the keyboard, and often this controller's own
+        ``send`` starting the guest session, which is never abandoned for it.
+
+        Raises ``ValueError`` when ``snapshot`` fails ``restore_conversation``'s validation,
+        and ``ControllerClosedError`` for a restore once closed, both before anything
+        changes. An export alone works on a closed controller: what was on screen when it
+        closed."""
+        prepared = None
+        if snapshot is not None:
+            prepared = _prepare_restore(snapshot)
+            if prepared is None:
+                raise ValueError("exchange_conversation: the snapshot failed validation")
+        with self._lock:
+            if prepared is not None and self._closed:
+                raise ControllerClosedError("ChatController is closed")
+            if epoch != self._identity_epoch:
+                return None
+            exported = self._export_locked()
+            if carry is not None:
+                self._carry_on_sign_in = carry
+            stale = self._apply_restore_locked(prepared) if prepared is not None else None
+        if prepared is not None:
+            self._after_restore(stale)
+        return exported
+
+    def _export_locked(self) -> ConversationSnapshot:
+        messages: List[DisplayMessage] = []
+        for message in self._rec.state["messages"]:
+            copied = cast(DisplayMessage, copy.deepcopy(dict(message)))
+            copied.pop("isStreaming", None)
+            messages.append(copied)
+        history = [_history_entry(entry) for entry in self._history]
+        thread_id = self._rec.state["threadId"]
+        marks = dict(self._history_marks)
+        return {
+            "messages": messages,
+            "history": history,
+            "threadId": thread_id,
+            "marks": marks,
+        }
+
+    def _apply_restore_locked(self, prepared: _Restore) -> Optional[CancelToken]:
+        """Replace the conversation with ``prepared`` (lock held); returns the abandoned
+        run's token, for ``_after_restore``."""
+        stale = self._forget_conversation()
+        self._set_top("alwaysAllowedTools", [])
+        self._set_top("isLoading", False)
+        self._rec.replace_messages(prepared.messages)
+        self._history = prepared.history
+        self._history_marks = prepared.marks
+        self._reducer.bump_message_counter(m["id"] for m in prepared.messages)
+        self._set_top("threadId", prepared.thread_id)
+        self._last_user_text = prepared.last_user_text
+        self._last_user_attachments = prepared.last_user_attachments
+        # Queued here, under the same lock as the replacement itself, so it is delivered
+        # through the flush both callers make right after (_after_restore) -- the one
+        # call site both restore_conversation and exchange_conversation share for "a
+        # conversation was actually put on screen".
+        self._notices.append("conversationReplaced")
+        return stale
+
+    def _after_restore(self, stale: Optional[CancelToken]) -> None:
+        if stale is not None:
+            stale.cancel()
+        self._end_dropped_turns()
+        detach = getattr(self._t2v, "detach_session", None)  # absent on older test fakes
+        if callable(detach):
+            detach()  # field writes only: no request, no listener
+        self._flush()
 
     # ── Identity ────────────────────────────────────────────────────────────
 
@@ -696,6 +1196,7 @@ class ChatController:
             stale = self._follow_identity()
         if stale is not None:
             stale.cancel()
+        self._end_dropped_turns()
         self._flush()
 
     def _follow_identity(self) -> Optional[CancelToken]:
@@ -703,7 +1204,10 @@ class ChatController:
         cancel once the lock is released. The state belongs to one end-user: consent is
         reset whenever the user id changes, and the conversation is dropped too unless the
         same person is carrying on — a sign-in from signed out, or the anonymous demo
-        becoming an account (convert, or the 409 -> sign-in fallback of ``signup()``)."""
+        becoming an account (convert, or the 409 -> sign-in fallback of ``signup()``) —
+        and the conversation on screen may carry on with them (``_carry_on_sign_in``, which
+        only a conversation list turns off). Each change of user id is recorded for
+        ``follow_identity``, with the dropped conversation exported first, right here."""
         try:
             user_id, anonymous = self._read_identity()
         except Exception:
@@ -717,17 +1221,38 @@ class ChatController:
         self._set_top("isAnonymous", anonymous)
         if user_id == previous:
             return None  # a convert, a repeated sign-in: the same end-user
+        self._identity_epoch += 1
         # Consent is one end-user's: another identity never inherits an "always allow".
         self._set_top("alwaysAllowedTools", [])
-        if previous is None or (was_anonymous and user_id is not None and not anonymous):
+        carrying_on = previous is None or (was_anonymous and user_id is not None and not anonymous)
+        # Nobody becoming a guest is the person at the keyboard, whatever is on screen:
+        # the guest id is minted by this process, most often by the anonymous start inside
+        # this controller's own send, and that send must never be abandoned by it. A
+        # list's `carry=False` guards a sign-in into an account, not this.
+        becoming_a_guest = previous is None and user_id is not None and anonymous
+        if carrying_on and (self._carry_on_sign_in or becoming_a_guest):
             # The same person carrying on. This is also the anonymous start that runs
             # inside this controller's own send: that turn continues as it is.
+            self._record_identity(user_id, anonymous, None)
             return None
-        # Signed out, or a different account: forget the conversation here. No engine
-        # DELETE — the old token is gone, and Talk2View has already dropped the session.
+        # Signed out, or a different account (or a conversation its list will not let
+        # follow a sign-in): forget the conversation here. No engine DELETE — the old token
+        # is gone, and Talk2View has already dropped the session.
+        self._record_identity(
+            user_id, anonymous, self._export_locked() if self._identity_followers else None
+        )
         stale = self._forget_conversation()
         self._set_top("isLoading", False)
+        self._carry_on_sign_in = True
         return stale
+
+    def _record_identity(
+        self, user_id: Optional[str], anonymous: bool, forgotten: Optional[ConversationSnapshot]
+    ) -> None:
+        if self._identity_followers:
+            self._identity_changes.append(
+                IdentityChange(self._identity_epoch, user_id, anonymous, forgotten)
+            )
 
     def _read_identity(self) -> Tuple[Optional[str], bool]:
         """The signed-in user's id (None when signed out) and whether that session is
@@ -747,6 +1272,9 @@ class ChatController:
         stale = self._cancel_token
         self._active_run = None  # abandon: a worker still unwinding may no longer write
         self._cancel_token = None
+        if self._turn is not None:
+            self._dropped_turns.append(self._turn)
+            self._turn = None
         self._truncate([], 0)
         self._set_top("error", None)
         self._set_top("pendingApproval", None)
@@ -765,6 +1293,22 @@ class ChatController:
             return False
         try:
             return bool(probe())
+        except Exception:
+            return False
+
+    def _allows_always(self, tool_name: str) -> bool:
+        """Whether an "always" decision for a CLIENT tool may be remembered at all
+        (``T2VTools.allows_always`` -- ``save_skill`` says no: every save is the
+        end-user's own click). Defaults to True — today's behaviour, unchanged — when
+        ``t2v.tools`` has no such method (an older test double, or a host's own
+        stand-in); a method that raises fails closed (this gates a security
+        property, so a broken check must never grant the permanent "always", only cost
+        an extra approval card)."""
+        probe = getattr(self._t2v.tools, "allows_always", None)
+        if not callable(probe):
+            return True
+        try:
+            return bool(probe(tool_name))
         except Exception:
             return False
 
@@ -840,6 +1384,9 @@ class ChatController:
                         subscribers = tuple(self._subscribers)
                         notices, self._notices = self._notices, []
                         callbacks = [cb for n in notices for cb in self._listeners.get(n, [])]
+                        changes, self._identity_changes = self._identity_changes, []
+                        followers = tuple(self._identity_followers)
+                    self._call_followers(changes, followers)
                     for callback in callbacks:
                         try:
                             callback()
@@ -937,8 +1484,32 @@ class ChatController:
         if isinstance(prepared, BaseException):
             self._deliver_undo()
             raise prepared
-        run_id, assistant_id, job = prepared
-        self._launch(run_id, job, assistant_id)
+        run_id, assistant_id, job, turn = prepared
+        self._launch_turn(run_id, job, assistant_id, turn)
+
+    def _launch_turn(
+        self,
+        run_id: int,
+        job: Callable[[], None],
+        assistant_id: str,
+        turn: Optional[_TurnRecorder],
+    ) -> None:
+        """``_launch`` a run of a timed turn (no lock held): a launch that fails ends the
+        turn's timing as an error."""
+        try:
+            self._launch(run_id, job, assistant_id)
+        except Exception as exc:
+            if turn is not None:
+                turn.error(_error_type(exc))
+                turn.finish("error")
+            raise
+
+    def _end_dropped_turns(self) -> None:
+        """End the timings of the turns ``_forget_conversation`` dropped (no lock held)."""
+        with self._lock:
+            dropped, self._dropped_turns = self._dropped_turns, []
+        for turn in dropped:
+            turn.finish("abandoned")
 
     def _prepare_send(
         self, text: str, files: List[Attachment]
@@ -979,14 +1550,15 @@ class ChatController:
         except BaseException as exc:
             self._end_unlaunched_run(run_id, assistant_id, history_length, exc)
             return exc
+        turn = self._turn = self._metrics._start_turn(user["id"])
 
         def open_stream() -> Iterator[ChatEvent]:
             return self._open_chat_stream(text, files, history, token)
 
         def job() -> None:
-            self._run(run_id, token, open_stream, reply_id)
+            self._run(run_id, token, open_stream, reply_id, turn)
 
-        return run_id, reply_id, job
+        return run_id, reply_id, job, turn
 
     def _end_unlaunched_run(
         self, run_id: int, assistant_id: Optional[str], history_length: int, exc: BaseException
@@ -1041,30 +1613,48 @@ class ChatController:
     # ── The run (worker thread) ─────────────────────────────────────────────
 
     def _run(
-        self, run_id: int, token: CancelToken, open_stream: StreamOpener, assistant_id: str
+        self,
+        run_id: int,
+        token: CancelToken,
+        open_stream: StreamOpener,
+        assistant_id: str,
+        turn: Optional[_TurnRecorder] = None,
     ) -> None:
-        try:
-            self._drain(run_id, token, open_stream, assistant_id)
-        except Exception as exc:  # a bug here must not leave the controller busy forever
-            logger.exception("chat run failed")
+        outcome = "error"
+        with bind_turn(turn):  # the client, the session and the tools note its timing
+            try:
+                outcome = self._drain(run_id, token, open_stream, assistant_id)
+            except Exception as exc:  # a bug here must not leave the controller busy forever
+                logger.exception("chat run failed")
+                if turn is not None:
+                    turn.error(_error_type(exc))
+                with self._lock:
+                    if self._is_current(run_id):
+                        self._turn_failed = True
+                        self._set_top("error", str(exc))
+                        self._set_top("isLoading", False)
+                        # `_drain` calls `_finalize` right before `_end_run`; reaching here
+                        # means that call did not complete, so roll the orphan user turn back
+                        # ourselves. A no-op if `_finalize` already appended assistant text
+                        # before it broke.
+                        self._rollback_orphan_turn()
+            finally:
+                with self._lock:
+                    self._end_run(run_id)
+                self._flush()
+        # After the last batch went out, with no lock held: listeners never delay the UI.
+        if turn is not None and outcome != _PAUSED:
             with self._lock:
-                if self._is_current(run_id):
-                    self._turn_failed = True
-                    self._set_top("error", str(exc))
-                    self._set_top("isLoading", False)
-                    # `_drain` calls `_finalize` right before `_end_run`; reaching here means
-                    # that call did not complete, so roll the orphan user turn back ourselves.
-                    # A no-op if `_finalize` already appended assistant text before it broke.
-                    self._rollback_orphan_turn()
-        finally:
-            with self._lock:
-                self._end_run(run_id)
-            self._flush()
+                if self._turn is turn:
+                    self._turn = None
+            turn.finish(outcome)
 
     def _drain(
         self, run_id: int, token: CancelToken, open_stream: StreamOpener, assistant_id: str
-    ) -> None:
-        """Consume streams, auto-approving always-allowed tools, until the turn completes."""
+    ) -> str:
+        """Consume streams, auto-approving always-allowed tools, until the turn completes.
+        Returns the turn's outcome for its timing (``done``, ``error``, ``cancelled``,
+        ``abandoned``), or ``_PAUSED`` when it waits for an approval."""
         current_open = open_stream
         current_id = assistant_id
         while True:
@@ -1079,7 +1669,7 @@ class ChatController:
                 # `_consume` already ended the run, in the locked section that set
                 # `pendingApproval`; all that is left is to deliver that batch.
                 self._flush()
-                return
+                return _PAUSED
             with self._lock:
                 if self._is_current(run_id):
                     self._set_top(
@@ -1091,6 +1681,7 @@ class ChatController:
                     )
             self._flush()
             current_open = self._auto_approval_opener(auto, token)
+        outcome = "abandoned"
         with self._lock:
             if self._is_current(run_id):
                 # `token.cancelled` alone would blame a cancel that only *happened* to land in
@@ -1098,9 +1689,12 @@ class ChatController:
                 # end (cancel() called from a script item right after `done`). A turn that
                 # already read `done` is complete; only an EARLIER cancel (one the turn never
                 # got past) should count as having interrupted it.
-                self._finalize(current_id, cancelled=token.cancelled and not consumed.completed)
+                cancelled = token.cancelled and not consumed.completed
+                outcome = "cancelled" if cancelled else "error" if self._turn_failed else "done"
+                self._finalize(current_id, cancelled=cancelled)
                 self._end_run(run_id)
         self._flush()
+        return outcome
 
     def _auto_approval_opener(self, approval: PendingApproval, token: CancelToken) -> StreamOpener:
         def open_stream() -> Iterator[ChatEvent]:
@@ -1116,6 +1710,10 @@ class ChatController:
         try:
             stream = open_stream()
             for event in stream:
+                if event.type == "error":
+                    turn = current_turn()
+                    if turn is not None:
+                        turn.error(event.error_type)
                 with self._lock:
                     if not self._is_current(run_id):  # clear()/close() abandoned this run
                         return _Consumed(False, None, cursor.assistant_id, cursor.completed)
@@ -1138,6 +1736,9 @@ class ChatController:
             pass  # cancel(): keep the partial text, surface no error
         except Exception as exc:
             if not token.cancelled:  # closing the response mid-read raises transport errors
+                turn = current_turn()
+                if turn is not None:
+                    turn.error(_error_type(exc))
                 with self._lock:
                     if self._is_current(run_id):
                         self._turn_failed = True

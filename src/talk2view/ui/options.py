@@ -12,10 +12,12 @@ as props (``chat/provider.tsx:30-83``), for a host that serves the page with ``U
 
 They reach the page read-only, as two app slices (``AppState``):
 
-- ``options``: ``{"welcome": {"heading": str | null, "suggestions": [str]}, "features":
-  {"dictation", "attachments", "settings", "account", "threadList", "providerSignIn":
-  bool},
-  "allowAnonymous": bool, "resetPasswordUrl": str | null, "footer": str | null}``;
+- ``options``: ``{"welcome": {"heading": str | null, "subheading": str | null,
+  "suggestions": [str]}, "features":
+  {"dictation", "attachments", "settings", "account", "threadList", "providerSignIn",
+  "skills": bool},
+  "allowAnonymous": bool, "resetPasswordUrl": str | null, "footer": str | null,
+  "appName": str | null}``;
 - ``tools``: ``{<tool name>: {"activity": str | null, "destructive": bool,
   "warning": str | null}}``, TS ``describeToolActivity``, ``isToolDestructive`` and
   ``destructiveWarning`` given once per tool instead of computed per call.
@@ -59,6 +61,8 @@ from .wire import _LONE_SURROGATE
 __all__ = ["ChatFeatures", "ChatOptions", "ChatWelcome", "ToolPresentation"]
 
 MAX_HEADING_CHARS = 200
+#: The app's name, as the Skills view heads the app's own skills ("From <name>").
+MAX_APP_NAME_CHARS = 64
 MAX_ACTIVITY_CHARS = 200
 #: A suggestion, the footer, a warning.
 MAX_TEXT_CHARS = 1000
@@ -112,6 +116,17 @@ def _optional_text(name: str, value: Any, max_chars: int) -> Optional[str]:
     return None if value is None else _text(name, value, max_chars)
 
 
+def _app_name(value: Any) -> Optional[str]:
+    """``app_name``: a short name on one line, trimmed. ``_text``'s checks, then no control
+    or line-separator character (it is a heading, never a paragraph)."""
+    if value is None:
+        return None
+    name = _text("app_name", value, MAX_APP_NAME_CHARS).strip()
+    if any(unicodedata.category(ch) in ("Cc", "Zl", "Zp") for ch in name):
+        raise ValueError("app_name must be one line of text")
+    return name
+
+
 def _flag(name: str, value: Any) -> None:
     if not isinstance(value, bool):
         raise TypeError("{} must be True or False, not {}".format(name, type(value).__name__))
@@ -119,15 +134,19 @@ def _flag(name: str, value: Any) -> None:
 
 @dataclass(frozen=True)
 class ChatWelcome:
-    """The opening screen: a heading, and the openers offered under the composer on an
-    empty chat (TS ``Talk2ViewChatWelcome``). A list of suggestions is kept as a tuple."""
+    """The opening screen: a heading, an optional one-line subheading under it, and the
+    openers offered under the composer on an empty chat (TS ``Talk2ViewChatWelcome``). A
+    list of suggestions is kept as a tuple."""
 
     heading: Optional[str] = None
+    subheading: Optional[str] = None
     suggestions: Sequence[str] = ()
 
     def __post_init__(self) -> None:
         heading = _optional_text("welcome.heading", self.heading, MAX_HEADING_CHARS)
         object.__setattr__(self, "heading", heading)
+        subheading = _optional_text("welcome.subheading", self.subheading, MAX_TEXT_CHARS)
+        object.__setattr__(self, "subheading", subheading)
         if not isinstance(self.suggestions, (list, tuple)):
             raise TypeError("welcome.suggestions must be a list of strings")
         given = list(self.suggestions)  # one pass: what is checked is what is kept
@@ -140,7 +159,11 @@ class ChatWelcome:
         object.__setattr__(self, "suggestions", suggestions)
 
     def to_wire(self) -> Dict[str, Any]:
-        return {"heading": self.heading, "suggestions": list(self.suggestions)}
+        return {
+            "heading": self.heading,
+            "subheading": self.subheading,
+            "suggestions": list(self.suggestions),
+        }
 
 
 @dataclass(frozen=True)
@@ -149,7 +172,11 @@ class ChatFeatures:
     server enforces ``attachments`` for new files, not for the attachments already in the
     chat's history (see the module docstring); the rest only shape the page. ``dictation``
     also needs ``capabilities.audio``, false until hosts record audio. ``provider_sign_in``
-    is enforced too: off, ``oauthStart`` ends in ``oauth_disabled``."""
+    is enforced too: off, ``oauthStart`` ends in ``oauth_disabled``. ``thread_list`` is
+    more than a view: on, ``UIServer`` puts the newest stored conversation back at
+    ``start()`` and writes every reply into the ``Talk2View``'s ``data_storage``
+    (``talk2view.ui.ThreadsState``); off, it does neither and the thread commands end in
+    ``thread_list_disabled``."""
 
     dictation: bool = True
     attachments: bool = True
@@ -160,6 +187,8 @@ class ChatFeatures:
     #: also offers desktop sign-in for the partner (``capabilities.oauth``); off, the
     #: server refuses ``oauthStart`` with ``oauth_disabled``.
     provider_sign_in: bool = True
+    #: The Skills view, and the assistant's `save_skill` tool.
+    skills: bool = True
 
     def __post_init__(self) -> None:
         for flag in dataclasses.fields(self):
@@ -173,6 +202,7 @@ class ChatFeatures:
             "account": self.account,
             "threadList": self.thread_list,
             "providerSignIn": self.provider_sign_in,
+            "skills": self.skills,
         }
 
 
@@ -239,6 +269,9 @@ class ChatOptions:
     reset_password_url: Optional[str] = None
     #: A short line under the composer, e.g. terms.
     footer: Optional[str] = None
+    #: The app's name, e.g. "3D Slicer": the Skills view heads the app's own skills
+    #: "From <name>" (else "App skills"). At most 64 characters, one line.
+    app_name: Optional[str] = None
     tools: Mapping[str, ToolPresentation] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
@@ -252,6 +285,7 @@ class ChatOptions:
             raise ValueError("reset_password_url must be an http or https link openLink opens")
         object.__setattr__(self, "reset_password_url", url)
         object.__setattr__(self, "footer", _optional_text("footer", self.footer, MAX_TEXT_CHARS))
+        object.__setattr__(self, "app_name", _app_name(self.app_name))
         if not isinstance(self.tools, Mapping):
             raise TypeError("tools must map tool names to ToolPresentation")
         given = dict(self.tools)  # one pass: counted by what it yields, not by its len()
@@ -277,6 +311,7 @@ class ChatOptions:
             "allowAnonymous": self.allow_anonymous,
             "resetPasswordUrl": self.reset_password_url,
             "footer": self.footer,
+            "appName": self.app_name,
         }
 
     def tools_to_wire(self) -> Dict[str, Any]:

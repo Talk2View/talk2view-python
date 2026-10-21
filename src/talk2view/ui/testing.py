@@ -7,8 +7,10 @@ word by word, one batch per word, as the real controller does per event. A messa
 starts with ``/approve`` (or every message, with ``ask_approval=True``) ends in a pending
 client-tool approval; ``/fail`` ends in an error; ``/limit`` ends as a guest's run out of
 allowance does, with no reply and the ``demoLimitReached`` notice (``on()``, as the real
-controller's). Every public call is logged in ``calls``,
-and ``raise_on[name] = exc`` makes that call raise ``exc`` (for error-path tests).
+controller's); ``/plan`` gives the reply the engine's ``- [ ]``/``- [x]`` checklist as
+its ``plan`` (a ``todos`` event), and ``/plan-notes`` a plan that is free markdown. Every
+public call is logged in ``calls``, and ``raise_on[name] = exc`` makes that call raise
+``exc`` (for error-path tests).
 
 Serve a built page against it, no engine needed (prints the URL, Ctrl+C stops)::
 
@@ -30,6 +32,7 @@ dropping it, so a delivery already under way on another thread is suppressed.
 from __future__ import annotations
 
 import argparse
+import copy
 import logging
 import sys
 import threading
@@ -41,12 +44,29 @@ from ..controller import (
     DEMO_LIMIT_REACHED,
     ControllerBusyError,
     ControllerClosedError,
+    IdentityChange,
 )
 from ..dispatch import Dispatcher, InlineDispatcher
-from ..state import ChatSnapshot, DisplayMessage, OpBatch, OpRecorder, initial_snapshot
+from ..state import (
+    ChatSnapshot,
+    ConversationSnapshot,
+    DisplayMessage,
+    HistoryEntry,
+    OpBatch,
+    OpRecorder,
+    initial_snapshot,
+)
 from ..types import Attachment, Decision
 
-__all__ = ["APPROVAL_TOOL", "DEFAULT_REPLY", "FakeController", "main", "words"]
+__all__ = [
+    "APPROVAL_TOOL",
+    "DEFAULT_REPLY",
+    "DEMO_PLAN",
+    "DEMO_PLAN_NOTES",
+    "FakeController",
+    "main",
+    "words",
+]
 
 logger = logging.getLogger("talk2view.ui")
 
@@ -61,6 +81,13 @@ DEFAULT_REPLY = (
     "```python\nvolume = load_sample_data('MRHead')\n```\n\n"
     "Unicode check: café — 日本語 — ✓.\n"
 )
+
+#: ``/plan``'s plan: the checklist the engine's system prompt asks ``write_todos`` for.
+DEMO_PLAN = (
+    "- [x] Load the MRHead volume\n- [ ] Threshold the brain\n- [ ] Measure the segment volume\n"
+)
+#: ``/plan-notes``'s plan: not only a checklist, so the page shows it as markdown.
+DEMO_PLAN_NOTES = "Check the **window / level** first.\n\n- [ ] Threshold the brain\n"
 
 Executor = Callable[[Callable[[], None]], None]
 
@@ -166,9 +193,9 @@ class FakeController:
         return unsubscribe
 
     def on(self, event: str, callback: Callable[[], None]) -> Callable[[], None]:
-        """A one-shot notice (``demoLimitReached``), as ``ChatController.on``: the callback
-        runs on the emitting thread, just before that batch reaches the subscribers.
-        Returns the function that removes it."""
+        """A one-shot notice (``demoLimitReached``, ``conversationReplaced``), as
+        ``ChatController.on``: the callback runs on the emitting thread, just before that
+        batch reaches the subscribers. Returns the function that removes it."""
         with self._lock:
             self._listeners.setdefault(event, []).append(callback)
 
@@ -296,6 +323,93 @@ class FakeController:
             self._set("isLoading", True)
         self._launch(run, lambda: self._finish_clear(run))
 
+    def export_conversation(self) -> ConversationSnapshot:
+        """As ``ChatController.export_conversation``: copies, ``isStreaming`` dropped, and
+        a history the fake builds from its messages (one entry per non-empty message).
+        No ``marks``: the fake does not track them, and ``ThreadsState`` treats a snapshot
+        with none as it would a TS-written one — its own ``_marks_for`` fallback applies,
+        which is exactly what a fake with no history-mark bookkeeping should exercise."""
+        self._log("export_conversation")
+        with self._lock:
+            return self._export_locked()
+
+    def _export_locked(self) -> ConversationSnapshot:
+        messages = [
+            cast(DisplayMessage, copy.deepcopy(dict(m))) for m in self._rec.state["messages"]
+        ]
+        for message in messages:
+            message.pop("isStreaming", None)
+        history: List[HistoryEntry] = [
+            {"role": m["role"], "content": m["content"]} for m in messages if m["content"]
+        ]
+        return {
+            "messages": messages,
+            "history": history,
+            "threadId": self._rec.state["threadId"],
+        }
+
+    def restore_conversation(self, snapshot: ConversationSnapshot) -> None:
+        """As ``ChatController.restore_conversation``: the run is abandoned, the transcript
+        replaced, consent and the rest cleared. Raises ``ControllerClosedError`` once closed."""
+        self._log("restore_conversation", snapshot)
+        with self._lock:
+            if self._closed:
+                raise ControllerClosedError("FakeController is closed")
+            self._restore_locked(snapshot)
+        self._flush()
+
+    def follow_identity(
+        self, callback: Callable[[IdentityChange], None]
+    ) -> Tuple[IdentityChange, Callable[[], None]]:
+        """As ``ChatController.follow_identity``, for a fake nobody signs in to: epoch 0,
+        nobody, and no change ever reaches ``callback``."""
+        self._log("follow_identity")
+        return IdentityChange(0, None, False), lambda: None
+
+    def exchange_conversation(
+        self,
+        snapshot: Optional[ConversationSnapshot],
+        *,
+        epoch: int,
+        carry: Optional[bool] = None,
+    ) -> Optional[ConversationSnapshot]:
+        """As ``ChatController.exchange_conversation``: export, then (with ``snapshot``)
+        restore, in one locked step; None for any ``epoch`` but 0. ``carry`` is ignored:
+        nobody signs in to the fake."""
+        self._log("exchange_conversation", snapshot)
+        with self._lock:
+            if snapshot is not None and self._closed:
+                raise ControllerClosedError("FakeController is closed")
+            if epoch != 0:
+                return None
+            exported = self._export_locked()
+            if snapshot is not None:
+                self._restore_locked(snapshot)
+        if snapshot is not None:
+            self._flush()
+        return exported
+
+    def _restore_locked(self, snapshot: ConversationSnapshot) -> None:
+        self._abandon()
+        messages = [
+            cast(DisplayMessage, copy.deepcopy(dict(m))) for m in snapshot["messages"]
+        ]
+        for message in messages:
+            message.pop("isStreaming", None)
+        self._rec.replace_messages(messages)
+        for key, value in (
+            ("isLoading", False),
+            ("error", None),
+            ("pendingApproval", None),
+            ("agentStatus", None),
+            ("threadId", snapshot["threadId"]),
+            ("alwaysAllowedTools", []),
+        ):
+            self._set(key, value)
+        # As the real ChatController: called by both restore_conversation and a
+        # snapshot-carrying exchange_conversation, under self._lock either way.
+        self._notices.append("conversationReplaced")
+
     def clear_error(self) -> None:
         """Clear ``error``, if any."""
         self._log("clear_error")
@@ -325,6 +439,13 @@ class FakeController:
         if text.startswith("/limit"):
             self._demo_limit(run, index)
             return
+        if text.startswith("/plan"):
+            plan = DEMO_PLAN_NOTES if text.startswith("/plan-notes") else DEMO_PLAN
+            with self._lock:
+                if self._run != run:
+                    return
+                self._rec.set(["messages", index, "plan"], plan)
+            self._flush()
         streamed = self._stream(run, index, self._chunks)
         if streamed and text.startswith("/fail"):
             with self._lock:

@@ -193,6 +193,29 @@ class TestApprovals:
         }
         assert [op["path"] for op in _ops(rec)] == [["messages", 0, "steps"]]  # no card
 
+    def test_a_no_always_tool_is_never_auto_approved_even_if_remembered_anyway(self) -> None:
+        """Belt and braces: ``ChatController.approve()`` never
+        writes a no-always tool's name into ``alwaysAllowedTools`` in the first place, but
+        the reducer must refuse to auto-consume it even if that name got in there some
+        other way (a restored conversation, a bug elsewhere) -- checked directly here with
+        a reducer built with its own ``allows_always``, independent of that other guard."""
+        rec = OpRecorder(initial_snapshot())
+        reducer = TurnReducer(rec, allows_always=lambda name: name != "save_skill")
+        cursor = _Cursor(assistant_id=reducer.append_assistant())
+        rec.set(["alwaysAllowedTools"], ["save_skill"])
+        rec.flush()
+
+        outcome = reducer.reduce(interrupt_chunk("save_skill", "call_1", {}, "Save"), cursor)
+
+        assert outcome is not None
+        assert outcome.auto_approval is None
+        assert rec.state["pendingApproval"] == {
+            "toolCallId": "call_1",
+            "toolName": "save_skill",
+            "arguments": {},
+            "description": "Save",
+        }
+
     def test_an_engine_approval_is_never_auto_approved_and_keeps_kind(self) -> None:
         rec, reducer, cursor = _fresh()
         rec.set(["alwaysAllowedTools"], ["send_email"])
@@ -341,3 +364,20 @@ class TestIds:
         message: Dict[str, Any] = rec.state["messages"][0]
         assert message["id"] == c
         assert message["isStreaming"] is True
+
+    def test_bump_message_counter_moves_past_the_given_ids(self) -> None:
+        rec = OpRecorder(initial_snapshot())
+        reducer = TurnReducer(rec)
+        reducer.bump_message_counter(["msg_7_111", "msg_3_222"])
+        assert reducer.next_message_id().split("_")[1] == "8"
+
+    def test_bump_message_counter_ignores_ids_it_cannot_safely_read(self) -> None:
+        """A restored id whose digit run is not ASCII digits, or is longer than cpython's
+        own int() conversion limit, must never reach int() -- both are skipped rather than
+        raised on, exactly as an id with no digit run at all already is."""
+        rec = OpRecorder(initial_snapshot())
+        reducer = TurnReducer(rec)
+        unicode_digit = "msg_²_1"  # a superscript two: str.isdigit() is True, int() raises
+        huge = "msg_{}_1".format("9" * 4301)  # one digit past cpython's int() string limit
+        reducer.bump_message_counter([unicode_digit, huge, "msg_5_1"])
+        assert reducer.next_message_id().split("_")[1] == "6"

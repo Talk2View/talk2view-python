@@ -515,6 +515,7 @@ class TestClearMessages:
         controller = make_controller(t2v)
         controller.send("one")
         user_id = controller.snapshot()["messages"][0]["id"]
+        snapshot = controller.export_conversation()
         controller.close()
         with pytest.raises(ControllerClosedError):
             controller.retry()
@@ -522,7 +523,9 @@ class TestClearMessages:
             controller.edit(user_id, "x")
         with pytest.raises(ControllerClosedError):
             controller.clear()
-        assert t2v.cleared == 0
+        with pytest.raises(ControllerClosedError):
+            controller.restore_conversation(snapshot)
+        assert t2v.cleared == 0 and t2v.detached == 0
 
     def test_clear_resets_the_internal_turn_bookkeeping(self) -> None:
         """``_turn_failed`` and the ``_history_marks`` keys are the two resets no public

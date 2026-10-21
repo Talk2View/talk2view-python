@@ -34,7 +34,7 @@ from .test_ui_server import STUB, Rig, declared_only, inline, raw, status_and_js
 from .ui_engine import AccountEngine
 
 DEFAULTS = {
-    "welcome": {"heading": None, "suggestions": []},
+    "welcome": {"heading": None, "subheading": None, "suggestions": []},
     "features": {
         "dictation": True,
         "attachments": True,
@@ -42,10 +42,12 @@ DEFAULTS = {
         "account": True,
         "threadList": True,
         "providerSignIn": True,
+        "skills": True,
     },
     "allowAnonymous": True,
     "resetPasswordUrl": None,
     "footer": None,
+    "appName": None,
 }
 NO_ATTACHMENTS = ChatOptions(features=ChatFeatures(attachments=False))
 
@@ -117,13 +119,21 @@ def test_the_defaults_are_the_typescript_chats() -> None:
     assert options.tools_to_wire() == {}
 
 
+def test_app_name_is_trimmed() -> None:
+    assert ChatOptions(app_name="  Talk2Slicer ").to_wire()["appName"] == "Talk2Slicer"
+
+
 def test_every_option_reaches_the_wire_in_ts_casing() -> None:
     options = ChatOptions(
-        welcome=ChatWelcome(heading="Ask about your scene", suggestions=["Load MRHead", "Measure"]),
+        welcome=ChatWelcome(
+            heading="Ask about your scene", subheading="Load data by talking.",
+            suggestions=["Load MRHead", "Measure"],
+        ),
         features=ChatFeatures(dictation=False, attachments=False, thread_list=False),
         allow_anonymous=False,
         reset_password_url="https://example.com/reset?from=slicer",
         footer="Answers can be wrong.",
+        app_name="Talk2Slicer",
         tools={
             "load_file": ToolPresentation(activity="Loading a file", destructive=True),
             "threshold_segment": ToolPresentation(destructive=True, warning="Replaces it."),
@@ -131,7 +141,8 @@ def test_every_option_reaches_the_wire_in_ts_casing() -> None:
         },
     )
     assert options.to_wire() == {
-        "welcome": {"heading": "Ask about your scene", "suggestions": ["Load MRHead", "Measure"]},
+        "welcome": {"heading": "Ask about your scene", "subheading": "Load data by talking.",
+                    "suggestions": ["Load MRHead", "Measure"]},
         "features": {
             "dictation": False,
             "attachments": False,
@@ -139,10 +150,12 @@ def test_every_option_reaches_the_wire_in_ts_casing() -> None:
             "account": True,
             "threadList": False,
             "providerSignIn": True,
+            "skills": True,
         },
         "allowAnonymous": False,
         "resetPasswordUrl": "https://example.com/reset?from=slicer",
         "footer": "Answers can be wrong.",
+        "appName": "Talk2Slicer",
     }
     assert options.tools_to_wire() == {
         "load_file": {"activity": "Loading a file", "destructive": True, "warning": None},
@@ -163,6 +176,9 @@ def test_every_option_reaches_the_wire_in_ts_casing() -> None:
         (lambda: ChatWelcome(suggestions=["ok", "  "]), ValueError),
         (lambda: ChatWelcome(suggestions=["s"] * 13), ValueError),
         (lambda: ChatWelcome(suggestions=["\ud800"]), ValueError),
+        (lambda: ChatWelcome(subheading=""), ValueError),
+        (lambda: ChatWelcome(subheading="x" * (ui_options.MAX_TEXT_CHARS + 1)), ValueError),
+        (lambda: ChatWelcome(subheading=5), TypeError),
         (lambda: ChatFeatures(attachments=1), TypeError),
         (lambda: ChatFeatures(thread_list=None), TypeError),
         (lambda: ToolPresentation(activity=""), ValueError),
@@ -170,6 +186,13 @@ def test_every_option_reaches_the_wire_in_ts_casing() -> None:
         (lambda: ToolPresentation(warning="Careful"), ValueError),  # not destructive
         (lambda: ChatOptions(allow_anonymous=0), TypeError),
         (lambda: ChatOptions(footer="x" * 1001), ValueError),
+        (lambda: ChatOptions(app_name=""), ValueError),
+        (lambda: ChatOptions(app_name="   "), ValueError),
+        (lambda: ChatOptions(app_name="x" * 65), ValueError),
+        (lambda: ChatOptions(app_name="Talk\nSlicer"), ValueError),
+        (lambda: ChatOptions(app_name="Talk\x07Slicer"), ValueError),
+        (lambda: ChatOptions(app_name="\ud800"), ValueError),
+        (lambda: ChatOptions(app_name=5), TypeError),
         (lambda: ChatOptions(welcome={"heading": "Hi"}), TypeError),
         (lambda: ChatOptions(features={"attachments": False}), TypeError),
         (lambda: ChatOptions(tools=[("load_file", ToolPresentation())]), TypeError),
@@ -282,7 +305,7 @@ def test_the_options_copy_pickle_and_hash_like_any_frozen_value() -> None:
     assert reordered == options and hash(reordered) == hash(options)
     assert {options: "kept"}[reordered] == "kept"
     assert dataclasses.asdict(options)["welcome"] == {
-        "heading": "Hi", "suggestions": ("Load MRHead",)
+        "heading": "Hi", "subheading": None, "suggestions": ("Load MRHead",)
     }
 
 
@@ -400,7 +423,9 @@ def test_the_server_serves_the_options_and_tools_slices() -> None:
     rig = Rig(UIServer(controller, host, static_dir=STUB, options=options), controller, host)
     try:
         state = rig.server._hub.snapshot()["state"]
-        assert state["options"]["welcome"] == {"heading": "Hi", "suggestions": []}
+        assert state["options"]["welcome"] == {
+            "heading": "Hi", "subheading": None, "suggestions": [],
+        }
         assert state["tools"]["load_file"]["destructive"] is True
     finally:
         rig.server.stop()

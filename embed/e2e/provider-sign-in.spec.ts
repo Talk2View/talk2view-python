@@ -336,7 +336,7 @@ test.describe('while the browser is out', () => {
     await page.keyboard.press('Enter');
     await expect(page.getByRole('alert')).toHaveCount(0);
     // Nothing of the section is left: the form's heading, not the email field.
-    await expect(page.getByRole('heading', { name: 'Sign in' })).toBeFocused();
+    await expect(page.getByRole('heading', { name: 'Welcome to Talk2View' })).toBeFocused();
   });
 
   test('a pending sign-in for a provider the page does not know is named neutrally', async ({ page, backend }) => {
@@ -447,7 +447,7 @@ test.describe('a refusal in the browser', () => {
     await expect(page.getByRole('heading', { name: 'Chat', level: 1 })).toBeVisible();
     await page.getByRole('button', { name: 'Account', exact: true }).click();
     await page.getByRole('button', { name: 'Sign out' }).click();
-    await expect(page.getByRole('heading', { name: 'Sign in' })).toBeVisible();
+    await expect(page.getByRole('heading', { name: 'Welcome to Talk2View' })).toBeVisible();
     await expect(page.getByRole('alert')).toContainText(DENIED);
   });
 

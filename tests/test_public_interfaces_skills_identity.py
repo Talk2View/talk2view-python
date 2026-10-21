@@ -66,11 +66,15 @@ def test_state_skills_slice_shape() -> None:
         "registered",
         "available",
         "needsSessionReset",
+        "store",
     }
     assert LocalSkillState.__required_keys__ == {
-        "name", "description", "enabled", "origin", "label"
+        "name", "description", "enabled", "origin", "label",
+        "editable", "hasExtraFiles", "problems",
     }
-    assert LocalSkillState.__optional_keys__ == {"path", "overridesPlatform"}
+    assert LocalSkillState.__optional_keys__ == {
+        "path", "overridesPlatform", "key", "overridden"
+    }
     recorder = OpRecorder(snapshot)
     recorder.set(["skills"], empty_skills_state())
     batch = recorder.flush()

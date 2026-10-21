@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import copy
 import threading
-from typing import Any, Callable, Dict, Iterator, List, Optional, Union
+from typing import Any, Callable, Dict, Iterator, List, Optional, Set, Union
 
 from talk2view.cancel import Cancelled, CancelToken
 from talk2view.controller import ChatController
@@ -72,6 +72,13 @@ class FakeAuth:
 class FakeTools:
     def __init__(self, dispatcher: Dispatcher) -> None:
         self.dispatcher = dispatcher
+        # Mirrors T2VTools.allows_always(): a test names a tool here to simulate a
+        # builtin installed with add_builtin(..., allow_always=False) (save_skill)
+        # -- every other tool keeps today's "always" behaviour.
+        self.no_always: Set[str] = set()
+
+    def allows_always(self, tool_name: str) -> bool:
+        return tool_name not in self.no_always
 
 
 class FakeT2V:
@@ -86,6 +93,7 @@ class FakeT2V:
         self.approval_calls: List[Dict[str, Any]] = []
         self.defaults: List[Dict[str, Any]] = []
         self.cleared = 0
+        self.detached = 0
 
     def set_chat_defaults(self, *, model: Optional[str] = None, capabilities: Any = None) -> None:
         self.defaults.append({"model": model, "capabilities": capabilities})
@@ -119,6 +127,9 @@ class FakeT2V:
 
     def clear_session(self) -> None:
         self.cleared += 1
+
+    def detach_session(self) -> None:
+        self.detached += 1
 
 
 def _play(script: Script, cancel: Optional[CancelToken]) -> Iterator[ChatEvent]:

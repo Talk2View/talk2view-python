@@ -31,7 +31,7 @@ test('the scripted run passes every probe and every step', async ({ page, backen
   const steps = results.auto.steps.map((s: { id: string; status: string; detail: string }) => [s.id, s.status, s.detail]);
   expect(steps.filter((s: string[]) => s[1] !== 'PASS')).toEqual([]);
   expect(steps.map((s: string[]) => s[0])).toEqual([
-    'auto:connected', 'auto:send', 'auto:stream', 'auto:markdown-dom', 'auto:link', 'auto:copy',
+    'auto:connected', 'auto:send', 'auto:sticky', 'auto:stream', 'auto:markdown-dom', 'auto:link', 'auto:copy',
     'auto:approval-card', 'auto:allow-once', 'auto:deny', 'auto:edit-arguments', 'auto:always-allow',
     'auto:cancel-stream', 'auto:cancel-approval', 'auto:error-retry', 'auto:views', 'auto:new-chat',
     'auto:reload', 'auto:guest-limit',
@@ -152,4 +152,21 @@ test('a page that never draws a thread still sends its results home', async ({ p
   expect(results.auto).toBeNull();
   expect(results.live.errorCount).toBeGreaterThan(0);
   expect(results.live.errors.join(' | ')).toContain('never drew a thread');
+});
+
+test('showThread() closes a pressed header view and brings the thread back', async ({ page, backend }) => {
+  // autorun.ts's recovery path (one broken control reported as several, not every step
+  // after it): the scripted run's own 18 steps never leave Settings or Account open
+  // behind them, so this is otherwise dead code in every guard run — a selector a header
+  // rename breaks (as .t2v-header -> .t2v-chat-header once did) would pass
+  // silently. Exercised directly here, through the test-only window hook (guard/index.ts),
+  // rather than through the full scripted run.
+  await page.goto(backend.url); // no &auto=1: the scripted run must not race this
+  await expect(page.getByRole('heading', { name: 'Ask about your scene' })).toBeVisible();
+  await page.getByRole('button', { name: 'Settings' }).click();
+  await expect(page.getByRole('button', { name: 'Settings' })).toHaveAttribute('aria-pressed', 'true');
+  await expect(page.getByRole('heading', { name: 'Settings' })).toBeVisible();
+  await page.evaluate(() => (window as unknown as { __t2vGuardShowThread: () => Promise<void> }).__t2vGuardShowThread());
+  await expect(page.getByRole('button', { name: 'Settings' })).toHaveAttribute('aria-pressed', 'false');
+  await expect(page.getByRole('textbox', { name: 'Message' })).toBeVisible();
 });

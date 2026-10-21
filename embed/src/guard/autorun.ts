@@ -215,13 +215,46 @@ function drawnReplyText(): string {
 }
 
 /**
+ * `dangerouslySetInnerHTML` re-sets the whole `.t2v-md` container on every streamed
+ * chunk, for as long as a reply keeps growing — `looks.spec.ts`'s own comment on this
+ * exact step measured it happening for content streamed
+ * well after a code fence closes. A click landing mid-replacement still reaches a real
+ * button (this page never leaves one half-drawn), but the state a click sets by hand —
+ * `t2v-code-copy`'s own tick swap — is not part of that re-set markup, so a further
+ * replacement while `auto:copy` is mid-click would revert a just-set tick before this
+ * step's own poll ever reads it: a false FAIL, not a timing artefact a longer timeout
+ * would fix. `auto:markdown-dom` already confirms the reply is fully drawn before this
+ * step runs, and `auto:link` runs in between, so in practice there is no run left by
+ * here — this is a second, cheap confirmation rather than trusting that ordering alone.
+ */
+async function settledMarkdown(el: HTMLElement, ms: number): Promise<boolean> {
+  const md = () => el.querySelector('.t2v-md')?.innerHTML ?? null;
+  let last = md();
+  const deadline = performance.now() + ms;
+  while (performance.now() < deadline) {
+    await sleep(150);
+    const next = md();
+    if (next !== null && next === last) return true;
+    last = next;
+  }
+  return false;
+}
+
+/**
  * Put the thread back on show. A step that failed part-way can leave the page on Settings
  * or Account, and every send after it would then type into a composer nobody can see —
  * one broken control reported as several.
+ *
+ * Exported so guard.spec.ts can exercise this directly (`window.__t2vGuardShowThread`,
+ * wired in guard/index.ts): the 18 scripted steps never leave a pane open behind them, so
+ * this path is otherwise dead in every guard run and a broken selector here would pass
+ * silently, the way the App.tsx header rename once did.
  */
-async function showThread(): Promise<void> {
+export async function showThread(): Promise<void> {
   if (paneShows('.t2v-thread')) return;
-  const pressed = document.querySelector<HTMLButtonElement>('.t2v-header button[aria-pressed="true"]');
+  // `.t2v-header-btn`, not the header's own class: that one has already been renamed once
+  // (.t2v-header -> .t2v-chat-header) without this query being touched.
+  const pressed = document.querySelector<HTMLButtonElement>('.t2v-header-btn[aria-pressed="true"]');
   if (pressed && !pressed.disabled) {
     pressed.click();
     noteRecovery('closed ' + (pressed.getAttribute('aria-label') || 'a view') + ' to get back to the thread');
@@ -265,6 +298,24 @@ async function send(store: PageStore, text: string): Promise<void> {
   await waitFor('the user message', 4000, () => state(store).messages.length > before);
 }
 
+/**
+ * A CSS `<color>` value the way the browser resolves and reports it, in the same
+ * `rgb()`/`rgba()` form a computed `background-color` comes back in — the same technique
+ * as `probes.ts`'s `resolvedHairlineStrong()`. A plain read of the custom property's own text
+ * (`getPropertyValue('--t2v-muted-30')`) goes through a different serialiser (the token
+ * stream, which drops a leading zero: "0.3" -> ".3") and would never textually equal what
+ * `backgroundColor` reports for that same colour, so the comparison has to go through a
+ * real, off-screen element on both sides.
+ */
+function resolvedColor(cssValue: string): string {
+  const el = document.createElement('div');
+  el.style.cssText = 'position:absolute;left:-9999px;top:0;visibility:hidden;background-color:' + cssValue + ';';
+  document.body.appendChild(el);
+  const colour = getComputedStyle(el).backgroundColor;
+  el.remove();
+  return colour;
+}
+
 function markdownDom(): { ok: boolean; detail: string } {
   const root = lastReplyEl();
   if (!root) return { ok: false, detail: 'no .t2v-msg-assistant in the DOM' };
@@ -273,12 +324,21 @@ function markdownDom(): { ok: boolean; detail: string } {
   );
   const td = root.querySelector('.t2v-md td');
   const pre = root.querySelector('.t2v-md pre');
-  const border = td ? getComputedStyle(td).borderTopWidth : 'no td';
+  // The old `tr:first-child td` / `td:last-child` rules are retired (a collapsed table
+  // now, one hairline per row): every td's own border moved from a first-row-only
+  // border-top to a border-bottom on every row, so that is the one this reads now.
+  const border = td ? getComputedStyle(td).borderBottomWidth : 'no td';
   const preBg = pre ? getComputedStyle(pre).backgroundColor : 'no pre';
-  const styled = parseFloat(border) >= 1 && preBg === 'rgb(2, 28, 37)';
+  // Read live rather than hard-coded: app.css currently paints `.t2v-md pre` with
+  // `var(--t2v-card)` (moved off the retired `--t2v-muted-30`), but a fixed
+  // rgb() would false-FAIL a themed Slicer (the host's Theme may repaint the token) and
+  // would go stale the moment a later task restyles code blocks, proving nothing beyond
+  // what the token itself already carries.
+  const wantBg = resolvedColor('var(--t2v-card)');
+  const styled = parseFloat(border) >= 1 && preBg === wantBg;
   return {
     ok: missing.length === 0 && styled,
-    detail: (missing.length ? 'missing ' + missing.join(', ') : 'all six elements rendered') + '; td border ' + border + ', pre background ' + preBg,
+    detail: (missing.length ? 'missing ' + missing.join(', ') : 'all six elements rendered') + '; td border ' + border + ', pre background ' + preBg + ' (want ' + wantBg + ')',
   };
 }
 
@@ -298,6 +358,30 @@ function unpark(): AutoReport | null {
 /** The approval card's button for an action (data-action). */
 function cardButton(action: string): HTMLButtonElement | null {
   return document.querySelector<HTMLButtonElement>('.t2v-approval [data-action="' + action + '"]');
+}
+
+/**
+ * ToolCall.tsx's reposition effect: Allow once and Deny must both
+ * be on screen and not painted over by the sticky composer footer, wherever the card ends
+ * up scrolled to — the same `elementFromPoint` hit test e2e/approval.spec.ts's own
+ * `visibleAndUncovered` uses, in plain DOM for the guard.
+ */
+function decisionReachable(): { ok: boolean; detail: string } {
+  const uncovered = (el: HTMLElement, label: string): string | null => {
+    const r = el.getBoundingClientRect();
+    if (r.width === 0 || r.height === 0) return label + ' has no box';
+    if (r.top < 0 || r.left < 0 || r.bottom > window.innerHeight || r.right > window.innerWidth) {
+      return label + ' is outside the viewport (' + JSON.stringify({ top: r.top, left: r.left, bottom: r.bottom, right: r.right }) + ')';
+    }
+    const hit = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2);
+    if (!hit || !(hit === el || el.contains(hit))) return label + ' is covered at its own centre';
+    return null;
+  };
+  const allow = cardButton('once');
+  const deny = cardButton('deny');
+  if (!allow || !deny) return { ok: false, detail: 'Allow once or Deny button not found' };
+  const problem = uncovered(allow, 'Allow once') || uncovered(deny, 'Deny');
+  return { ok: !problem, detail: problem || 'Allow once and Deny both visible and uncovered' };
 }
 
 /** The arguments editor, and the hints the card draws for the draft it currently holds.
@@ -392,6 +476,24 @@ export async function runAuto(
       await send(store, 'hello');
       return [true, 'through the composer'];
     });
+    // Moved from the probes' own css:sticky: the footer is pinned to the
+    // viewport's bottom edge only once the thread has something to scroll — the empty
+    // state centres it instead on purpose (t2v-thread-empty), which the probe (run
+    // before any message exists) would otherwise have read as a FAIL on every guard run.
+    await step('auto:sticky', async () => {
+      const read = () => {
+        const footer = document.querySelector('.t2v-footer');
+        const viewport = document.querySelector('.t2v-viewport');
+        if (!footer || !viewport) return { position: 'none', delta: Infinity };
+        return {
+          position: getComputedStyle(footer).position,
+          delta: Math.abs(footer.getBoundingClientRect().bottom - viewport.getBoundingClientRect().bottom),
+        };
+      };
+      const result = await settle(2000, read, (r) => r.position === 'sticky' && r.delta <= 1);
+      const ok = result.position === 'sticky' && result.delta <= 1;
+      return [ok, 'computed ' + result.position + ', footer-to-viewport bottom delta ' + result.delta.toFixed(1) + ' px'];
+    });
     await step('auto:stream', async () => {
       await waitFor('the first streamed text', 10000, () => {
         const m = lastAssistant(state(store));
@@ -457,7 +559,21 @@ export async function runAuto(
       const reply = await waitFor('a reply to copy', DRAW_MS, () => lastReplyEl());
       await click('Copy button', () => buttonNamed('Copy', reply));
       await waitFor('the copy command to be answered', 10000, () => answeredCommand(state(store), 'copy'));
-      return [true, 'clicked; the host clipboard is checked by the judge'];
+      // The code block's own per-block Copy button (`.t2v-code-copy`, distinct
+      // from the message-level `t2v-icon-btn` above) is a second, separate control on the
+      // same host clipboard path; its own tick swap is DOM the judge cannot see from the
+      // clipboard alone, so this step checks it directly rather than trusting the class
+      // name never drifts from what Markdown.tsx actually draws.
+      const stable = await settledMarkdown(reply, DRAW_MS);
+      const before = state(store).results.filter((r) => r.type === 'copy' && r.ok).length;
+      await click('Copy code button', () => reply.querySelector<HTMLButtonElement>('.t2v-code-copy'));
+      await waitFor('a second copy command to be answered', 10000, () => state(store).results.filter((r) => r.type === 'copy' && r.ok).length > before);
+      const ticked = await settle(DRAW_MS, () => reply.querySelector('.t2v-code-copy svg')?.classList.contains('lucide-check') === true, (v) => v);
+      return [
+        ticked,
+        'clicked the message Copy and the code block\'s Copy code; both answered; the code block button shows the check ' +
+          String(ticked) + '; reply settled before that click: ' + String(stable),
+      ];
     });
 
     // 2. The approval card.
@@ -473,20 +589,42 @@ export async function runAuto(
             warning: root ? root.querySelector('[role="alert"]') : null,
           };
         },
-        (r) => r.actions.join(',') === 'once,always,deny,edit' && !r.warning,
+        // Edit moved into the card's head, before the action row — first in DOM
+        // order now, not last.
+        (r) => r.actions.join(',') === 'edit,once,always,deny' && !r.warning,
       );
-      const ok = card.actions.join(',') === 'once,always,deny,edit' && !card.warning;
-      return [ok, 'buttons ' + card.actions.join(', ') + '; warning ' + JSON.stringify(card.warning ? card.warning.textContent : null)];
+      const ok = card.actions.join(',') === 'edit,once,always,deny' && !card.warning;
+      // The reposition effect: the decision has to be reachable
+      // without scrolling by hand, wherever the card ends up on this viewport.
+      const reach = await settle(DRAW_MS, () => decisionReachable(), (r) => r.ok);
+      return [
+        ok && reach.ok,
+        'buttons ' + card.actions.join(', ') + '; warning ' + JSON.stringify(card.warning ? card.warning.textContent : null) +
+          '; decision reachable: ' + reach.detail,
+      ];
     });
     await step('auto:allow-once', async () => {
       await click('Allow once', () => cardButton('once'));
       const done = await waitFor('the allowed run to end', 30000, () => runEnded(state(store)));
       const stepUsed = !!done.steps && done.steps[0]!.status === 'used';
       const used = await settle(DRAW_MS, () => !!document.querySelector('.t2v-msg-assistant .t2v-tool[data-state="used"]'), (v) => v);
+      // TS wraps every tool run, including a lone call, in its
+      // own group — "1 tool call" here, not a bare row.
+      const grouped = await settle(
+        DRAW_MS,
+        () => {
+          const root = document.querySelector('.t2v-msg-assistant .aui-tool-group-root');
+          const trigger = root ? root.querySelector('.aui-tool-group-trigger') : null;
+          return { present: !!root, label: trigger ? (trigger.textContent || '').trim() : null };
+        },
+        (r) => r.present && r.label === '1 tool call',
+      );
+      const groupOk = grouped.present && grouped.label === '1 tool call';
       return [
-        stepUsed && used,
+        stepUsed && used && groupOk,
         'step ' + String(done.steps && done.steps[0]!.status) + '; USED row ' + String(used) +
-          (used ? '' : ' (no .t2v-tool[data-state="used"] after ' + String(DRAW_MS) + ' ms)'),
+          (used ? '' : ' (no .t2v-tool[data-state="used"] after ' + String(DRAW_MS) + ' ms)') +
+          '; tool group ' + String(grouped.present) + ' labelled ' + JSON.stringify(grouped.label),
       ];
     });
     await step('auto:deny', async () => {
@@ -494,7 +632,7 @@ export async function runAuto(
       await click('Deny', () => cardButton('deny'));
       const reason = await waitFor('the reason field', 3000, () => {
         const card = document.querySelector('.t2v-approval');
-        return card ? (fieldIn(card, 'Reason for denying (optional, sent to the assistant)') as HTMLTextAreaElement | null) : null;
+        return card ? (fieldIn(card, 'Reason (optional, sent to the assistant)') as HTMLTextAreaElement | null) : null;
       });
       typeInto(reason, 'Wrong volume');
       await click('Confirm deny', () => cardButton('confirm-deny'));
@@ -582,23 +720,23 @@ export async function runAuto(
 
     // 5. Settings and Account open, render and refuse sensibly (no account behind
     //    FakeController). Signed out, Settings hides the model picker and the whole
-    //    skills section behind one hint line and keeps only the text size, which is a
-    //    local preference — so that, not a disabled picker, is what "it renders" means
-    //    here; the size itself still needs an account, and the page says so.
+    //    skills section behind an Assistant-section guest card and keeps only the text
+    //    size, which is a local preference — so that, not a disabled picker, is what "it
+    //    renders" means here; the size itself still needs an account, and the page says
+    //    so. Text size is a segmented button group now, not a <select> — it was
+    //    the guest's own only <select> before, so the count this settles on drops to 0.
     await step('auto:views', async () => {
       await click('Settings', () => buttonNamed('Settings'));
       const settings = await waitFor('the Settings view', 4000, () => document.querySelector('.t2v-settings'));
       const shape = await settle(
         DRAW_MS,
         () => ({
-          hinted: Array.from(settings.querySelectorAll('.t2v-hint')).some((p) => (p.textContent || '').indexOf('Sign in to choose a model and skills') !== -1),
+          hinted: Array.from(settings.querySelectorAll('.t2v-guest-card p')).some((p) => (p.textContent || '').indexOf('Sign in to choose a model') !== -1),
           selects: settings.querySelectorAll('select').length,
         }),
-        (r) => r.hinted && r.selects === 1,
+        (r) => r.hinted && r.selects === 0,
       );
-      const size = await waitFor('the Text size select', 3000, () => fieldIn(settings, 'Text size') as HTMLSelectElement | null);
-      size.value = 'large';
-      size.dispatchEvent(new Event('change', { bubbles: true }));
+      await click('Text size: Large', () => buttonNamed('Large', settings));
       // The refusal is read from the Settings view's OWN notice line, not from whichever
       // `.t2v-notice` the document happens to hold first — the hidden thread has one too.
       const notice = await waitFor('the refusal notice in Settings', 15000, () => settings.querySelector('.t2v-notice .t2v-notice-text'));
@@ -621,7 +759,7 @@ export async function runAuto(
       await click('Dismiss (the notice)', () => buttonInside('.t2v-notice', 'Dismiss'));
       await waitFor('the notice to go', 4000, () => !document.querySelector('.t2v-notice'));
 
-      const ok = shape.hinted && shape.selects === 1 && noticeText.indexOf('not connected') !== -1 && errorText.indexOf('not connected') !== -1;
+      const ok = shape.hinted && shape.selects === 0 && noticeText.indexOf('not connected') !== -1 && errorText.indexOf('not connected') !== -1;
       return [
         ok,
         'signed out: ' + String(shape.selects) + ' select(s), sign-in hint ' + String(shape.hinted) + '; text size refused with ' + JSON.stringify(noticeText) + '; sign-in says ' + JSON.stringify(errorText),

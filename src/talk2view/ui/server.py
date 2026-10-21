@@ -51,12 +51,13 @@ import threading
 from concurrent.futures import ThreadPoolExecutor
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from typing import TYPE_CHECKING, Any, Callable, Iterable, Optional, Set, Tuple, Union
+from typing import TYPE_CHECKING, Any, Callable, Iterable, Optional, Sequence, Set, Tuple, Union
 
 from ..constants import ATTACHMENT_TYPES_LABEL, is_allowed_attachment_type
 from ..errors import T2VError
 from ..types import Attachment
 from .app_state import _SIGNED_OUT, AppState, _identity
+from .dictation import Dictation
 from .host import HostAdapter, Theme
 from .hub import MAX_CLIENTS, EventHub, TooManyClientsError
 from .multipart import MultipartError, parse_upload
@@ -64,6 +65,7 @@ from .options import ChatOptions
 from .router import QUEUE_FULL, CommandRouter, ControllerLike, UploadRegistry, _can_own
 from .security import CSP, HEALTH_PATH, SECURITY_HEADERS, check_request, new_token, request_path
 from .static import content_type_for, require_static_dir, resolve_static
+from .threads import ThreadsState
 from .wire import _LONE_SURROGATE, Command, CommandError, http_error, parse_command
 
 if TYPE_CHECKING:
@@ -526,6 +528,21 @@ class UIServer:
     before the platform catalogue is read: a host rescans its skill folders there (it must
     not block on the host's main thread). Raises ``StaticAssetsMissingError`` when the
     page is not built.
+
+    ``skills_dir``, given with ``features.skills`` on (the default), gives the account's
+    ``T2VSkills`` a writable ``FolderSkillStore`` there (``use_store``), so the page's
+    Skills view can save, delete, restore, customize and import; ``bundled_skill_dirs`` are
+    read-only folders shipped with the host, layered under it. ``on_skills_list`` defaults
+    to that store's ``rescan`` when left unset. ``on_pick_skill_import`` shows the host's
+    file picker for ``skillImport`` and runs on the host's main thread (``host.post``); the
+    router thread waits for it, at most ``router.PICKER_WAIT_S``. Without ``skills_dir``
+    every skills-writing command ends in ``skills_unavailable``. ``capabilities.skillImport``
+    is true only once both are true: a picker was given, and the store was actually wired
+    up (``skills_dir`` given, an account behind ``controller``, and ``features.skills`` on).
+    Whenever the store is wired up, the account also gets the ``save_skill`` client tool
+    (``talk2view.skill_tool``): the assistant proposes a skill, and every call still needs
+    the end-user's own Save (``permission=True``) before anything is written -- and can
+    never become a silent "always" later (``allow_always=False``).
     """
 
     def __init__(
@@ -541,6 +558,9 @@ class UIServer:
         max_clients: int = MAX_CLIENTS,
         on_skills_list: Optional[Callable[[], None]] = None,
         options: Optional[ChatOptions] = None,
+        skills_dir: Optional[Union[str, "os.PathLike[str]"]] = None,
+        bundled_skill_dirs: Sequence[Union[str, "os.PathLike[str]"]] = (),
+        on_pick_skill_import: Optional[Callable[[], Optional[str]]] = None,
     ) -> None:
         if app is not None and options is not None:
             raise ValueError("give the options to your AppState: AppState(..., options=...)")
@@ -564,15 +584,85 @@ class UIServer:
         self._static_dir = str(require_static_dir(static_dir))
         self._controller = controller
         self._host = host
-        self._app = app if app is not None else AppState(account, host, options=options)
+        try:
+            # Host code, once, before any lock -- on whatever thread builds this server
+            # (HostAdapter.audio()'s docstring: it must be cheap).
+            capture = host.audio()
+        except Exception:
+            logger.exception("host.audio() raised; dictation stays unavailable")
+            capture = None
+        self._capture = capture
+        # The features that will actually govern this server: the given `app`'s own
+        # options when there is one (it owns them), else `options` (or the defaults) --
+        # known before the default AppState is built, so `capabilities.skillImport` can be
+        # gated correctly (a store actually wired up, not just a picker handed in) from
+        # the very first seed, not only after a later capabilities refresh.
+        active_features = (
+            app.options.features if app is not None
+            else (options.features if options is not None else ChatOptions().features)
+        )
+        store_wired = skills_dir is not None and account is not None and active_features.skills
+        skill_import = on_pick_skill_import if store_wired else None
+        self._app = (
+            app if app is not None
+            else AppState(
+                account, host, options=options, audio=capture is not None,
+                skill_import=skill_import is not None,
+            )
+        )
+        if store_wired and skills_dir is not None and account is not None:
+            from ..skill_store import FolderSkillStore
+
+            account.skills.use_store(FolderSkillStore(skills_dir), bundled=bundled_skill_dirs)
+            if on_skills_list is None:
+                on_skills_list = account.skills.rescan
+
+            from ..skill_tool import SAVE_SKILL_SCHEMA, save_skill_handler
+
+            # A saved skill is standing instructions, so every call needs the end-user's
+            # explicit Save: permission=True, and allow_always=False so an "always"
+            # answer can never turn into a silent, cardless save later (there is no
+            # "always allow" for this tool at all). Only reached when a store is actually
+            # wired up (see `store_wired`), so a headless controller with no UIServer --
+            # and no writable store -- never gets this tool at all.
+            account.tools.add_builtin(
+                SAVE_SKILL_SCHEMA,
+                save_skill_handler(account.skills),
+                permission=True,
+                allow_always=False,
+                # The card's settled line says "Saved skill 'x'" or "Not saved" from the
+                # handler's own sentence, so it is recorded on the call's step.
+                result_on_step=True,
+            )
+        self._skill_import = skill_import
+        self._dictation = (
+            Dictation(self._capture, account, allow_anonymous=self._app.options.allow_anonymous)
+            if self._capture is not None and self._app.options.features.dictation
+            else None
+        )
         self._requested_port = port
         self._max_upload_bytes = max_upload_bytes
         self._heartbeat_s = heartbeat_s
         self._token = new_token()
         self._hub = EventHub(max_clients=max_clients)
         self._uploads = UploadRegistry()
+        # The thread list, when the integrator left it on and the controller can exchange
+        # a conversation and report identity changes (an older host controller may not).
+        self._threads: Optional[ThreadsState] = None
+        if self._app.options.features.thread_list and all(
+            callable(getattr(controller, name, None))
+            for name in ("exchange_conversation", "follow_identity")
+        ):
+            self._threads = ThreadsState(controller, account)
         self._router = CommandRouter(
-            controller, self._app, host, self._uploads, on_skills_list=on_skills_list
+            controller,
+            self._app,
+            host,
+            self._uploads,
+            on_skills_list=on_skills_list,
+            threads=self._threads,
+            dictation=self._dictation,
+            on_pick_skill_import=self._skill_import,
         )
         self._upload_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="t2v-ui-upload")
         self._lock = threading.Lock()  # guards the fields below
@@ -583,6 +673,10 @@ class UIServer:
         self._thread: Optional[threading.Thread] = None
         self._unsubscribe: Optional[Callable[[], None]] = None
         self._streams: Set[socket.socket] = set()
+        # True only once ThreadsState.attach() has actually run: closing (and so writing)
+        # an unattached list would risk overwriting real data with an empty bucket, for a
+        # start that never got that far or a stop() before start() ever ran.
+        self._threads_attached = False
 
     # ── Public ──
 
@@ -622,6 +716,13 @@ class UIServer:
             self._router.start()
             self._hub.set_resync_handler(lambda: self._router.submit_job(self._rebase))
             self._app.attach(self._hub, self._controller)
+            if self._dictation is not None:
+                self._dictation.attach(self._hub)
+            if self._threads is not None:
+                # Before join(): attach() may restore a stored conversation, and the hub's
+                # mirror must be based on the controller's snapshot after it.
+                self._threads.attach(self._hub)
+                self._threads_attached = True
             unsubscribe = self._hub.join(self._controller)
             thread.start()
         except BaseException:
@@ -643,10 +744,17 @@ class UIServer:
 
     def _undo_start(self, httpd: _Server, unsubscribe: Optional[Callable[[], None]]) -> None:
         """Undo a start that did not finish. Every step is safe to repeat: a racing
-        ``stop()`` may have done some of them already."""
+        ``stop()`` may have done some of them already. Closing an unattached
+        ``ThreadsState`` would write an empty list and risk overwriting real data, so it is
+        only closed once ``self._threads_attached`` says ``attach()`` actually ran."""
         self._port = 0
         if unsubscribe is not None:
             unsubscribe()
+        if self._threads_attached and self._threads is not None:
+            self._threads.close()
+            self._threads_attached = False
+        if self._dictation is not None:
+            self._dictation.close()
         self._router.stop()
         self._app.detach()
         httpd.server_close()
@@ -681,7 +789,12 @@ class UIServer:
             httpd.server_close()
         if self._unsubscribe is not None:
             self._unsubscribe()
+        if self._threads_attached and self._threads is not None:
+            self._threads.close()
+            self._threads_attached = False
         self._router.stop(timeout)
+        if self._dictation is not None:
+            self._dictation.close()
         self._app.detach(timeout)
         self._upload_pool.shutdown(wait=False)
         if thread is not None:

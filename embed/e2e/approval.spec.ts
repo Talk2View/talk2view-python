@@ -38,11 +38,11 @@ test.describe('the approval card (client tool, FakeController)', () => {
     await page.goto(backend.url);
     await sendMessage(page, '/approve load it');
     const card = page.locator('.t2v-approval');
-    await expect(card).toContainText('The assistant wants to run load_sample_data');
+    await expect(card).toContainText('Run load_sample_data');
     await expect(card).toContainText('Load the MRHead sample volume into the scene?');
     await expect(card.locator('pre')).toContainText('"name": "MRHead"');
     await expect(card.getByRole('alert')).toHaveCount(0);
-    await expect(card.getByRole('button')).toHaveText(['Allow once', 'Always allow', 'Deny', 'Edit arguments']);
+    await expect(card.getByRole('button')).toHaveText(['Edit', 'Allow once', 'Always allow', 'Deny']);
     // Stop is offered while the card waits: a turn waiting on an approval is running.
     await expect(page.getByRole('button', { name: 'Stop' })).toBeVisible();
   });
@@ -60,7 +60,7 @@ test.describe('the approval card (client tool, FakeController)', () => {
     await page.goto(backend.url);
     await sendMessage(page, '/approve load it');
     await page.getByRole('button', { name: 'Deny' }).click();
-    await page.getByLabel('Reason for denying (optional, sent to the assistant)').fill('Wrong volume');
+    await page.getByLabel('Reason (optional, sent to the assistant)').fill('Wrong volume');
     await page.getByRole('button', { name: 'Confirm deny' }).click();
     const step = lastReply(page).locator('.t2v-tool[data-state="denied"]');
     await expect(step).toContainText('Denied load_sample_data');
@@ -86,7 +86,7 @@ test.describe('the approval card (client tool, FakeController)', () => {
     const editor = page.getByLabel('Arguments (JSON)');
     await editor.fill('{"name": "CTChest"}');
     await expect(page.getByRole('button', { name: 'Always allow' })).toBeDisabled();
-    await expect(page.getByText('Your changes apply to this call only')).toBeVisible();
+    await expect(page.getByText('Edits apply to this call only')).toBeVisible();
     await editor.fill('{"name": ');
     await expect(page.getByText('Not valid JSON — fix it or deny.')).toBeVisible();
     await expect(page.getByRole('button', { name: 'Allow once' })).toBeDisabled();
@@ -120,10 +120,10 @@ test.describe('the approval card (client tool, FakeController)', () => {
 /**
  * What "Always allow" owes the end-user: the decision is answered once and the turn goes
  * on. Whether the NEXT call is skipped is the host's to honour — `FakeController` records
- * `alwaysAllowedTools` and asks again anyway, and Talk2Slicer's host answers every
+ * `alwaysAllowedTools` and asks again anyway, and the 3D Slicer extension's host answers every
  * `always` as `once` — so the proof that the page stored it is the runtime guard's
- * `auto:always-allow` step, which reads `alwaysAllowedTools` off the page state. See the
- * spec follow-ups: the wire needs a flag for a host that will not remember, and the fake
+ * `auto:always-allow` step, which reads `alwaysAllowedTools` off the page state. Still
+ * open: the wire needs a flag for a host that will not remember, and the fake
  * should honour its own list.
  */
 test.describe('Always allow', () => {
@@ -150,12 +150,12 @@ test.describe('a destructive tool', () => {
     await sendMessage(page, '/approve load it');
     const card = page.locator('.t2v-approval');
     await expect(card.getByRole('alert')).toHaveText('This will modify your work: Loading sample data. Review before approving.');
-    await expect(card.getByRole('button')).toHaveText(['Allow once', 'Deny', 'Edit arguments']);
+    await expect(card.getByRole('button')).toHaveText(['Edit', 'Allow once', 'Deny']);
     await expect(page.getByRole('button', { name: 'Always allow' })).toHaveCount(0);
     // Editing arguments says nothing about a button that is not there.
     await page.getByRole('button', { name: 'Edit arguments' }).click();
     await page.getByLabel('Arguments (JSON)').fill('{"name": "CTChest"}');
-    await expect(page.getByText('Your changes apply to this call only')).toHaveCount(0);
+    await expect(page.getByText('Edits apply to this call only')).toHaveCount(0);
     // Allow once still runs it, and the next call asks again (nothing was remembered).
     await page.getByRole('button', { name: 'Allow once' }).click();
     await expect(lastReply(page).locator('.t2v-tool[data-state="used"]')).toContainText('Used load_sample_data');
@@ -189,7 +189,7 @@ test.describe('an engine approval (real Talk2View + ChatController)', () => {
     await expect(page.getByRole('heading', { name: 'Ask about your scene' })).toBeVisible();
     await sendMessage(page, 'email the results');
     const card = page.locator('.t2v-approval[data-kind="engine"]');
-    await expect(card).toContainText('The assistant wants to run gmail_send_email');
+    await expect(card).toContainText('Run gmail_send_email');
     await expect(card).toContainText('Send an email to alex@example.com');
     await expect(card.locator('dt')).toHaveText(['To', 'Subject']);
     await expect(card.locator('dd')).toHaveText(['alex@example.com', 'Scan results']);
@@ -242,7 +242,7 @@ test.describe('an engine approval (real Talk2View + ChatController)', () => {
     const card = page.locator('.t2v-approval[data-kind="engine"]');
     await expect(card).toBeVisible();
     await card.getByRole('button', { name: 'Deny' }).click();
-    await expect(page.getByLabel('Reason for denying (optional, sent to the assistant)')).toHaveCount(0);
+    await expect(page.getByLabel('Reason (optional, sent to the assistant)')).toHaveCount(0);
     await expect(page.getByRole('button', { name: 'Confirm deny' })).toHaveCount(0);
     await expect(page.locator('.t2v-approval')).toHaveCount(0);
   });
@@ -286,7 +286,7 @@ test.describe('reading the wire, not just the screen', () => {
     const sent = captureApprovals(page);
     await sendMessage(page, '/approve load it');
     await page.getByRole('button', { name: 'Deny' }).click();
-    await page.getByLabel('Reason for denying (optional, sent to the assistant)').fill('  wrong volume  ');
+    await page.getByLabel('Reason (optional, sent to the assistant)').fill('  wrong volume  ');
     await page.getByRole('button', { name: 'Confirm deny' }).click();
     await expect(page.locator('.t2v-approval')).toHaveCount(0);
     expect(sent[0]?.feedback).toBe('wrong volume');
@@ -297,7 +297,7 @@ test.describe('reading the wire, not just the screen', () => {
     const sent = captureApprovals(page);
     await sendMessage(page, '/approve load it');
     await page.getByRole('button', { name: 'Deny' }).click();
-    await page.getByLabel('Reason for denying (optional, sent to the assistant)').fill('   ');
+    await page.getByLabel('Reason (optional, sent to the assistant)').fill('   ');
     await page.getByRole('button', { name: 'Confirm deny' }).click();
     await expect(page.locator('.t2v-approval')).toHaveCount(0);
     expect(sent[0]).not.toHaveProperty('feedback');
@@ -308,7 +308,7 @@ test.describe('reading the wire, not just the screen', () => {
     const sent = captureApprovals(page);
     await sendMessage(page, '/approve load it');
     await page.getByRole('button', { name: 'Deny' }).click();
-    await page.getByLabel('Reason for denying (optional, sent to the assistant)').fill('wrong volume');
+    await page.getByLabel('Reason (optional, sent to the assistant)').fill('wrong volume');
     await page.getByRole('button', { name: 'Back' }).click();
     await page.getByRole('button', { name: 'Allow once' }).click();
     await expect(page.locator('.t2v-approval')).toHaveCount(0);
@@ -322,11 +322,11 @@ test.describe('reading the wire, not just the screen', () => {
     await page.getByRole('button', { name: 'Deny' }).click();
     // wire.py caps `feedback` at 10,000 characters: a genuine server-side 400 refusal,
     // with no change to any read-only file.
-    await page.getByLabel('Reason for denying (optional, sent to the assistant)').fill('x'.repeat(10001));
+    await page.getByLabel('Reason (optional, sent to the assistant)').fill('x'.repeat(10001));
     await page.getByRole('button', { name: 'Confirm deny' }).click();
     await expect(page.getByRole('button', { name: 'Confirm deny' })).toBeEnabled();
     await expect(page.getByRole('button', { name: 'Back' })).toBeEnabled();
-    await page.getByLabel('Reason for denying (optional, sent to the assistant)').fill('short reason');
+    await page.getByLabel('Reason (optional, sent to the assistant)').fill('short reason');
     await page.getByRole('button', { name: 'Confirm deny' }).click();
     await expect(page.locator('.t2v-approval')).toHaveCount(0);
     await expect(lastReply(page)).toContainText('Understood: nothing was loaded.');
@@ -490,66 +490,158 @@ test.describe('arguments the page cannot faithfully show', () => {
     await expect(card.locator('pre')).toHaveCount(0);
     await expect(card.getByRole('button')).toHaveText(['Deny']);
     await card.getByRole('button', { name: 'Deny' }).click();
-    await page.getByLabel('Reason for denying (optional, sent to the assistant)').fill('cannot review this');
+    await page.getByLabel('Reason (optional, sent to the assistant)').fill('cannot review this');
     await page.getByRole('button', { name: 'Confirm deny' }).click();
     await expect(page.locator('.t2v-approval')).toHaveCount(0);
     expect(sent[0]?.action).toBe('deny');
   });
 });
 
-test.describe('the card does not overflow the viewport', () => {
-  // One send only: a second `sendMessage` right as the composer re-enables races a
-  // PRE-EXISTING (not new) composer timing issue unrelated to approvals — Enter
-  // occasionally inserts a newline instead of submitting in that exact window, reproduced
-  // with a perfectly ordinary second message too. Ticketed separately; a
-  // 400-deep argument is already, on its own, far taller than an 800px viewport (28,000+
-  // px unbounded), so one send is enough to prove the card stays usable.
-  test('a 400-deep argument keeps the tool name and Allow once in view at 480×800', async ({ page, backend }) => {
-    await page.setViewportSize({ width: 480, height: 800 });
-    await page.goto(backend.url);
-    await sendMessage(page, '/deepargs load it');
-    await expect(page.locator('.t2v-approval')).toBeVisible();
-    await expect(page.locator('.t2v-approval-title')).toBeInViewport();
-    await expect(page.getByRole('button', { name: 'Allow once' })).toBeInViewport();
+test.describe('the card fits the visible thread, not the whole browser window', () => {
+  // The thread's genuinely available strip: from the header's bottom to the top of the
+  // sticky composer footer, which paints over anything still scrolled under it. Not
+  // `0..innerHeight` — an element can sit fully inside the browser viewport and still be
+  // covered by the composer, which the previous version of this spec never caught
+  // (measured: Deny once sat at y=349 in a 480-tall window, "inside the
+  // viewport" by that measure while painted over by the composer underneath it).
+  async function visibleStrip(page: Page): Promise<{ top: number; bottom: number }> {
+    const header = (await page.locator('.t2v-chat-header').boundingBox())!;
+    const footer = (await page.locator('.t2v-footer').boundingBox())!;
+    return { top: header.y + header.height, bottom: footer.y };
+  }
+
+  /** The element's own box sits inside the visible strip, AND its centre resolves back to
+   * it (or a descendant) through `elementFromPoint` — not whatever is painted over it. */
+  async function visibleAndUncovered(locator: ReturnType<Page['locator']>, strip: { top: number; bottom: number }): Promise<void> {
+    const box = await locator.boundingBox();
+    expect(box, 'element has no box (not rendered?)').not.toBeNull();
+    expect(box!.y, 'top is above the visible strip (under the header)').toBeGreaterThanOrEqual(strip.top - 0.5);
+    expect(box!.y + box!.height, 'bottom is below the visible strip (under the composer)').toBeLessThanOrEqual(strip.bottom + 0.5);
+    const centre = { x: box!.x + box!.width / 2, y: box!.y + box!.height / 2 };
+    const uncovered = await locator.evaluate(
+      (el, { x, y }) => {
+        const hit = document.elementFromPoint(x, y);
+        return hit !== null && (el === hit || el.contains(hit) || hit.contains(el));
+      },
+      centre,
+    );
+    expect(uncovered, 'painted over at its own centre point').toBe(true);
+  }
+
+  for (const [w, h] of [
+    [420, 700],
+    [480, 800],
+  ] as const) {
+    test.describe(`${w}x${h}: everything fits, with no scrolling`, () => {
+      test.use({ backendArgs: ['--destructive-tool'] });
+
+      for (const [name, trigger] of [
+        ['a 400-deep argument', '/deepargs load it'],
+        ['a 1 MB string argument', '/hugearg load it'],
+      ] as const) {
+        test(`${name}: the title, the destructive warning, the details and the buttons are all visible and uncovered`, async ({
+          page,
+          backend,
+        }) => {
+          await page.setViewportSize({ width: w, height: h });
+          await page.goto(backend.url);
+          await sendMessage(page, trigger);
+          await expect(page.locator('.t2v-approval')).toBeVisible();
+          const strip = await visibleStrip(page);
+          await visibleAndUncovered(page.locator('.t2v-approval-title'), strip);
+          await visibleAndUncovered(page.locator('.t2v-warning').first(), strip);
+          await visibleAndUncovered(page.locator('.t2v-approval-details, .t2v-tool-args').first(), strip);
+          await visibleAndUncovered(page.getByRole('button', { name: 'Allow once' }), strip);
+          await visibleAndUncovered(page.getByRole('button', { name: 'Deny' }), strip);
+        });
+      }
+    });
+  }
+
+  test.describe('320x480: the buttons and a destructive warning stay reachable once the card settles', () => {
+    test.use({ backendArgs: ['--destructive-tool'] });
+
+    for (const [name, trigger] of [
+      ['a 400-deep argument', '/deepargs load it'],
+      ['a 1 MB string argument', '/hugearg load it'],
+    ] as const) {
+      test(`${name}: Allow, Deny and the destructive warning are visible and uncovered`, async ({ page, backend }) => {
+        await page.setViewportSize({ width: 320, height: 480 });
+        await page.goto(backend.url);
+        await sendMessage(page, trigger);
+        await expect(page.locator('.t2v-approval')).toBeVisible();
+        const strip = await visibleStrip(page);
+        await visibleAndUncovered(page.locator('.t2v-warning').first(), strip);
+        await visibleAndUncovered(page.getByRole('button', { name: 'Allow once' }), strip);
+        await visibleAndUncovered(page.getByRole('button', { name: 'Deny' }), strip);
+      });
+    }
+  });
+
+  test.describe('320x480: the buttons stay reachable even with an off-contract tool name', () => {
+    for (const [name, trigger] of [
+      ['a 400-deep argument', '/deepargs load it'],
+      ['a 1 MB string argument', '/hugearg load it'],
+      ['a 300-character tool name', '/longname load it'],
+    ] as const) {
+      test(`${name}: Allow and Deny are visible and uncovered; the title stays reachable by scrolling the thread`, async ({
+        page,
+        backend,
+      }) => {
+        await page.setViewportSize({ width: 320, height: 480 });
+        await page.goto(backend.url);
+        await sendMessage(page, trigger);
+        await expect(page.locator('.t2v-approval')).toBeVisible();
+        const strip = await visibleStrip(page);
+        await visibleAndUncovered(page.getByRole('button', { name: 'Allow once' }), strip);
+        await visibleAndUncovered(page.getByRole('button', { name: 'Deny' }), strip);
+        // "Reachable": the title may be scrolled off above the header (the action row
+        // took priority), but scrolling the thread itself back up brings it into view —
+        // it is not lost, only out of the immediately visible strip.
+        await page.locator('.t2v-viewport').evaluate((el) => {
+          el.scrollTop = 0;
+        });
+        await expect(page.locator('.t2v-approval-title')).toBeVisible();
+      });
+    }
   });
 });
 
-test.describe('the card fits a small 320×480 viewport too', () => {
-  // A 480×800 window has room for a fixed 220px pre to still leave the tool name and
-  // buttons visible; a 320×480 one does not — the review measured a 472-490px card
-  // against 439px actually available (a 480px window minus the header and composer
-  // chrome), which puts the title under the header. `max-height: 30vh` in place of a
-  // fixed pixel bound is what these three specs are proving.
-  //
-  // `toBeInViewport()` defaults to "any part visible" (ratio 0), which a card whose top
-  // is scrolled to the very top of the thread can satisfy by a single pixel while its
-  // buttons still spill off the bottom. These check the element's own box is ENTIRELY
-  // within the browser viewport — top at or below 0, bottom at or above the window's
-  // height — which is what "the tool name and buttons are both inside the viewport"
-  // actually means.
-  async function fullyInViewport(locator: ReturnType<Page['locator']>, viewport: { height: number }): Promise<void> {
-    const box = await locator.boundingBox();
-    expect(box, 'element has no box (not rendered?)').not.toBeNull();
-    expect(box!.y, 'top is above the viewport').toBeGreaterThanOrEqual(-0.5);
-    expect(box!.y + box!.height, 'bottom is below the viewport').toBeLessThanOrEqual(viewport.height + 0.5);
-  }
+test.describe('the approval title is bounded, not clamped', () => {
+  // TS clamps neither the title nor the "Always allow" hint (tool-fallback.tsx:225 draws
+  // the full name in a plain <p>); a 2-line clamp hid the tail of ordinary names, on the
+  // string the end-user is approving. A scrolling max-height, the same pattern the card
+  // already uses for the prompt, keeps a hostile name from growing the card without
+  // limit while leaving a real one fully readable.
+  test('a real 36-character name is fully readable at 320 wide, with no internal scroll needed', async ({ page, backend }) => {
+    await page.setViewportSize({ width: 320, height: 480 });
+    await page.goto(backend.url);
+    await sendMessage(page, '/realname load it');
+    const title = page.locator('.t2v-approval-title');
+    await expect(title).toContainText('segment_volume_with_totalsegmentator');
+    // Exactly 0: max-height is calc(3 * 1.625em), a whole
+    // number of lines at the inherited line-height, not a plain 4.5em (2.77 lines, which
+    // cut descenders on this very name's third line and needed a tolerance here).
+    const overflow = await title.evaluate((el) => el.scrollHeight - el.clientHeight);
+    expect(overflow, 'the name needed its own internal scroll to read in full').toBe(0);
+  });
 
-  for (const [name, trigger] of [
-    ['a 400-deep argument', '/deepargs load it'],
-    ['a 1 MB string argument', '/hugearg load it'],
-    ['a 300-character tool name', '/longname load it'],
-  ] as const) {
-    test(`${name} keeps the tool name and Allow once in view at 320×480`, async ({ page, backend }) => {
-      await page.setViewportSize({ width: 320, height: 480 });
-      await page.goto(backend.url);
-      await sendMessage(page, trigger);
-      await expect(page.locator('.t2v-approval')).toBeVisible();
-      const viewport = page.viewportSize();
-      expect(viewport).not.toBeNull();
-      await fullyInViewport(page.locator('.t2v-approval-title'), viewport!);
-      await fullyInViewport(page.getByRole('button', { name: 'Allow once' }), viewport!);
-    });
-  }
+  test('a 300-character tool name stays bounded, not growing the card without limit', async ({ page, backend }) => {
+    await page.setViewportSize({ width: 320, height: 480 });
+    await page.goto(backend.url);
+    await sendMessage(page, '/longname load it');
+    const title = page.locator('.t2v-approval-title');
+    await expect(title).toBeVisible();
+    // calc(3 * 1.625em) at 14px/1.625 = 68.25px (app.css): three whole lines, whatever
+    // the actual text needs beyond that scrolls inside the box instead of pushing the
+    // rest of the card down. 14px, not the 13px this bound was first measured against
+    // (.t2v-approval's own font-size was raised to match TS's text-sm on the card,
+    // which .t2v-approval-title inherits, having none of its own).
+    const box = (await title.boundingBox())!;
+    expect(box.height, 'the title grew past its own bound').toBeLessThanOrEqual(70);
+    const overflow = await title.evaluate((el) => el.scrollHeight - el.clientHeight);
+    expect(overflow, 'a 300-character name should need its own internal scroll').toBeGreaterThan(0);
+  });
 });
 
 test.describe('untrusted text is shown, never a spoof', () => {
@@ -684,7 +776,7 @@ test.describe('focus never leaves the page adrift', () => {
   test('the card is a labelled group', async ({ page, backend }) => {
     await page.goto(backend.url);
     await sendMessage(page, '/approve load it');
-    await expect(page.getByRole('group', { name: /wants to run/ })).toBeVisible();
+    await expect(page.getByRole('group', { name: /^Run / })).toBeVisible();
   });
 
   test('typing in the composer and pressing Enter while a card waits approves nothing', async ({ page, backend }) => {
@@ -719,7 +811,7 @@ test.describe('focus never leaves the page adrift', () => {
     await page.goto(backend.url);
     await sendMessage(page, '/approve load it');
     await page.getByRole('button', { name: 'Deny' }).click();
-    await expect(page.getByLabel('Reason for denying (optional, sent to the assistant)')).toBeFocused();
+    await expect(page.getByLabel('Reason (optional, sent to the assistant)')).toBeFocused();
   });
 
   // Thread never unmounts (App.tsx keeps it alive, hidden, behind
@@ -750,13 +842,13 @@ test.describe('focus never leaves the page adrift', () => {
 });
 
 test.describe('"Always allow" says what it covers', () => {
-  test('names the tool, the app and how long it lasts', async ({ page, backend }) => {
+  test('names the tool and how long it lasts ("Always allow: no more prompts for X in this chat.")', async ({ page, backend }) => {
     await page.goto(backend.url);
     await sendMessage(page, '/approve load it');
     const hint = page.locator('.t2v-approval p.t2v-hint').last();
     await expect(hint).toContainText('load_sample_data');
-    await expect(hint).toContainText('this app');
-    await expect(hint).toContainText('rest of this conversation');
+    await expect(hint).toContainText('no more prompts');
+    await expect(hint).toContainText('in this chat');
   });
 });
 
@@ -766,7 +858,7 @@ test.describe('no "Always allow" hint when there is no such button', () => {
   test('a destructive tool shows no hint about it either', async ({ page, backend }) => {
     await page.goto(backend.url);
     await sendMessage(page, '/approve load it');
-    await expect(page.locator('.t2v-approval').getByText('skips this card for')).toHaveCount(0);
+    await expect(page.locator('.t2v-approval').getByText('no more prompts for')).toHaveCount(0);
   });
 });
 

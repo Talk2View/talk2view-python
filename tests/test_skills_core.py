@@ -723,10 +723,20 @@ class TestStateAndPlatform:
             "registered": [],
             "available": False,
             "needsSessionReset": False,
+            "store": {"writable": False, "canOpenFolder": False},
         }
         skills.add(Skill(name="a", description="d", content="1"))
         assert skills.state()["local"] == [
-            {"name": "a", "description": "d", "enabled": True, "origin": "code", "label": "code"}
+            {
+                "name": "a",
+                "description": "d",
+                "enabled": True,
+                "origin": "code",
+                "label": "code",
+                "editable": False,
+                "hasExtraFiles": False,
+                "problems": [],
+            }
         ]
 
     def test_on_change_receives_the_state_after_every_mutation(self) -> None:

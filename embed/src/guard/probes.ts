@@ -77,9 +77,32 @@ function cssProbes(): Probe[] {
   const out: Probe[] = [];
   const vars = fixture('--t2v-probe:7px;width:var(--t2v-probe);', '');
   const width = getComputedStyle(vars).width;
-  const accent = getComputedStyle(document.documentElement).getPropertyValue('--t2v-accent').trim().toUpperCase();
+  // A literal-valued token (declared directly as a hex, no var()), on purpose: this
+  // half's only claim is that custom properties exist and are read back correctly.
+  const teal = getComputedStyle(document.documentElement).getPropertyValue('--t2v-teal').trim().toUpperCase();
   vars.remove();
-  out.push(pass('css:custom-properties', 'CSS custom properties', width === '7px' && accent === '#26C8B8', 'var() width ' + width + ', --t2v-accent ' + accent));
+  // Every semantic token (`--t2v-primary: var(--t2v-teal)`, and the
+  // same shape for `--t2v-foreground`, `--t2v-muted`, ...) is a TWO-level chain, which
+  // nothing here proved — an older comment on this probe claimed
+  // `resolvedBorderColor()`/`focusRingProbe()` below already covered it (a later change pointed
+  // that helper — then named `resolvedHairlineStrong()`, single-purpose — at
+  // `--t2v-primary` instead of `--t2v-hairline-strong`, which was a literal `rgba()`, not
+  // a `var()` reference, so it never exercised chained substitution either way). `.t2v-send`'s own
+  // `background: var(--t2v-primary)` is a real property on a real, already-mounted
+  // element (the probes run once the thread shows, same as `css:composer-row` below
+  // relies on `.t2v-send` existing) — the shape every semantic token depends on, not a
+  // synthetic fixture.
+  const sendBtn = document.querySelector<HTMLElement>('.t2v-send');
+  const sendBg = sendBtn ? getComputedStyle(sendBtn).backgroundColor : null;
+  const chained = sendBg === 'rgb(38, 200, 184)';
+  out.push(
+    pass(
+      'css:custom-properties',
+      'CSS custom properties',
+      width === '7px' && teal === '#26C8B8' && chained,
+      'var() width ' + width + ', --t2v-teal ' + teal + ', .t2v-send background (--t2v-primary -> --t2v-teal) ' + String(sendBg),
+    ),
+  );
 
   // The layout rule the stylesheet relies on instead of `gap`.
   const flex = fixture(
@@ -101,27 +124,47 @@ function cssProbes(): Probe[] {
   gap.remove();
   out.push(info('css:flex-gap', 'flexbox gap (banned; informational)', gapWorks ? 'supported' : 'NOT supported'));
 
-  const footer = document.querySelector('.t2v-footer');
-  const viewport = document.querySelector('.t2v-viewport');
-  if (footer && viewport) {
-    const position = getComputedStyle(footer).position;
-    const delta = Math.abs(footer.getBoundingClientRect().bottom - viewport.getBoundingClientRect().bottom);
-    out.push(pass('css:sticky', 'position: sticky composer footer', position === 'sticky' && delta <= 1, 'computed ' + position + ', footer-to-viewport bottom delta ' + delta.toFixed(1) + ' px'));
-  } else {
-    out.push(pass('css:sticky', 'position: sticky composer footer', false, '.t2v-footer or .t2v-viewport not found'));
-  }
+  // css:sticky moved to autorun.ts's auto:sticky step: the footer is only
+  // pinned to the viewport's bottom edge (delta <= 1px) once the thread has something to
+  // scroll — the empty state's own centring (t2v-thread-empty) leaves it mid-viewport on
+  // purpose, which this probe would otherwise have read as a FAIL on every guard run.
+
+  // The shimmer text (the running tool row, the tool group's own trigger while
+  // active, "Working…") relies on -webkit-background-clip: text staying transparent-
+  // filled and animating — Chromium 83's own WebKit-era prefix, kept ahead of the
+  // unprefixed background-clip (Chrome 120) the stylesheet also declares as a second,
+  // harmless declaration 83 drops. A synthetic fixture, not a live shimmer: nothing in
+  // the scripted run leaves one showing long enough to read (backend.py's/testing.py's
+  // fake tool calls resolve too fast, and this is the mechanism the shimmer relies on
+  // everywhere it appears, not a claim about any one of them).
+  const shimmer = fixture('', '<span class="t2v-shimmer">shimmer</span>');
+  const shimmerSpan = shimmer.querySelector<HTMLElement>('.t2v-shimmer')!;
+  const shimmerStyle = getComputedStyle(shimmerSpan);
+  const clip = shimmerStyle.getPropertyValue('-webkit-background-clip');
+  const animation = shimmerStyle.animationName;
+  shimmer.remove();
+  out.push(
+    pass(
+      'css:shimmer',
+      'shimmer text: -webkit-background-clip + animation',
+      clip === 'text' && animation === 't2v-shimmer',
+      '-webkit-background-clip ' + clip + ', animation-name ' + animation,
+    ),
+  );
 
   const input = document.querySelector<HTMLTextAreaElement>('.t2v-input');
   const send = document.querySelector<HTMLElement>('.t2v-send');
   if (input && send) {
     const a = input.getBoundingClientRect();
     const b = send.getBoundingClientRect();
-    const sameRow = a.top < b.bottom && b.top < a.bottom;
-    const inside = b.right <= window.innerWidth + 0.5 && a.left >= 0;
-    const ordered = a.right <= b.left + 0.5;
-    out.push(pass('css:composer-row', 'composer: input and button on one row, inside the viewport', sameRow && inside && ordered, 'input ' + String(Math.round(a.width)) + ' px, button right edge ' + String(Math.round(b.right)) + ' of ' + String(window.innerWidth)));
+    // The input is its own full-width row (thread.aui.tsx's composer shell is
+    // flex-col); the send button sits in a separate action row below it, not beside it on
+    // one row as the page's older single-row layout had.
+    const stacked = a.bottom <= b.top + 0.5;
+    const inside = b.right <= window.innerWidth + 0.5 && a.left >= 0 && b.bottom <= window.innerHeight + 0.5;
+    out.push(pass('css:composer-row', 'composer: input above the send button, inside the viewport', stacked && inside, 'input bottom ' + String(Math.round(a.bottom)) + ' px, button top ' + String(Math.round(b.top)) + ' of ' + String(window.innerWidth) + 'x' + String(window.innerHeight)));
   } else {
-    out.push(pass('css:composer-row', 'composer: input and button on one row, inside the viewport', false, '.t2v-input or .t2v-send not found'));
+    out.push(pass('css:composer-row', 'composer: input above the send button, inside the viewport', false, '.t2v-input or .t2v-send not found'));
   }
   return out;
 }
@@ -149,41 +192,66 @@ function waitForWindowFocus(ms: number): Promise<number> {
 }
 
 /**
- * `--t2v-accent` as the browser resolves it, in the same `rgb()` form a computed
- * `outline-color` comes back in. Read from the live page rather than hard-coded: the
+ * A `--t2v-*` colour token as the browser resolves it, in the same `rgb()`/`rgba()` form a
+ * computed `border-color` comes back in. Read from the live page rather than hard-coded: the
  * host's Theme may legitimately repaint the token (`applyTheme`, ui/theme.ts writes each
- * `--t2v-*` inline on <html>), and a fixed hex would then false-FAIL a themed Slicer
- * while proving nothing extra — `css:custom-properties` already pins the value this
- * backend serves. Resolving it through a real element also handles any colour syntax,
- * which parsing the raw token text would not.
+ * `--t2v-*` inline on <html>), and a fixed hex would then false-FAIL a themed Slicer while
+ * proving nothing extra — `css:custom-properties` already pins the value this backend
+ * serves. Resolving it through a real element also handles any colour syntax, which parsing
+ * the raw token text would not. Parameterised (renamed from
+ * `resolvedHairlineStrong()`): `focusRingProbe()` below now reads `--t2v-primary` instead
+ * of `--t2v-hairline-strong` for the focused composer shell's border.
  */
-function resolvedAccent(): string {
-  const el = fixture('color:var(--t2v-accent);', '');
-  const colour = getComputedStyle(el).color;
+function resolvedBorderColor(token: string): string {
+  const el = fixture('border:1px solid var(' + token + ');', '');
+  const colour = getComputedStyle(el).borderTopColor;
   el.remove();
   return colour;
+}
+
+/** Polls `read` until it returns `want`, or gives up after `ms`; the last read either way. */
+async function pollFor(read: () => string, want: string, ms: number): Promise<string> {
+  const start = performance.now();
+  let last = read();
+  while (last !== want && performance.now() - start < ms) {
+    await new Promise((resolve) => window.setTimeout(resolve, 20));
+    last = read();
+  }
+  return last;
 }
 
 // :focus matches only inside a focused window, which can get focus a moment after the page
 // loads, so wait for it, bounded, before measuring the ring.
 //
-// The ring has to be the PAGE's own. Chromium draws a default one on any focused textarea
-// (`auto 1px`, its own accent colour), so "an outline at least 1 px wide" passes even with
-// the stylesheet's `.t2v-input:focus` rule deleted — and the whole point of the probe is
-// that the rule survives Chromium 83, which has no `:focus-visible` to fall back on.
+// The ring is the composer SHELL's border-color, JS-driven (Composer.tsx's onFocus/onBlur
+// set t2v-composer-focused; an earlier change removed the native `.t2v-input:focus`
+// outline this probe used to read, matching the TS chat's own shell-darkens-on-focus design
+// instead of an outline). A later restyle changed what "darkens" means: the unfocused
+// border is hairline-strong ALWAYS now, and focus turns it Teal (--t2v-primary)
+// plus a soft box-shadow ring, not a darker hairline. `border-color` transitions over
+// 0.15s, so this polls rather than reading once right after `.focus()` — a single read can
+// catch it mid-transition.
 async function focusRingProbe(): Promise<Probe> {
   const input = document.querySelector<HTMLTextAreaElement>('.t2v-input');
-  if (!input) return pass('css:focus-ring', 'focus ring visible on the composer', false, '.t2v-input not found');
+  const shell = document.querySelector<HTMLElement>('[data-slot="aui_composer-shell"]');
+  if (!input || !shell) {
+    return pass('css:focus-ring', 'composer shell borders Teal on focus', false, (input ? '' : '.t2v-input') + (shell ? '' : ' [data-slot="aui_composer-shell"]') + ' not found');
+  }
   const waited = await waitForWindowFocus(5000);
   input.focus();
-  const style = getComputedStyle(input);
-  const accent = resolvedAccent();
-  const ring = style.outlineStyle === 'solid' && parseFloat(style.outlineWidth) >= 2 && style.outlineColor === accent;
+  const teal = resolvedBorderColor('--t2v-primary');
+  const borderColor = await pollFor(() => getComputedStyle(shell).borderTopColor, teal, 500);
+  const style = getComputedStyle(shell);
+  const ring = style.borderTopStyle === 'solid' && borderColor === teal;
   return pass(
     'css:focus-ring',
-    'focus ring visible on the composer',
+    // Not "ring": .t2v-input has outline: none, and this is the
+    // JS-driven composer shell's 1px border turning Teal on focus, the same claim the
+    // detail below proves — a reader of the guard report should not be misled into
+    // expecting an actual outline.
+    'composer shell borders Teal on focus',
     ring,
-    style.outlineStyle + ' ' + style.outlineWidth + ' ' + style.outlineColor + ' (the page draws solid 2px ' + accent +
+    style.borderTopStyle + ' ' + style.borderTopWidth + ' ' + borderColor + ' (the page draws solid 1px ' + teal +
       '); document.hasFocus ' + String(document.hasFocus()) + ' after ' + String(waited) + ' ms',
   );
 }
@@ -291,7 +359,7 @@ export async function runProbes(store: PageStore): Promise<Probe[]> {
   const out: Probe[] = [];
   out.push(...(await group(['ua', 'chromium', 'secure-context', 'weakref', 'heap-api', 'hand-rolled'], () => infoProbes())));
   out.push(...(await group(API_PROBES.map((p) => 'api:' + p.name), () => apiProbes())));
-  out.push(...(await group(['css:custom-properties', 'css:flex-margins', 'css:flex-gap', 'css:sticky', 'css:composer-row'], () => cssProbes())));
+  out.push(...(await group(['css:custom-properties', 'css:flex-margins', 'css:flex-gap', 'css:shimmer', 'css:composer-row'], () => cssProbes())));
   out.push(...(await group(['css:focus-ring'], async () => [await focusRingProbe()])));
   out.push(...(await group(['storage'], () => [storageProbe()])));
   out.push(...(await group(['policy:always-allow'], () => [alwaysAllowPolicyProbe()])));

@@ -15,11 +15,13 @@ def test_the_ui_package_exports() -> None:
         "ChatFeatures",
         "ChatOptions",
         "ChatWelcome",
+        "Dictation",
         "ToolPresentation",
         "GenericHost",
         "HostAdapter",
         "StaticAssetsMissingError",
         "Theme",
+        "ThreadsState",
         "UIServer",
     }
     for name in ui.__all__:
