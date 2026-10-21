@@ -1,0 +1,480 @@
+{
+  "version": 1,
+  "about": "Searches of one corpus (spec §7.2). The corpus: `conversations` ({id, title?, summary_title?, summary_text?, incognito?}); `rounds` ({conversation_id, idx, user_text, assistant_text, at}, recorded in this order, idx counting from 1 in each conversation, whose last_active_at is its latest round's `at`); and `facts` ({id, text, topic, recorded_at, valid_until?, conversation_id?, superseded_by?}, superseded when superseded_by is set). A field left out is null. Some text is written decomposed (NFD) or with Arabic harakat on purpose. Each case gives `query` and, optionally, `from_date` and `to_date` (YYYY-MM-DD, both included), `limit` (8 when left out), `timezone` and `exclude_conversation`. `expect` is the hits of search(...) with them, best first, a fact by its id and a round as r:<conversation_id>:<idx>; `expect_results`, where given, is the search_memory result's `results` for the same hits: {date, conversation, kind, text}, where conversation is the title of the hit's conversation, else its summary's title, else \"\". A case without `timezone` runs in UTC; with one, each day (the date window's and each hit's date) is a day in that IANA zone. Facts and rounds are ranked apart, each by FTS5's bm25 (k1 1.2, b 0.75, an IDF at or under 0 counting as 1e-6) over normalise_for_index text, then fused by reciprocal rank fusion (k 60); a tie, within a list or in fusion, goes to the newer. Orders are pinned only where scores are far apart or tie exactly. Superseded facts count only when nothing else matches. Excerpts are cut in code points: 600 around the first match, an ellipsis (U+2026) at each cut end, and after a cut start the label of the side it starts in. Python's MemoryStore.search replays every case on each backend (talk2view-python, tests/test_contract_memory.py).",
+  "corpus": {
+    "conversations": [
+      {
+        "id": "c1",
+        "title": "Hanoi trip"
+      },
+      {
+        "id": "c2",
+        "title": "Tokyo plans"
+      },
+      {
+        "id": "c3",
+        "title": "Coding"
+      },
+      {
+        "id": "c4",
+        "title": "Korean class"
+      },
+      {
+        "id": "c5",
+        "title": "Arabic lessons"
+      },
+      {
+        "id": "c6",
+        "title": "Music"
+      },
+      {
+        "id": "c7",
+        "title": "Quilting circle"
+      },
+      {
+        "id": "c8",
+        "title": "County fair"
+      },
+      {
+        "id": "c9",
+        "title": "Running"
+      },
+      {
+        "id": "c10",
+        "title": "Dentist"
+      },
+      {
+        "id": "c11",
+        "title": "Glacier hike"
+      }
+    ],
+    "rounds": [
+      {
+        "conversation_id": "c1",
+        "idx": 1,
+        "user_text": "Tôi uống cà phê sữa đá mỗi sáng.",
+        "assistant_text": "Ngon!",
+        "at": "2026-10-06T09:00:00Z"
+      },
+      {
+        "conversation_id": "c2",
+        "idx": 1,
+        "user_text": "我想去东京旅行。",
+        "assistant_text": "好的。",
+        "at": "2026-10-09T09:00:00Z"
+      },
+      {
+        "conversation_id": "c3",
+        "idx": 1,
+        "user_text": "我用Python写代码。",
+        "assistant_text": "加油！",
+        "at": "2026-10-10T09:00:00Z"
+      },
+      {
+        "conversation_id": "c3",
+        "idx": 2,
+        "user_text": "我在京东买了书。",
+        "assistant_text": "好的。",
+        "at": "2026-10-11T09:00:00Z"
+      },
+      {
+        "conversation_id": "c4",
+        "idx": 1,
+        "user_text": "다음 주에 도쿄에 가요.",
+        "assistant_text": "좋아요!",
+        "at": "2026-10-12T09:00:00Z"
+      },
+      {
+        "conversation_id": "c5",
+        "idx": 1,
+        "user_text": "كتب الطالب الدرس.",
+        "assistant_text": "ممتاز.",
+        "at": "2026-10-13T09:00:00Z"
+      },
+      {
+        "conversation_id": "c6",
+        "idx": 1,
+        "user_text": "My harp needs new strings.",
+        "assistant_text": "Try a music shop in town.",
+        "at": "2026-10-09T09:00:00Z"
+      },
+      {
+        "conversation_id": "c7",
+        "idx": 1,
+        "user_text": "I joined a quilting circle.",
+        "assistant_text": "Lovely.",
+        "at": "2026-10-10T10:00:00Z"
+      },
+      {
+        "conversation_id": "c8",
+        "idx": 1,
+        "user_text": "The quilting project is done.",
+        "assistant_text": "Well done!",
+        "at": "2026-10-11T10:00:00Z"
+      },
+      {
+        "conversation_id": "c9",
+        "idx": 1,
+        "user_text": "Talked about the marathon route, the weather forecast, the water stations along the course and where the family would stand to cheer.",
+        "assistant_text": "Sounds like a big day for everyone.",
+        "at": "2026-10-13T09:00:00Z"
+      },
+      {
+        "conversation_id": "c9",
+        "idx": 2,
+        "user_text": "Watched a marathon on TV.",
+        "assistant_text": "Fun.",
+        "at": "2026-10-14T09:00:00Z"
+      },
+      {
+        "conversation_id": "c9",
+        "idx": 3,
+        "user_text": "Marathon training starts Monday.",
+        "assistant_text": "Good luck with the training!",
+        "at": "2026-10-16T09:00:00Z"
+      },
+      {
+        "conversation_id": "c10",
+        "idx": 1,
+        "user_text": "The dentist moved my appointment.",
+        "assistant_text": "Noted.",
+        "at": "2026-10-12T09:00:00Z"
+      },
+      {
+        "conversation_id": "c11",
+        "idx": 1,
+        "user_text": "Give me a packing list for the glacier hike.",
+        "assistant_text": "Here is a packing list for the glacier hike, roughly in the order you will need things. Start with layers: a thin merino base layer, a warm fleece, a light down jacket and a waterproof shell with a hood. Pack waterproof trousers, two pairs of wool socks and a spare pair in a dry bag. Wear stiff leather boots that are already broken in, and bring gaiters to keep snow out of them. For your hands, bring thin liner gloves and thick insulated mittens. Protect your eyes with glacier glasses and your skin with sunscreen and lip balm, because the light off the ice is strong. Bring a headlamp with fresh batteries, a paper map, a compass and a fully charged phone. Take two litres of water and plenty of snacks, such as nuts, dried fruit and chocolate. The guide will lend you a harness and a helmet, but bring your own crampons if they fit your boots, and practise putting them on at home first. Finally, pack a small first aid kit, blister plasters, a whistle and a foil blanket. Leave a note of your route and your expected return time with someone at the hut, and check the weather forecast the evening before you set off. If the forecast looks poor, the guide may move the hike to another day, so keep the following morning free as well. Bring some money for the hut, a book for the evening and earplugs, since the bunk rooms are shared.",
+        "at": "2026-10-18T09:00:00Z"
+      }
+    ],
+    "facts": [
+      {
+        "id": "f1",
+        "text": "Plays the violin on Sundays.",
+        "topic": "preferences",
+        "recorded_at": "2026-10-01T09:00:00Z"
+      },
+      {
+        "id": "f2",
+        "text": "Took a photography class.",
+        "topic": "preferences",
+        "recorded_at": "2026-10-02T09:00:00Z"
+      },
+      {
+        "id": "f3",
+        "text": "Printed the holiday photos from the trip to Spain.",
+        "topic": "ongoing",
+        "recorded_at": "2026-10-03T09:00:00Z"
+      },
+      {
+        "id": "f4",
+        "text": "Bought a telephoto lens.",
+        "topic": "ongoing",
+        "recorded_at": "2026-10-04T09:00:00Z"
+      },
+      {
+        "id": "f5",
+        "text": "Plays the cello in a quartet.",
+        "topic": "preferences",
+        "recorded_at": "2026-10-05T09:00:00Z"
+      },
+      {
+        "id": "f6",
+        "text": "Lives near the river.",
+        "topic": "identity",
+        "recorded_at": "2026-10-06T09:00:00Z"
+      },
+      {
+        "id": "f7",
+        "text": "Works at Brightwave Studios.",
+        "topic": "work",
+        "recorded_at": "2026-09-01T09:00:00Z",
+        "superseded_by": "f8"
+      },
+      {
+        "id": "f8",
+        "text": "Works at Fernhill Labs.",
+        "topic": "work",
+        "recorded_at": "2026-10-07T09:00:00Z"
+      },
+      {
+        "id": "f9",
+        "text": "Booked the dentist for a check-up.",
+        "topic": "ongoing",
+        "recorded_at": "2026-10-05T09:00:00Z"
+      },
+      {
+        "id": "f10",
+        "text": "Paid the dentist.",
+        "topic": "ongoing",
+        "recorded_at": "2026-10-19T09:00:00Z"
+      },
+      {
+        "id": "f11",
+        "text": "Renewed the passport.",
+        "topic": "ongoing",
+        "recorded_at": "2026-11-10T20:00:00Z"
+      },
+      {
+        "id": "f12",
+        "text": "Marathon training: a long run every Sunday.",
+        "topic": "ongoing",
+        "recorded_at": "2026-10-15T09:00:00Z",
+        "conversation_id": "c9"
+      },
+      {
+        "id": "f13",
+        "text": "Signed up for the Berlin marathon next year.",
+        "topic": "ongoing",
+        "recorded_at": "2026-10-17T09:00:00Z"
+      },
+      {
+        "id": "f14",
+        "text": "Took a harp lesson.",
+        "topic": "ongoing",
+        "recorded_at": "2026-10-03T09:00:00Z"
+      },
+      {
+        "id": "f15",
+        "text": "Booked a harp lesson.",
+        "topic": "ongoing",
+        "recorded_at": "2026-10-07T09:00:00Z"
+      },
+      {
+        "id": "f16",
+        "text": "Ca phe muoi is from Hue.",
+        "topic": "preferences",
+        "recorded_at": "2026-10-02T09:00:00Z"
+      },
+      {
+        "id": "f17",
+        "text": "كَتَبَ رسالة",
+        "topic": "ongoing",
+        "recorded_at": "2026-10-08T09:00:00Z"
+      },
+      {
+        "id": "f18",
+        "text": "Joined a quilting circle.",
+        "topic": "ongoing",
+        "recorded_at": "2026-10-10T09:00:00Z",
+        "conversation_id": "c7"
+      },
+      {
+        "id": "f19",
+        "text": "Finished a quilting project for the fair.",
+        "topic": "ongoing",
+        "recorded_at": "2026-10-11T09:00:00Z",
+        "conversation_id": "c8"
+      },
+      {
+        "id": "f20",
+        "text": "Quilting takes patience.",
+        "topic": "preferences",
+        "recorded_at": "2026-10-12T09:00:00Z"
+      }
+    ]
+  },
+  "cases": [
+    {
+      "id": "exact_term",
+      "query": "violin",
+      "expect": [
+        "f1"
+      ]
+    },
+    {
+      "id": "prefix_term",
+      "query": "photo",
+      "expect": [
+        "f2",
+        "f3"
+      ]
+    },
+    {
+      "id": "stop_words_only_empty",
+      "query": "What is it about the",
+      "expect": []
+    },
+    {
+      "id": "operators_are_literal",
+      "query": "cello\" OR NEAR(x y) *",
+      "expect": [
+        "f6",
+        "f5"
+      ]
+    },
+    {
+      "id": "superseded_excluded",
+      "query": "works",
+      "expect": [
+        "f8"
+      ]
+    },
+    {
+      "id": "superseded_only_when_nothing_else",
+      "query": "Brightwave",
+      "expect": [
+        "f7"
+      ]
+    },
+    {
+      "id": "date_window",
+      "query": "dentist",
+      "from_date": "2026-10-12",
+      "to_date": "2026-10-19",
+      "expect": [
+        "f10",
+        "r:c10:1"
+      ]
+    },
+    {
+      "id": "date_window_in_user_zone",
+      "query": "passport",
+      "from_date": "2026-11-11",
+      "to_date": "2026-11-11",
+      "timezone": "Australia/Sydney",
+      "expect": [
+        "f11"
+      ],
+      "expect_results": [
+        {
+          "date": "2026-11-11",
+          "conversation": "",
+          "kind": "fact",
+          "text": "Renewed the passport."
+        }
+      ]
+    },
+    {
+      "id": "date_window_in_utc",
+      "query": "passport",
+      "from_date": "2026-11-11",
+      "to_date": "2026-11-11",
+      "expect": []
+    },
+    {
+      "id": "fusion_order",
+      "query": "marathon training",
+      "expect": [
+        "r:c9:3",
+        "f12",
+        "f13",
+        "r:c9:2",
+        "r:c9:1"
+      ],
+      "expect_results": [
+        {
+          "date": "2026-10-16",
+          "conversation": "Running",
+          "kind": "excerpt",
+          "text": "User: Marathon training starts Monday.\nAssistant: Good luck with the training!"
+        },
+        {
+          "date": "2026-10-15",
+          "conversation": "Running",
+          "kind": "fact",
+          "text": "Marathon training: a long run every Sunday."
+        },
+        {
+          "date": "2026-10-17",
+          "conversation": "",
+          "kind": "fact",
+          "text": "Signed up for the Berlin marathon next year."
+        },
+        {
+          "date": "2026-10-14",
+          "conversation": "Running",
+          "kind": "excerpt",
+          "text": "User: Watched a marathon on TV.\nAssistant: Fun."
+        },
+        {
+          "date": "2026-10-13",
+          "conversation": "Running",
+          "kind": "excerpt",
+          "text": "User: Talked about the marathon route, the weather forecast, the water stations along the course and where the family would stand to cheer.\nAssistant: Sounds like a big day for everyone."
+        }
+      ]
+    },
+    {
+      "id": "limit_keeps_the_best",
+      "query": "marathon training",
+      "limit": 2,
+      "expect": [
+        "r:c9:3",
+        "f12"
+      ]
+    },
+    {
+      "id": "recency_tiebreak",
+      "query": "harp",
+      "expect": [
+        "r:c6:1",
+        "f15",
+        "f14"
+      ]
+    },
+    {
+      "id": "vietnamese_diacritics_match",
+      "query": "cà phê",
+      "expect": [
+        "r:c1:1",
+        "f16"
+      ]
+    },
+    {
+      "id": "chinese_run_matches_substring",
+      "query": "东京",
+      "expect": [
+        "r:c2:1"
+      ]
+    },
+    {
+      "id": "latin_inside_chinese_matches",
+      "query": "python",
+      "expect": [
+        "r:c3:1"
+      ]
+    },
+    {
+      "id": "korean_particle_prefix",
+      "query": "도쿄",
+      "expect": [
+        "r:c4:1"
+      ]
+    },
+    {
+      "id": "arabic_harakat_ignored",
+      "query": "كَتَبَ",
+      "expect": [
+        "r:c5:1",
+        "f17"
+      ]
+    },
+    {
+      "id": "exclude_conversation_leaves_out_its_rounds_and_facts",
+      "query": "quilting",
+      "exclude_conversation": "c7",
+      "expect": [
+        "f20",
+        "r:c8:1",
+        "f19"
+      ]
+    },
+    {
+      "id": "excerpt_window_keeps_label",
+      "query": "crampons",
+      "expect": [
+        "r:c11:1"
+      ],
+      "expect_results": [
+        {
+          "date": "2026-10-18",
+          "conversation": "Glacier hike",
+          "kind": "excerpt",
+          "text": "… Assistant: and lip balm, because the light off the ice is strong. Bring a headlamp with fresh batteries, a paper map, a compass and a fully charged phone. Take two litres of water and plenty of snacks, such as nuts, dried fruit and chocolate. The guide will lend you a harness and a helmet, but bring your own crampons if they fit your boots, and practise putting them on at home first. Finally, pack a small first aid kit, blister plasters, a whistle and a foil blanket. Leave a note of your route and your expected return time with someone at the hut, and check the weather forecast the evening before you…"
+        }
+      ]
+    }
+  ]
+}

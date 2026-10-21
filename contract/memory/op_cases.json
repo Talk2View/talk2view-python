@@ -1,0 +1,948 @@
+{
+  "version": 1,
+  "about": "Memory entry op batches (spec §7.3). Each case gives `entries`, the store's entries before, each with all ten fields (id, topic, text, created_at, updated_at, valid_until, source, locked, source_conversation_id, hidden_at), and `ops`, one batch, applied in order at `now`. `expect.entries` is every entry afterwards, in the store's order, hidden ones included: a removed or forgotten entry stays, with hidden_at `now`, and one passed in hidden is carried through as it is, unseen by every op. `expect.dropped` is the rule name of each op dropped, and \"locked\" for each locked entry a forget passes by, in order. An added entry goes last, with the next id of a counter (e1, e2, ...) that passes over ids in use, created_at and updated_at `now` and source \"said\"; an id on an add is ignored. Every text cap counts Unicode code points, never graphemes (Swift's String.count) or UTF-16 units (JavaScript's .length): an entry's text is 1 to 300 of them, and a forget's phrase at least 2 once normalised (NFKC, casefolded, spaces collapsed, trailing .!?,;: removed). A forget hides each unlocked visible entry that holds its phrase as whole words: the phrase's index tokens (normalise_for_index, then unicode61 with remove_diacritics 2), in order among the entry's, the last allowed an \"s\" or \"es\" (R68). A phrase of stop words and pronouns alone (talk2view-python's FORGET_VAGUE_WORDS) is too vague (R57). A batch has no length limit on the device: update_memory's 1 to 5 ops are the engine's rule, and extraction's entry_ops have none (sixth_op_applied). Python's apply_entry_ops and MemoryStore.apply_ops replay every case (talk2view-python, tests/test_contract_memory.py).",
+  "now": "2026-10-21T10:00:00Z",
+  "cases": [
+    {
+      "id": "add_assigns_id",
+      "entries": [],
+      "ops": [
+        {
+          "op": "add",
+          "topic": "preferences",
+          "text": "Prefers metric units."
+        },
+        {
+          "op": "add",
+          "topic": "ongoing",
+          "text": "Flying to Tokyo.",
+          "valid_until": "2026-11-10",
+          "id": "x9"
+        }
+      ],
+      "expect": {
+        "entries": [
+          {
+            "id": "e1",
+            "topic": "preferences",
+            "text": "Prefers metric units.",
+            "created_at": "2026-10-21T10:00:00Z",
+            "updated_at": "2026-10-21T10:00:00Z",
+            "valid_until": null,
+            "source": "said",
+            "locked": false,
+            "source_conversation_id": null,
+            "hidden_at": null
+          },
+          {
+            "id": "e2",
+            "topic": "ongoing",
+            "text": "Flying to Tokyo.",
+            "created_at": "2026-10-21T10:00:00Z",
+            "updated_at": "2026-10-21T10:00:00Z",
+            "valid_until": "2026-11-10",
+            "source": "said",
+            "locked": false,
+            "source_conversation_id": null,
+            "hidden_at": null
+          }
+        ],
+        "dropped": []
+      }
+    },
+    {
+      "id": "add_duplicate_normalised_skipped",
+      "entries": [
+        {
+          "id": "e1",
+          "topic": "preferences",
+          "text": "Prefers metric units.",
+          "created_at": "2026-10-20T09:00:00Z",
+          "updated_at": "2026-10-20T09:00:00Z",
+          "valid_until": null,
+          "source": "said",
+          "locked": false,
+          "source_conversation_id": null,
+          "hidden_at": null
+        }
+      ],
+      "ops": [
+        {
+          "op": "add",
+          "topic": "preferences",
+          "text": "prefers  METRIC units"
+        },
+        {
+          "op": "add",
+          "topic": "preferences",
+          "text": "Likes tea"
+        },
+        {
+          "op": "add",
+          "topic": "preferences",
+          "text": "likes tea!"
+        }
+      ],
+      "expect": {
+        "entries": [
+          {
+            "id": "e1",
+            "topic": "preferences",
+            "text": "Prefers metric units.",
+            "created_at": "2026-10-20T09:00:00Z",
+            "updated_at": "2026-10-20T09:00:00Z",
+            "valid_until": null,
+            "source": "said",
+            "locked": false,
+            "source_conversation_id": null,
+            "hidden_at": null
+          },
+          {
+            "id": "e2",
+            "topic": "preferences",
+            "text": "Likes tea",
+            "created_at": "2026-10-21T10:00:00Z",
+            "updated_at": "2026-10-21T10:00:00Z",
+            "valid_until": null,
+            "source": "said",
+            "locked": false,
+            "source_conversation_id": null,
+            "hidden_at": null
+          }
+        ],
+        "dropped": [
+          "duplicate",
+          "duplicate"
+        ]
+      }
+    },
+    {
+      "id": "update_sets_updated_at",
+      "entries": [
+        {
+          "id": "e1",
+          "topic": "identity",
+          "text": "Lives in Melbourne.",
+          "created_at": "2026-10-20T09:00:00Z",
+          "updated_at": "2026-10-20T09:00:00Z",
+          "valid_until": "2026-12-31",
+          "source": "said",
+          "locked": false,
+          "source_conversation_id": null,
+          "hidden_at": null
+        }
+      ],
+      "ops": [
+        {
+          "op": "update",
+          "id": "e1",
+          "text": "Lives in Sydney."
+        }
+      ],
+      "expect": {
+        "entries": [
+          {
+            "id": "e1",
+            "topic": "identity",
+            "text": "Lives in Sydney.",
+            "created_at": "2026-10-20T09:00:00Z",
+            "updated_at": "2026-10-21T10:00:00Z",
+            "valid_until": "2026-12-31",
+            "source": "said",
+            "locked": false,
+            "source_conversation_id": null,
+            "hidden_at": null
+          }
+        ],
+        "dropped": []
+      }
+    },
+    {
+      "id": "update_locked_dropped",
+      "entries": [
+        {
+          "id": "e1",
+          "topic": "identity",
+          "text": "Allergic to peanuts.",
+          "created_at": "2026-10-20T09:00:00Z",
+          "updated_at": "2026-10-20T09:00:00Z",
+          "valid_until": null,
+          "source": "edited",
+          "locked": true,
+          "source_conversation_id": null,
+          "hidden_at": null
+        }
+      ],
+      "ops": [
+        {
+          "op": "update",
+          "id": "e1",
+          "text": "Not allergic to anything."
+        },
+        {
+          "op": "remove",
+          "id": "e1"
+        }
+      ],
+      "expect": {
+        "entries": [
+          {
+            "id": "e1",
+            "topic": "identity",
+            "text": "Allergic to peanuts.",
+            "created_at": "2026-10-20T09:00:00Z",
+            "updated_at": "2026-10-20T09:00:00Z",
+            "valid_until": null,
+            "source": "edited",
+            "locked": true,
+            "source_conversation_id": null,
+            "hidden_at": null
+          }
+        ],
+        "dropped": [
+          "locked",
+          "locked"
+        ]
+      }
+    },
+    {
+      "id": "update_missing_dropped",
+      "entries": [
+        {
+          "id": "e1",
+          "topic": "people",
+          "text": "Has a dog.",
+          "created_at": "2026-10-20T09:00:00Z",
+          "updated_at": "2026-10-20T09:00:00Z",
+          "valid_until": null,
+          "source": "said",
+          "locked": false,
+          "source_conversation_id": null,
+          "hidden_at": "2026-10-21T09:59:50Z"
+        }
+      ],
+      "ops": [
+        {
+          "op": "update",
+          "id": "e7",
+          "text": "Has a cat."
+        },
+        {
+          "op": "update",
+          "id": "e1",
+          "text": "Has a cat."
+        },
+        {
+          "op": "remove",
+          "id": "e1"
+        }
+      ],
+      "expect": {
+        "entries": [
+          {
+            "id": "e1",
+            "topic": "people",
+            "text": "Has a dog.",
+            "created_at": "2026-10-20T09:00:00Z",
+            "updated_at": "2026-10-20T09:00:00Z",
+            "valid_until": null,
+            "source": "said",
+            "locked": false,
+            "source_conversation_id": null,
+            "hidden_at": "2026-10-21T09:59:50Z"
+          }
+        ],
+        "dropped": [
+          "missing",
+          "missing",
+          "missing"
+        ]
+      }
+    },
+    {
+      "id": "remove_hides",
+      "entries": [
+        {
+          "id": "e1",
+          "topic": "people",
+          "text": "Has a dog.",
+          "created_at": "2026-10-20T09:00:00Z",
+          "updated_at": "2026-10-20T09:00:00Z",
+          "valid_until": null,
+          "source": "said",
+          "locked": false,
+          "source_conversation_id": null,
+          "hidden_at": null
+        },
+        {
+          "id": "e2",
+          "topic": "preferences",
+          "text": "Likes tea.",
+          "created_at": "2026-10-20T09:00:00Z",
+          "updated_at": "2026-10-20T09:00:00Z",
+          "valid_until": null,
+          "source": "said",
+          "locked": false,
+          "source_conversation_id": null,
+          "hidden_at": null
+        }
+      ],
+      "ops": [
+        {
+          "op": "remove",
+          "id": "e1"
+        }
+      ],
+      "expect": {
+        "entries": [
+          {
+            "id": "e1",
+            "topic": "people",
+            "text": "Has a dog.",
+            "created_at": "2026-10-20T09:00:00Z",
+            "updated_at": "2026-10-20T09:00:00Z",
+            "valid_until": null,
+            "source": "said",
+            "locked": false,
+            "source_conversation_id": null,
+            "hidden_at": "2026-10-21T10:00:00Z"
+          },
+          {
+            "id": "e2",
+            "topic": "preferences",
+            "text": "Likes tea.",
+            "created_at": "2026-10-20T09:00:00Z",
+            "updated_at": "2026-10-20T09:00:00Z",
+            "valid_until": null,
+            "source": "said",
+            "locked": false,
+            "source_conversation_id": null,
+            "hidden_at": null
+          }
+        ],
+        "dropped": []
+      }
+    },
+    {
+      "id": "text_300_code_points_kept",
+      "entries": [],
+      "ops": [
+        {
+          "op": "add",
+          "topic": "preferences",
+          "text": "éééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééé"
+        }
+      ],
+      "expect": {
+        "entries": [
+          {
+            "id": "e1",
+            "topic": "preferences",
+            "text": "éééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééé",
+            "created_at": "2026-10-21T10:00:00Z",
+            "updated_at": "2026-10-21T10:00:00Z",
+            "valid_until": null,
+            "source": "said",
+            "locked": false,
+            "source_conversation_id": null,
+            "hidden_at": null
+          }
+        ],
+        "dropped": []
+      }
+    },
+    {
+      "id": "text_301_code_points_dropped",
+      "entries": [],
+      "ops": [
+        {
+          "op": "add",
+          "topic": "preferences",
+          "text": "ééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééx"
+        }
+      ],
+      "expect": {
+        "entries": [],
+        "dropped": [
+          "text over 300 code points"
+        ]
+      }
+    },
+    {
+      "id": "graphemes_are_not_the_unit",
+      "entries": [],
+      "ops": [
+        {
+          "op": "add",
+          "topic": "preferences",
+          "text": "ééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        {
+          "op": "add",
+          "topic": "preferences",
+          "text": "éééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééé"
+        }
+      ],
+      "expect": {
+        "entries": [
+          {
+            "id": "e1",
+            "topic": "preferences",
+            "text": "éééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééé",
+            "created_at": "2026-10-21T10:00:00Z",
+            "updated_at": "2026-10-21T10:00:00Z",
+            "valid_until": null,
+            "source": "said",
+            "locked": false,
+            "source_conversation_id": null,
+            "hidden_at": null
+          }
+        ],
+        "dropped": [
+          "text over 300 code points"
+        ]
+      }
+    },
+    {
+      "id": "utf16_units_are_not_the_unit",
+      "entries": [],
+      "ops": [
+        {
+          "op": "add",
+          "topic": "preferences",
+          "text": "😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀"
+        }
+      ],
+      "expect": {
+        "entries": [
+          {
+            "id": "e1",
+            "topic": "preferences",
+            "text": "😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀",
+            "created_at": "2026-10-21T10:00:00Z",
+            "updated_at": "2026-10-21T10:00:00Z",
+            "valid_until": null,
+            "source": "said",
+            "locked": false,
+            "source_conversation_id": null,
+            "hidden_at": null
+          }
+        ],
+        "dropped": []
+      }
+    },
+    {
+      "id": "sixth_op_applied",
+      "entries": [],
+      "ops": [
+        {
+          "op": "add",
+          "topic": "preferences",
+          "text": "Note 1."
+        },
+        {
+          "op": "add",
+          "topic": "preferences",
+          "text": "Note 2."
+        },
+        {
+          "op": "add",
+          "topic": "preferences",
+          "text": "Note 3."
+        },
+        {
+          "op": "add",
+          "topic": "preferences",
+          "text": "Note 4."
+        },
+        {
+          "op": "add",
+          "topic": "preferences",
+          "text": "Note 5."
+        },
+        {
+          "op": "add",
+          "topic": "preferences",
+          "text": "Note 6."
+        }
+      ],
+      "expect": {
+        "entries": [
+          {
+            "id": "e1",
+            "topic": "preferences",
+            "text": "Note 1.",
+            "created_at": "2026-10-21T10:00:00Z",
+            "updated_at": "2026-10-21T10:00:00Z",
+            "valid_until": null,
+            "source": "said",
+            "locked": false,
+            "source_conversation_id": null,
+            "hidden_at": null
+          },
+          {
+            "id": "e2",
+            "topic": "preferences",
+            "text": "Note 2.",
+            "created_at": "2026-10-21T10:00:00Z",
+            "updated_at": "2026-10-21T10:00:00Z",
+            "valid_until": null,
+            "source": "said",
+            "locked": false,
+            "source_conversation_id": null,
+            "hidden_at": null
+          },
+          {
+            "id": "e3",
+            "topic": "preferences",
+            "text": "Note 3.",
+            "created_at": "2026-10-21T10:00:00Z",
+            "updated_at": "2026-10-21T10:00:00Z",
+            "valid_until": null,
+            "source": "said",
+            "locked": false,
+            "source_conversation_id": null,
+            "hidden_at": null
+          },
+          {
+            "id": "e4",
+            "topic": "preferences",
+            "text": "Note 4.",
+            "created_at": "2026-10-21T10:00:00Z",
+            "updated_at": "2026-10-21T10:00:00Z",
+            "valid_until": null,
+            "source": "said",
+            "locked": false,
+            "source_conversation_id": null,
+            "hidden_at": null
+          },
+          {
+            "id": "e5",
+            "topic": "preferences",
+            "text": "Note 5.",
+            "created_at": "2026-10-21T10:00:00Z",
+            "updated_at": "2026-10-21T10:00:00Z",
+            "valid_until": null,
+            "source": "said",
+            "locked": false,
+            "source_conversation_id": null,
+            "hidden_at": null
+          },
+          {
+            "id": "e6",
+            "topic": "preferences",
+            "text": "Note 6.",
+            "created_at": "2026-10-21T10:00:00Z",
+            "updated_at": "2026-10-21T10:00:00Z",
+            "valid_until": null,
+            "source": "said",
+            "locked": false,
+            "source_conversation_id": null,
+            "hidden_at": null
+          }
+        ],
+        "dropped": []
+      }
+    },
+    {
+      "id": "forget_too_vague_dropped",
+      "entries": [
+        {
+          "id": "e1",
+          "topic": "preferences",
+          "text": "Likes Italian food.",
+          "created_at": "2026-10-20T09:00:00Z",
+          "updated_at": "2026-10-20T09:00:00Z",
+          "valid_until": null,
+          "source": "said",
+          "locked": false,
+          "source_conversation_id": null,
+          "hidden_at": null
+        }
+      ],
+      "ops": [
+        {
+          "op": "forget",
+          "text": "it"
+        },
+        {
+          "op": "forget",
+          "text": "That one."
+        }
+      ],
+      "expect": {
+        "entries": [
+          {
+            "id": "e1",
+            "topic": "preferences",
+            "text": "Likes Italian food.",
+            "created_at": "2026-10-20T09:00:00Z",
+            "updated_at": "2026-10-20T09:00:00Z",
+            "valid_until": null,
+            "source": "said",
+            "locked": false,
+            "source_conversation_id": null,
+            "hidden_at": null
+          }
+        ],
+        "dropped": [
+          "forget text too vague",
+          "forget text too vague"
+        ]
+      }
+    },
+    {
+      "id": "forget_too_short_dropped",
+      "entries": [
+        {
+          "id": "e1",
+          "topic": "ongoing",
+          "text": "Booked an x-ray for Monday.",
+          "created_at": "2026-10-20T09:00:00Z",
+          "updated_at": "2026-10-20T09:00:00Z",
+          "valid_until": null,
+          "source": "said",
+          "locked": false,
+          "source_conversation_id": null,
+          "hidden_at": null
+        }
+      ],
+      "ops": [
+        {
+          "op": "forget",
+          "text": "x"
+        },
+        {
+          "op": "forget",
+          "text": "é"
+        }
+      ],
+      "expect": {
+        "entries": [
+          {
+            "id": "e1",
+            "topic": "ongoing",
+            "text": "Booked an x-ray for Monday.",
+            "created_at": "2026-10-20T09:00:00Z",
+            "updated_at": "2026-10-20T09:00:00Z",
+            "valid_until": null,
+            "source": "said",
+            "locked": false,
+            "source_conversation_id": null,
+            "hidden_at": null
+          }
+        ],
+        "dropped": [
+          "forget text too short",
+          "forget text too short"
+        ]
+      }
+    },
+    {
+      "id": "forget_passes_a_locked_entry",
+      "entries": [
+        {
+          "id": "e1",
+          "topic": "identity",
+          "text": "Allergic to peanuts.",
+          "created_at": "2026-10-20T09:00:00Z",
+          "updated_at": "2026-10-20T09:00:00Z",
+          "valid_until": null,
+          "source": "edited",
+          "locked": true,
+          "source_conversation_id": null,
+          "hidden_at": null
+        },
+        {
+          "id": "e2",
+          "topic": "preferences",
+          "text": "Peanut butter on toast.",
+          "created_at": "2026-10-20T09:00:00Z",
+          "updated_at": "2026-10-20T09:00:00Z",
+          "valid_until": null,
+          "source": "said",
+          "locked": false,
+          "source_conversation_id": null,
+          "hidden_at": null
+        }
+      ],
+      "ops": [
+        {
+          "op": "forget",
+          "text": "peanut"
+        }
+      ],
+      "expect": {
+        "entries": [
+          {
+            "id": "e1",
+            "topic": "identity",
+            "text": "Allergic to peanuts.",
+            "created_at": "2026-10-20T09:00:00Z",
+            "updated_at": "2026-10-20T09:00:00Z",
+            "valid_until": null,
+            "source": "edited",
+            "locked": true,
+            "source_conversation_id": null,
+            "hidden_at": null
+          },
+          {
+            "id": "e2",
+            "topic": "preferences",
+            "text": "Peanut butter on toast.",
+            "created_at": "2026-10-20T09:00:00Z",
+            "updated_at": "2026-10-20T09:00:00Z",
+            "valid_until": null,
+            "source": "said",
+            "locked": false,
+            "source_conversation_id": null,
+            "hidden_at": "2026-10-21T10:00:00Z"
+          }
+        ],
+        "dropped": [
+          "locked"
+        ]
+      }
+    },
+    {
+      "id": "forget_matches_whole_words",
+      "entries": [
+        {
+          "id": "e1",
+          "topic": "ongoing",
+          "text": "Same time next week.",
+          "created_at": "2026-10-20T09:00:00Z",
+          "updated_at": "2026-10-20T09:00:00Z",
+          "valid_until": null,
+          "source": "said",
+          "locked": false,
+          "source_conversation_id": null,
+          "hidden_at": null
+        },
+        {
+          "id": "e2",
+          "topic": "people",
+          "text": "Sam's birthday is in May.",
+          "created_at": "2026-10-20T09:00:00Z",
+          "updated_at": "2026-10-20T09:00:00Z",
+          "valid_until": null,
+          "source": "said",
+          "locked": false,
+          "source_conversation_id": null,
+          "hidden_at": null
+        },
+        {
+          "id": "e3",
+          "topic": "identity",
+          "text": "Has a Samsung phone.",
+          "created_at": "2026-10-20T09:00:00Z",
+          "updated_at": "2026-10-20T09:00:00Z",
+          "valid_until": null,
+          "source": "said",
+          "locked": false,
+          "source_conversation_id": null,
+          "hidden_at": null
+        }
+      ],
+      "ops": [
+        {
+          "op": "forget",
+          "text": "Sam"
+        }
+      ],
+      "expect": {
+        "entries": [
+          {
+            "id": "e1",
+            "topic": "ongoing",
+            "text": "Same time next week.",
+            "created_at": "2026-10-20T09:00:00Z",
+            "updated_at": "2026-10-20T09:00:00Z",
+            "valid_until": null,
+            "source": "said",
+            "locked": false,
+            "source_conversation_id": null,
+            "hidden_at": null
+          },
+          {
+            "id": "e2",
+            "topic": "people",
+            "text": "Sam's birthday is in May.",
+            "created_at": "2026-10-20T09:00:00Z",
+            "updated_at": "2026-10-20T09:00:00Z",
+            "valid_until": null,
+            "source": "said",
+            "locked": false,
+            "source_conversation_id": null,
+            "hidden_at": "2026-10-21T10:00:00Z"
+          },
+          {
+            "id": "e3",
+            "topic": "identity",
+            "text": "Has a Samsung phone.",
+            "created_at": "2026-10-20T09:00:00Z",
+            "updated_at": "2026-10-20T09:00:00Z",
+            "valid_until": null,
+            "source": "said",
+            "locked": false,
+            "source_conversation_id": null,
+            "hidden_at": null
+          }
+        ],
+        "dropped": []
+      }
+    },
+    {
+      "id": "forget_matches_plurals_and_compounds",
+      "entries": [
+        {
+          "id": "e1",
+          "topic": "identity",
+          "text": "Allergic to peanuts.",
+          "created_at": "2026-10-20T09:00:00Z",
+          "updated_at": "2026-10-20T09:00:00Z",
+          "valid_until": null,
+          "source": "said",
+          "locked": false,
+          "source_conversation_id": null,
+          "hidden_at": null
+        },
+        {
+          "id": "e2",
+          "topic": "preferences",
+          "text": "Keeps a peanut-free kitchen.",
+          "created_at": "2026-10-20T09:00:00Z",
+          "updated_at": "2026-10-20T09:00:00Z",
+          "valid_until": null,
+          "source": "said",
+          "locked": false,
+          "source_conversation_id": null,
+          "hidden_at": null
+        },
+        {
+          "id": "e3",
+          "topic": "preferences",
+          "text": "Likes peas.",
+          "created_at": "2026-10-20T09:00:00Z",
+          "updated_at": "2026-10-20T09:00:00Z",
+          "valid_until": null,
+          "source": "said",
+          "locked": false,
+          "source_conversation_id": null,
+          "hidden_at": null
+        }
+      ],
+      "ops": [
+        {
+          "op": "forget",
+          "text": "peanut"
+        }
+      ],
+      "expect": {
+        "entries": [
+          {
+            "id": "e1",
+            "topic": "identity",
+            "text": "Allergic to peanuts.",
+            "created_at": "2026-10-20T09:00:00Z",
+            "updated_at": "2026-10-20T09:00:00Z",
+            "valid_until": null,
+            "source": "said",
+            "locked": false,
+            "source_conversation_id": null,
+            "hidden_at": "2026-10-21T10:00:00Z"
+          },
+          {
+            "id": "e2",
+            "topic": "preferences",
+            "text": "Keeps a peanut-free kitchen.",
+            "created_at": "2026-10-20T09:00:00Z",
+            "updated_at": "2026-10-20T09:00:00Z",
+            "valid_until": null,
+            "source": "said",
+            "locked": false,
+            "source_conversation_id": null,
+            "hidden_at": "2026-10-21T10:00:00Z"
+          },
+          {
+            "id": "e3",
+            "topic": "preferences",
+            "text": "Likes peas.",
+            "created_at": "2026-10-20T09:00:00Z",
+            "updated_at": "2026-10-20T09:00:00Z",
+            "valid_until": null,
+            "source": "said",
+            "locked": false,
+            "source_conversation_id": null,
+            "hidden_at": null
+          }
+        ],
+        "dropped": []
+      }
+    },
+    {
+      "id": "forget_matches_inside_a_cjk_run",
+      "entries": [
+        {
+          "id": "e1",
+          "topic": "ongoing",
+          "text": "去东京旅行",
+          "created_at": "2026-10-20T09:00:00Z",
+          "updated_at": "2026-10-20T09:00:00Z",
+          "valid_until": null,
+          "source": "said",
+          "locked": false,
+          "source_conversation_id": null,
+          "hidden_at": null
+        },
+        {
+          "id": "e2",
+          "topic": "preferences",
+          "text": "京东购物",
+          "created_at": "2026-10-20T09:00:00Z",
+          "updated_at": "2026-10-20T09:00:00Z",
+          "valid_until": null,
+          "source": "said",
+          "locked": false,
+          "source_conversation_id": null,
+          "hidden_at": null
+        }
+      ],
+      "ops": [
+        {
+          "op": "forget",
+          "text": "东京"
+        }
+      ],
+      "expect": {
+        "entries": [
+          {
+            "id": "e1",
+            "topic": "ongoing",
+            "text": "去东京旅行",
+            "created_at": "2026-10-20T09:00:00Z",
+            "updated_at": "2026-10-20T09:00:00Z",
+            "valid_until": null,
+            "source": "said",
+            "locked": false,
+            "source_conversation_id": null,
+            "hidden_at": "2026-10-21T10:00:00Z"
+          },
+          {
+            "id": "e2",
+            "topic": "preferences",
+            "text": "京东购物",
+            "created_at": "2026-10-20T09:00:00Z",
+            "updated_at": "2026-10-20T09:00:00Z",
+            "valid_until": null,
+            "source": "said",
+            "locked": false,
+            "source_conversation_id": null,
+            "hidden_at": null
+          }
+        ],
+        "dropped": []
+      }
+    }
+  ]
+}
