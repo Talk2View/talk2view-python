@@ -676,6 +676,9 @@ def test_an_excerpt_says_whose_words_it_starts_in(store: MemoryStore) -> None:
     at_label = shown(" ".join(_words(10)) + " " + "x" * 600, " ".join(_words(10)) + " zebracorn")
     assert at_label.startswith(ELLIPSIS + " Assistant: word000 ")
     assert at_label.count("Assistant:") == 1
+    # Cut in the blank that ends the user's words, just before the reply: its label, once.
+    blank = shown("x" * 400 + " " * 20, "a" * 277 + " zebracorn " + "word " * 100)
+    assert blank.startswith(ELLIPSIS + " Assistant: aaa") and blank.count("Assistant:") == 1
     # Not cut: the round's own labels, as before.
     assert shown("Is a zebracorn real?", "No.") == "User: Is a zebracorn real?\nAssistant: No."
 
