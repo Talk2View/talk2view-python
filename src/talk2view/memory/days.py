@@ -6,7 +6,8 @@ conversation goes with.
 ``timezone`` is an IANA name such as "Australia/Perth". The system's current local zone,
 as ``datetime.astimezone()`` takes it, stands in when it is None or a name this platform
 doesn't know, or when the platform has no tz data (Windows without ``tzdata``). Nothing
-here raises over a timezone.
+here raises over a timezone. Every read of the system's zone goes through one helper,
+``_system_zone``, so a test can pin it on any platform.
 """
 
 from __future__ import annotations
@@ -26,9 +27,17 @@ def local(moment: datetime, timezone: Optional[str]) -> datetime:
 
 
 def _zone(timezone: Optional[str]) -> Optional[tzinfo]:
-    """The zone ``timezone`` names, or None for the system's local zone, which
-    ``astimezone`` takes None for, and a naive datetime is in."""
-    return _named_zone(timezone) if isinstance(timezone, str) else None
+    """The zone ``timezone`` names, else the system's (``_system_zone``)."""
+    named = _named_zone(timezone) if isinstance(timezone, str) else None
+    return _system_zone() if named is None else named
+
+
+def _system_zone() -> Optional[tzinfo]:
+    """The system's current local zone. It is None, which ``astimezone`` takes for the
+    system's zone, as a naive datetime is in it, so each moment takes the offset the system
+    gives it, daylight saving included. Nothing else here reads the system's zone, so a test
+    pins it here, on any platform (``time.tzset`` is Unix only)."""
+    return None
 
 
 @functools.lru_cache(maxsize=32)

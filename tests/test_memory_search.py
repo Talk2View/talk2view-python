@@ -20,7 +20,7 @@ import unicodedata
 import zoneinfo
 from contextlib import closing
 from dataclasses import replace
-from datetime import timedelta
+from datetime import timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Callable, Dict, Iterator, List, Optional, Sequence, Set, Tuple
@@ -164,31 +164,25 @@ def store(tmp_path: Path, backend: Backend, clock: FakeClock) -> Iterator[Memory
         memory.close()
 
 
+# days' own read of the system's zone, kept before the autouse fixture pins it.
+_PLATFORM_ZONE = days._system_zone
+
+
 @pytest.fixture(autouse=True)
-def _system_zone_is_utc(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
-    """The system's local zone is UTC for these tests, wherever they run: with no timezone
-    given, a day is the system's (R64), and their dates are written for a user on UTC.
-    Without time.tzset (Windows), the machine's zone stays."""
-    if not hasattr(time, "tzset"):
-        yield
-        return
-    monkeypatch.setenv("TZ", "UTC")
-    time.tzset()
-    yield
-    monkeypatch.undo()
-    time.tzset()
+def _system_zone_is_utc(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The system's local zone, as days reads it, is UTC for these tests on any platform:
+    with no timezone given, a day is the system's (R64), and their dates are written for a
+    user on UTC. So no test here depends on the machine's zone."""
+    monkeypatch.setattr(days, "_system_zone", lambda: timezone.utc)
 
 
 @pytest.fixture
 def system_zone(monkeypatch: pytest.MonkeyPatch) -> Callable[[str], None]:
-    """Sets the system's local zone, as the TZ variable does (Unix only); the autouse
-    fixture puts it back."""
-    if not hasattr(time, "tzset"):
-        pytest.skip("time.tzset is Unix only")
+    """Sets the system's local zone, as days reads it, on any platform."""
 
     def set_zone(name: str) -> None:
-        monkeypatch.setenv("TZ", name)
-        time.tzset()
+        zone = zoneinfo.ZoneInfo(name)
+        monkeypatch.setattr(days, "_system_zone", lambda: zone)
 
     return set_zone
 
@@ -1339,6 +1333,26 @@ def test_no_zone_means_the_systems(
     assert [item["id"] for item in store.turn_payload(None)["entries"]] == ["e1"]
     assert [hit.date for hit in store.search("kayak")] == ["2026-11-10"]
     assert store.search("kayak", from_date="2026-11-11") == []
+
+
+def test_unpinned_days_read_the_zone_the_platform_gives(monkeypatch: pytest.MonkeyPatch) -> None:
+    """days' own _system_zone, unpinned, follows the zone the platform gives, as TZ sets it
+    (Unix only), daylight saving included: Sydney is UTC+11 in November and UTC+10 in June."""
+    if not hasattr(time, "tzset"):
+        pytest.skip("time.tzset is Unix only")
+    monkeypatch.setattr(days, "_system_zone", _PLATFORM_ZONE)
+    monkeypatch.setenv("TZ", SYDNEY)
+    time.tzset()
+    try:
+        assert days.day(EVENING_AT, None) == "2026-11-11"
+        assert days.day("2026-06-10T13:30:00Z", None) == "2026-06-10"
+        assert days.bounds("2026-11-11", "2026-11-11", None) == (
+            "2026-11-10T13:00:00Z",
+            "2026-11-11T13:00:00Z",
+        )
+    finally:
+        monkeypatch.undo()
+        time.tzset()
 
 
 def test_expiring_facts_and_the_markdown_export_use_the_users_days(

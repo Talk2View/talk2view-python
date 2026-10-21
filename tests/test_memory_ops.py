@@ -10,9 +10,8 @@ import itertools
 import json
 import logging
 import sqlite3
-import time
 from dataclasses import replace
-from datetime import timedelta
+from datetime import timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterator, List, Sequence, Tuple
 
@@ -24,6 +23,7 @@ from talk2view.memory import (
     Fact,
     MemoryEntry,
     MemoryStore,
+    days,
     index_tokens,
     normalise_for_index,
 )
@@ -89,19 +89,11 @@ def store(tmp_path: Path, backend: str, clock: FakeClock) -> Iterator[MemoryStor
 
 
 @pytest.fixture(autouse=True)
-def _system_zone_is_utc(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
-    """The system's local zone is UTC for these tests, wherever they run: a store method
-    given no timezone takes the system's days (R64), as consolidation does until it passes
-    the user's, and these tests' dates are UTC days. Without time.tzset (Windows), the
-    machine's zone stays."""
-    if not hasattr(time, "tzset"):
-        yield
-        return
-    monkeypatch.setenv("TZ", "UTC")
-    time.tzset()
-    yield
-    monkeypatch.undo()
-    time.tzset()
+def _system_zone_is_utc(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The system's local zone, as days reads it, is UTC for these tests on any platform: a
+    store method given no timezone takes the system's days (R64), as consolidation does
+    until it passes the user's, and these tests' dates are UTC days."""
+    monkeypatch.setattr(days, "_system_zone", lambda: timezone.utc)
 
 
 def _rows(store: MemoryStore, table: str) -> List[Tuple[Any, ...]]:
