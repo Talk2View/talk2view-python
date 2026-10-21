@@ -27,8 +27,7 @@ from talk2view.memory import (
     index_tokens,
     normalise_for_index,
 )
-from talk2view.memory import store as store_module
-from talk2view.memory.ops import FORGET_VAGUE_WORDS, apply_entry_ops
+from talk2view.memory.ops import FORGET_VAGUE_WORDS, apply_entry_ops, forget_pattern, token_line
 
 from .test_memory_store import (
     BACKENDS,
@@ -406,7 +405,7 @@ def test_ops_are_checked_as_the_engine_checks_them() -> None:
     assert dropped == ["bad date"]
 
 
-def test_forget_hides_entries_whose_normalised_text_holds_it() -> None:
+def test_forget_hides_entries_whose_words_hold_it() -> None:
     peanuts = _entry("e1", "Allergic to PEANUTS.")
     butter = _entry("e2", "Loves peanut  butter on toast.")
     tea = _entry("e3", "Likes tea.")
@@ -421,19 +420,20 @@ def test_forget_hides_entries_whose_normalised_text_holds_it() -> None:
         now=NOW,
         next_id=ids(),
     )
-    # Matched on the normalised text: case, spacing and trailing punctuation fold away. The
-    # user's own (locked) entry is passed by, and reported.
+    # Matched on the index's words (R68): case, spacing and punctuation fold away, and a
+    # plural matches, but a word is matched whole, so "te" leaves "tea". The user's own
+    # (locked) entry is passed by, and reported.
     assert entries == [
         replace(peanuts, hidden_at=NOW),
         replace(butter, hidden_at=NOW),
-        replace(tea, hidden_at=NOW),
+        tea,
         sauce,
     ]
     # A forget that matches nothing is applied, and says so.
     assert applied == [
         {"op": "forget", "text": "Peanut.", "entry_ids": ["e1", "e2"]},
         {"op": "forget", "text": "coffee", "entry_ids": []},
-        {"op": "forget", "text": "TE", "entry_ids": ["e3"]},
+        {"op": "forget", "text": "TE", "entry_ids": []},
     ]
     assert dropped == ["locked"]
 
@@ -466,6 +466,51 @@ def test_a_forget_must_name_something() -> None:
     assert {"one", "them", "everything"} <= FORGET_VAGUE_WORDS
     for word in FORGET_VAGUE_WORDS:
         assert index_tokens(word) == [word]
+
+
+def test_a_forget_matches_entries_as_whole_words() -> None:
+    """R68: an entry holds a forget's phrase when its tokens (``index_tokens``) hold the
+    phrase's, in order and whole, the last allowed an "s" or "es": the log's rule (R57). The
+    engine forgets by one distinctive word (R66), and a word must never hide the longer ones
+    it begins: "Sam" leaves "Same time next week." and "Samsung", which a substring would
+    hide, silently once undo's 30 seconds are up. Plurals, possessives (with a straight or
+    a curly apostrophe), hyphenated compounds and a CJK run, whose characters segment_cjk
+    sets apart, still match."""
+    tokyo = chr(0x4E1C) + chr(0x4EAC)  # 东京
+    trip = chr(0x53BB) + tokyo + chr(0x65C5) + chr(0x884C)  # 去东京旅行, "a trip to Tokyo"
+    entries = [
+        _entry("e1", "Same time next week."),
+        _entry("e2", "Has a Samsung phone."),
+        _entry("e3", "Sam's birthday is in May."),
+        _entry("e4", "Allergic to peanuts."),
+        _entry("e5", "Keeps a peanut-free kitchen."),
+        _entry("e6", "Visits Brightwave" + chr(0x2019) + "s office."),
+        _entry("e7", "Plans a " + trip + "."),
+        _entry("e8", "Works at Brightwave."),
+    ]
+    after, applied, dropped = apply_entry_ops(
+        entries,
+        [
+            {"op": "forget", "text": "Sam"},
+            {"op": "forget", "text": "peanut"},
+            {"op": "forget", "text": "Brightwave"},
+            {"op": "forget", "text": tokyo},
+        ],
+        now=NOW,
+        next_id=ids(),
+    )
+    assert dropped == []
+    hid = [record["entry_ids"] for record in applied]
+    assert hid == [["e3"], ["e4", "e5"], ["e6", "e8"], ["e7"]]
+    assert [entry.id for entry in after if entry.hidden_at is None] == ["e1", "e2"]
+    # The match is the log's own (forget_pattern over token_line): a word it begins is
+    # passed by, and a phrase of two words needs both, in order.
+    assert forget_pattern("Sam").search(token_line("Samsung")) is None
+    assert forget_pattern("box").search(token_line("Two boxes")) is not None
+    assert forget_pattern("peanut butter").search(token_line("Butter, peanut.")) is None
+    # A phrase with no tokens, which apply_entry_ops drops as too vague, finds nothing at
+    # all, rather than the texts with an "s" token or none.
+    assert forget_pattern("#$%").search(token_line("Its 5 s")) is None
 
 
 def test_apply_entry_ops_is_pure_and_deterministic() -> None:
@@ -739,6 +784,24 @@ def test_forget_matches_entries_and_facts_and_reports_them(
     assert _indexed_facts(store) == indexed
 
 
+def test_forget_hides_facts_that_hold_it_as_whole_words(store: MemoryStore) -> None:
+    """R68: a fact holds a forget's phrase as an entry does, as whole words (forget_pattern),
+    superseded facts included: "Sam" hides "Sam's" and "Sam", never "Samsung" or "same"."""
+    store.add_facts(
+        [
+            {"text": "The user bought a Samsung phone.", "topic": "work"},
+            {"text": "The user meets Sam's team on Fridays.", "topic": "people"},
+            {"text": "The user meets Sam on Fridays.", "topic": "people", "supersedes": ["f2"]},
+            {"text": "The user is the same age as their sister.", "topic": "people"},
+        ],
+        conversation_id=None,
+        source="said",
+    )
+    batch = store.forget("Sam")
+    assert batch.applied[0]["fact_ids"] == ["f2", "f3"]
+    assert [fact.id for fact in store.facts(include_superseded=True)] == ["f1", "f4"]
+
+
 def test_reapplying_a_batch_is_idempotent(store: MemoryStore, clock: FakeClock) -> None:
     """Spec §9 rule 8: extraction may repeat what update_memory did."""
     store.apply_ops([add("Has a dog."), add("Likes tea.")])
@@ -909,8 +972,7 @@ def test_forget_finds_its_phrase_in_the_log_as_whole_words(store: MemoryStore) -
     tokens in order, whole (``index_tokens``, as the index splits text), the last allowed an
     "s" or "es". So "ex" never blanks "for example", nor "cat" "category". A CJK phrase
     matches inside a run, since segment_cjk sets each character apart, and Latin diacritics
-    fold away, as the index folds them. Entries and facts keep the substring rule (R48):
-    they are few, short and in sight."""
+    fold away, as the index folds them. Entries and facts match the same way (R68)."""
     ca_phe = "c" + chr(0xE0) + " ph" + chr(0xEA)  # cà phê
     tokyo = chr(0x4E1C) + chr(0x4EAC)  # 东京
     store.record_round("c1", "My ex called.", "How did it go?", at=T0, title="My ex")
@@ -934,7 +996,7 @@ def test_forget_finds_its_phrase_in_the_log_as_whole_words(store: MemoryStore) -
     vague = store.forget("this one")  # names nothing: the log is left as it is
     assert (vague.dropped, vague.applied) == (["forget text too vague"], [])
     assert cleared("ex") == (1, 1, 1)
-    assert store.entries() == []  # "Exercises daily.": entries match by substring
+    assert [entry.text for entry in store.entries()] == ["Exercises daily."]  # whole words
     assert cleared("cat") == (1, 0, 0)
     assert cleared("box") == (1, 0, 0)
     assert cleared(tokyo) == (1, 0, 0)
@@ -954,10 +1016,6 @@ def test_forget_finds_its_phrase_in_the_log_as_whole_words(store: MemoryStore) -
         (record.title, record.summary_title)
         for record in (_conversation(store, "c1"), _conversation(store, "c2"))
     ] == [("", None), ("Categories", "Category")]
-    # A phrase with no tokens, which apply_entry_ops drops, would find nothing at all,
-    # rather than the texts with an "s" token or none.
-    assert store_module._phrase("#$%").search(store_module._token_line("Its 5 s")) is None
-    assert store_module._phrase("box").search(store_module._token_line("Two boxes")) is not None
 
 
 def test_blank_rounds_are_left_out_of_rounds_and_unextracted(store: MemoryStore) -> None:

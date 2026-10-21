@@ -69,6 +69,28 @@ def text_problem(value: Any, cap: int = ENTRY_TEXT_MAX) -> Optional[str]:
     return None
 
 
+def token_line(text: str) -> str:
+    """``text``'s tokens (``index_tokens``) between single spaces, with a space at each end,
+    as ``forget_pattern`` searches them. A token never holds a space, so the spaces mark
+    exactly where tokens begin and end."""
+    return " " + " ".join(index_tokens(text)) + " "
+
+
+_NOWHERE = re.compile("(?!)")  # a pattern that matches no text
+
+
+def forget_pattern(text: str) -> re.Pattern[str]:
+    """What finds a forget's phrase in an entry, a fact or the log of the chats (R57, R68):
+    its tokens in order, whole, in a ``token_line``, the last allowed an "s" or "es" ("cat"
+    finds "cats", "box" "boxes"). So "ex" never finds "for example", nor "Sam" "Same time"
+    or "Samsung". A phrase with no tokens finds nothing, rather than nearly every text;
+    apply_entry_ops drops one as too vague anyway."""
+    tokens = index_tokens(text)
+    if not tokens:
+        return _NOWHERE
+    return re.compile(" " + re.escape(" ".join(tokens)) + "(?:e?s)? ")
+
+
 def apply_entry_ops(
     entries: Sequence[MemoryEntry],
     ops: Sequence[Dict[str, Any]],
@@ -89,12 +111,15 @@ def apply_entry_ops(
     - ``update`` sets the topic, text or ``valid_until`` it gives, and ``updated_at``. It
       "changes nothing" when it gives none of them, or only the values the entry has.
     - ``remove`` hides the entry: it stays in the list with ``hidden_at`` set to ``now``.
-    - ``forget`` hides every unlocked visible entry whose ``normalise_dedupe`` text holds
-      its own. That must be at least FORGET_TEXT_MIN (2) code points ("forget text too
-      short"): one letter is in nearly every text. And it must name something: a phrase
-      whose tokens (``index_tokens``) are all FORGET_VAGUE_WORDS, or that has none, such as
-      "it" or "that one", is "forget text too vague". It is applied even when nothing
-      matches; its record lists the ids it hid (``entry_ids``).
+    - ``forget`` hides every unlocked visible entry that holds its phrase as whole words
+      (``forget_pattern``, R68): the phrase's tokens (``index_tokens``) in order among the
+      entry's, the last allowed an "s" or "es", so "Sam" hides "Sam's birthday" and never
+      "Same time next week". The phrase must be at least FORGET_TEXT_MIN (2) code points
+      once normalised (``normalise_dedupe``; "forget text too short"): one letter is in
+      nearly every text. And it must name something: a phrase whose tokens are all
+      FORGET_VAGUE_WORDS, or that has none, such as "it" or "that one", is "forget text too
+      vague". It is applied even when nothing matches; its record lists the ids it hid
+      (``entry_ids``).
 
     ``update`` and ``remove`` need the id of a visible entry ("missing" otherwise) that is
     not locked: changes the engine proposes never touch a locked entry. Text is at most
@@ -230,15 +255,15 @@ def _forget(
     reason = ("no text" if text is None else None) or text_problem(text)
     if reason is not None:
         return [reason]
-    key = normalise_dedupe(text)
-    if len(key) < FORGET_TEXT_MIN:
+    if len(normalise_dedupe(text)) < FORGET_TEXT_MIN:
         return ["forget text too short"]
     if all(token in FORGET_VAGUE_WORDS for token in index_tokens(text)):
         return ["forget text too vague"]
+    phrase = forget_pattern(text)
     hidden: List[str] = []
     passed: List[str] = []
     for position, entry in enumerate(state):
-        if entry.hidden_at is not None or key not in normalise_dedupe(entry.text):
+        if entry.hidden_at is not None or not phrase.search(token_line(entry.text)):
             continue
         if entry.locked:
             passed.append("locked")
@@ -270,7 +295,9 @@ __all__ = [
     "ID_RE",
     "apply_entry_ops",
     "date_problem",
+    "forget_pattern",
     "id_problem",
     "text_problem",
+    "token_line",
     "topic_problem",
 ]

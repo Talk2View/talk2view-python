@@ -22,7 +22,6 @@ import importlib
 import json
 import logging
 import os
-import re
 import sqlite3
 import threading
 from dataclasses import asdict, dataclass, replace
@@ -67,7 +66,14 @@ from .models import (
     MemoryEntry,
     SearchHit,
 )
-from .ops import apply_entry_ops, date_problem, text_problem, topic_problem
+from .ops import (
+    apply_entry_ops,
+    date_problem,
+    forget_pattern,
+    text_problem,
+    token_line,
+    topic_problem,
+)
 from .search import (
     best_first,
     bm25_scan,
@@ -80,7 +86,7 @@ from .search import (
     round_hit,
     round_ref,
 )
-from .text import code_points, index_tokens, normalise_dedupe, normalise_for_index
+from .text import code_points, normalise_dedupe, normalise_for_index
 
 logger = logging.getLogger("talk2view.memory")
 
@@ -328,27 +334,6 @@ def _fact_text(text: str) -> str:
 def _round_text(user_text: str, assistant_text: str) -> str:
     """A round's ``seg_text``."""
     return normalise_for_index(user_text + "\n" + assistant_text)
-
-
-def _token_line(text: str) -> str:
-    """``text``'s tokens (``index_tokens``) between single spaces, with a space at each end,
-    as ``_phrase`` searches them. A token never holds a space, so the spaces mark exactly
-    where tokens begin and end."""
-    return " " + " ".join(index_tokens(text)) + " "
-
-
-_NOWHERE = re.compile("(?!)")  # a pattern that matches no text
-
-
-def _phrase(text: str) -> re.Pattern[str]:
-    """What finds a forget's phrase in the log (R57): its tokens in order, whole, in a
-    ``_token_line``, the last allowed an "s" or "es" ("cat" finds "cats", "box" "boxes"),
-    so "ex" never finds "for example". A phrase with no tokens finds nothing, rather than
-    nearly every text; apply_entry_ops drops one as too vague anyway."""
-    tokens = index_tokens(text)
-    if not tokens:
-        return _NOWHERE
-    return re.compile(" " + re.escape(" ".join(tokens)) + "(?:e?s)? ")
 
 
 def _create_private_file(path: Path) -> None:
@@ -737,12 +722,12 @@ class MemoryStore:
 
         A removed entry is hidden, not deleted: ``undo`` can bring it back for
         UNDO_WINDOW_S (30) seconds, and ``purge`` deletes it after that. A ``forget`` also
-        hides every fact, superseded ones included, whose ``normalise_dedupe`` text holds its
-        own, and clears its phrase from the log of the chats, where it matches as whole
-        tokens (see ``_phrase``): both texts of each round whose user text and reply hold it
-        are blanked, and the round's index row deleted, each summary whose title or text
-        holds it is cleared, and each chat title that holds it is blanked. Its record gains
-        the facts' ids (``fact_ids``) and the counts (``cleared_rounds``,
+        hides every fact, superseded ones included, that holds its phrase, and clears the
+        phrase from the log of the chats, matching as whole tokens everywhere, as in entries
+        (``forget_pattern``): both texts of each round whose user text and reply hold it are
+        blanked, and the round's index row deleted, each summary whose title or text holds
+        it is cleared, and each chat title that holds it is blanked. Its record gains the
+        facts' ids (``fact_ids``) and the counts (``cleared_rounds``,
         ``cleared_summaries``, ``cleared_titles``). The batch keeps each entry row it changed
         as it was before and after, the facts it hid, and the rounds, summaries and titles
         as they were, for ``undo``. A batch that changed entries or facts, or applied a
@@ -809,12 +794,12 @@ class MemoryStore:
         )
 
     def forget(self, text: str) -> AppliedBatch:
-        """Hide every unlocked entry and every fact whose ``normalise_dedupe`` text holds
-        ``text``'s, and clear it, as whole tokens, from the log of the chats, as one batch
-        ``undo`` can reverse: ``apply_ops`` with one ``forget``. The batch's
-        ``removed_entries`` and ``removed_facts`` are exactly what went;
-        ``cleared_rounds``, ``cleared_summaries`` and ``cleared_titles`` count what was
-        cleared. A locked entry it holds is passed by, with "locked" in ``dropped``. A
+        """Hide every unlocked entry and every fact that holds ``text`` as whole words
+        (``forget_pattern``: "Sam" finds "Sam's", never "Samsung"), and clear it from the
+        log of the chats, as one batch ``undo`` can reverse: ``apply_ops`` with one
+        ``forget``. The batch's ``removed_entries`` and ``removed_facts`` are exactly what
+        went; ``cleared_rounds``, ``cleared_summaries`` and ``cleared_titles`` count what
+        was cleared. A locked entry it holds is passed by, with "locked" in ``dropped``. A
         phrase under FORGET_TEXT_MIN (2) code points once normalised is dropped whole, as
         "forget text too short", and one that names nothing ("it", "that one") as "forget
         text too vague"."""
@@ -1825,19 +1810,20 @@ class MemoryStore:
         self, forgets: List[Dict[str, Any]], batch_id: str, now: str
     ) -> List[Fact]:
         """In the caller's write: for each forget record in ``forgets``, hide every visible
-        fact, superseded ones included, whose ``normalise_dedupe`` text holds the forget's,
-        and record their ids in its ``fact_ids``. Returns the facts hidden."""
+        fact, superseded ones included, that holds its phrase as whole words, as an entry
+        does (``forget_pattern``, R68), and record their ids in its ``fact_ids``. Returns the
+        facts hidden."""
         if not forgets:
             return []
         facts = [
-            (_fact_from_row(row), normalise_dedupe(row[1]))
+            (_fact_from_row(row), token_line(row[1]))
             for row in self._db.execute(_SELECT_VISIBLE_FACTS)
         ]
         hidden: List[Fact] = []
         taken: Set[str] = set()
         for record in forgets:
-            key = normalise_dedupe(record["text"])
-            matched = [fact for fact, text in facts if fact.id not in taken and key in text]
+            phrase = forget_pattern(record["text"])
+            matched = [fact for fact, line in facts if fact.id not in taken and phrase.search(line)]
             for fact in matched:
                 self._db.execute(
                     "UPDATE facts SET hidden_at = ?, hidden_batch = ? WHERE id = ?",
@@ -1852,24 +1838,24 @@ class MemoryStore:
         self, forgets: List[Dict[str, Any]]
     ) -> Tuple[List[List[Any]], List[List[Any]], List[List[Any]]]:
         """In the caller's write: for each forget record in ``forgets``, blank both texts of
-        every round whose user text and reply hold its phrase, as whole tokens (``_phrase``)
-        of the two together, as the index holds them, so a phrase split between them is
-        found too, and delete the round's index row; clear every summary whose title or
-        text holds it; and blank every chat title that holds it. Record the counts in its
-        ``cleared_rounds``, ``cleared_summaries`` and ``cleared_titles``. Returns the
-        rounds, summaries and titles as they were, for undo, as _SELECT_ROUNDS_WITH_TEXT,
-        _SELECT_SUMMARIES and _SELECT_TITLES give them."""
+        every round whose user text and reply hold its phrase, as whole tokens
+        (``forget_pattern``) of the two together, as the index holds them, so a phrase split
+        between them is found too, and delete the round's index row; clear every summary
+        whose title or text holds it; and blank every chat title that holds it. Record the
+        counts in its ``cleared_rounds``, ``cleared_summaries`` and ``cleared_titles``.
+        Returns the rounds, summaries and titles as they were, for undo, as
+        _SELECT_ROUNDS_WITH_TEXT, _SELECT_SUMMARIES and _SELECT_TITLES give them."""
         if not forgets:
             return [], [], []
         rounds = [
-            (list(row), _token_line(row[2] + "\n" + row[3]))
+            (list(row), token_line(row[2] + "\n" + row[3]))
             for row in self._db.execute(_SELECT_ROUNDS_WITH_TEXT)
         ]
         summaries = [
-            (list(row), _token_line(row[1] or ""), _token_line(row[2] or ""))
+            (list(row), token_line(row[1] or ""), token_line(row[2] or ""))
             for row in self._db.execute(_SELECT_SUMMARIES)
         ]
-        titles = [(list(row), _token_line(row[1])) for row in self._db.execute(_SELECT_TITLES)]
+        titles = [(list(row), token_line(row[1])) for row in self._db.execute(_SELECT_TITLES)]
         cleared_rounds: List[List[Any]] = []
         cleared_summaries: List[List[Any]] = []
         cleared_titles: List[List[Any]] = []
@@ -1877,7 +1863,7 @@ class MemoryStore:
         taken_summaries: Set[str] = set()
         taken_titles: Set[str] = set()
         for record in forgets:
-            phrase = _phrase(record["text"])
+            phrase = forget_pattern(record["text"])
             blanked = [
                 row
                 for row, line in rounds
