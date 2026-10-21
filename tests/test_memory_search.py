@@ -56,6 +56,7 @@ from talk2view.memory.search import (
     fts_query,
     fts_term,
     fuse,
+    matched_units,
     preselected,
     query_terms,
     round_hit,
@@ -397,7 +398,7 @@ def test_japanese_and_thai_questions_find_a_fact_sharing_a_word(store: MemorySto
 
 def test_a_mixed_query_has_the_latin_word_and_the_bigrams(store: MemoryStore) -> None:
     """R63: Latin written against Chinese is a prefix word between the runs' bigrams, and a
-    fact matching the word and one bigram has two terms, enough to be pre-selected."""
+    fact matching the word and one bigram has two units, enough to be pre-selected."""
     wo, yong, xie, jiao, ben = list(CODING[:2] + CODING[-3:])  # 我用 and 写脚本, in pinyin
     assert query_terms(CODING) == [wo + " " + yong, "python", xie + " " + jiao, jiao + " " + ben]
     assert build_fts_query(CODING) == '"{} {}" OR "python"* OR "{} {}" OR "{} {}"'.format(
@@ -746,8 +747,8 @@ def test_search_result_json_limits_and_shape(store: MemoryStore) -> None:
 
 def test_preselection_floor(store: MemoryStore) -> None:
     """D18: a hit goes with a turn unasked when its fused score is at least 1/64 (rank 4 or
-    better in its list) and it matches two distinct terms, in any script: a CJK or Thai
-    bigram is one term (R63)."""
+    better in its list) and two distinct units of it match (R74), in any script: a CJK or
+    Thai bigram is one unit (R63), as a word is."""
     terms = ["kayak", "trip"]
     tokens = index_tokens("A kayak trip.")
     assert PRESELECT_FLOOR == 1 / 64
@@ -759,7 +760,7 @@ def test_preselection_floor(store: MemoryStore) -> None:
     assert not strong_match(index_tokens(WANT_TO_GO + EAST), [EAST])
 
     _know(store, "f1", "Booked a kayak trip to Norway in June.", days_ago=2)
-    assert store.turn_payload("kayak")["recalled"] == []  # one term matched: too weak
+    assert store.turn_payload("kayak")["recalled"] == []  # one unit matched: too weak
     assert store.turn_payload("Should I pack a drybag for the kayak trip?")["recalled"] == [
         {
             "kind": "fact",
@@ -780,6 +781,36 @@ def test_preselection_floor(store: MemoryStore) -> None:
     ]
     # The current conversation's own rounds are in the turn's context already.
     assert store.turn_payload(TOKYO + TRAVEL, exclude_conversation="c1")["recalled"] == []
+
+
+def test_the_floor_counts_words_of_the_text_not_query_words(store: MemoryStore) -> None:
+    """R74: every query word stays a term, and pre-selection's floor counts matched units:
+    each distinct word of the text that a query word begins, and each CJK or Thai term that
+    occurs. One word of the text is one unit, however many query words begin it, so a query
+    holding a word two ways doesn't clear the floor on it alone; "go golfing" keeps
+    "golfing"."""
+    kayak, golf = "I kayak and I love kayaking", "go golfing"
+    assert query_terms(kayak) == ["kayak", "love", "kayaking"]
+    assert query_terms(golf) == ["go", "golfing"]
+    sunday = index_tokens("Went kayaking on Sunday.")
+    assert matched_units(sunday, query_terms(kayak)) == {"kayaking"}
+    assert not strong_match(index_tokens("Kayaking, then kayaking again."), query_terms(kayak))
+    melbourne = index_tokens("Went golfing at Royal Melbourne.")
+    assert matched_units(melbourne, query_terms(golf)) == {"golfing"}
+    saturday = index_tokens("Going golfing on Saturday.")
+    assert matched_units(saturday, query_terms(golf)) == {"going", "golfing"}
+    # A CJK or Thai term is one unit, as it was one term (R63): 去东 and 东京.
+    shared = matched_units(index_tokens(TRIP_FACT), query_terms(TRIP_QUESTION))
+    assert shared == {chr(0x53BB) + " " + EAST, TOKYO_PHRASE}
+
+    _know(store, "f1", "Went kayaking on Sunday.", days_ago=3)
+    _know(store, "f2", "Went golfing at Royal Melbourne.", days_ago=2)
+    _know(store, "f3", "Going golfing on Saturday.", days_ago=1)
+    assert _refs(store.search(kayak)) == ["f1"]
+    assert store.turn_payload(kayak)["recalled"] == []  # one unit
+    assert sorted(_refs(store.search(golf))) == ["f2", "f3"]
+    recalled = store.turn_payload(golf)["recalled"]
+    assert [item["text"] for item in recalled] == ["Going golfing on Saturday."]  # two units
 
 
 def test_the_current_conversations_facts_are_not_recalled(store: MemoryStore) -> None:
@@ -929,7 +960,7 @@ def test_recalled_items_keep_to_the_engines_rules() -> None:
     passed_over = [
         _recalled_hit(1, long_text + "y"),  # over RECALLED_TEXT_MAX
         _recalled_hit(2, "kayak trip", score=1 / 65),  # under the floor
-        _recalled_hit(3, "kayak only"),  # one term
+        _recalled_hit(3, "kayak only"),  # one unit
         (replace(_recalled_hit(4, "kayak trip")[0], date="2026-10-20T09:00:00Z"), "kayak trip"),
         (_recalled_hit(5, "")[0], "kayak trip"),  # no text
     ]

@@ -100,9 +100,10 @@ CJK_STOP_BIGRAMS: FrozenSet[str] = frozenset(
 #: Reciprocal rank fusion's k (spec §7.2 step 3).
 RRF_K = 60
 #: Pre-selection's floor (D18). A hit goes with a turn only when its fused score is at least
-#: 1 / (60 + 4), rank 4 or better in its list, and it matches at least PRESELECT_MIN_TERMS
-#: distinct terms, in any script: a CJK or Thai bigram is one term, as a word is (R63).
-#: Module constants, so the ablation can tune them.
+#: 1 / (60 + 4), rank 4 or better in its list, and at least PRESELECT_MIN_TERMS distinct
+#: units of its text match (``matched_units``, R74): words that a query word begins, and
+#: CJK or Thai terms (R63). The name is the plan's. Module constants, so the ablation can
+#: tune them.
 PRESELECT_FLOOR = 1 / 64
 PRESELECT_MIN_TERMS = 2
 #: A round excerpt's width in code points, ellipses aside (D19).
@@ -237,9 +238,16 @@ def term_frequency(tokens: Sequence[str], term: str) -> int:
     )
 
 
-def matched_terms(tokens: Sequence[str], terms: Sequence[str]) -> List[str]:
-    """The terms that occur in a text with the index tokens ``tokens``."""
-    return [term for term in terms if term_frequency(tokens, term)]
+def matched_units(tokens: Sequence[str], terms: Sequence[str]) -> Set[str]:
+    """The units of a text with the index tokens ``tokens`` that ``terms`` match, as
+    pre-selection's floor counts them (R74): each distinct token that a word, a prefix term,
+    begins, and each phrase, a CJK or Thai bigram or lone character, that occurs (R63). A
+    token is one unit however many words begin it: "kayak" and "kayaking" both begin
+    "kayaking". No word begins a CJK or Thai token, so a token and a phrase never meet."""
+    words = tuple(term for term in terms if not is_phrase(term))
+    units = {token for token in set(tokens) if token.startswith(words)}
+    units.update(term for term in terms if is_phrase(term) and term_frequency(tokens, term))
+    return units
 
 
 def _counter(term: str) -> Callable[[str], int]:
@@ -374,10 +382,10 @@ def fuse(
 
 def strong_match(tokens: Sequence[str], terms: Sequence[str]) -> bool:
     """Whether a text with the index tokens ``tokens`` matches enough of ``terms`` to be
-    pre-selected: PRESELECT_MIN_TERMS (2) distinct terms, in every script. A CJK or Thai
-    bigram counts as one term (R63), so a two-character word alone is not enough, as one
-    Latin word is not."""
-    return len(matched_terms(tokens, terms)) >= PRESELECT_MIN_TERMS
+    pre-selected: PRESELECT_MIN_TERMS (2) distinct ``matched_units`` (R74), in every
+    script. A CJK or Thai bigram is one unit (R63), so a two-character word alone is not
+    enough, as one word of the text is not, however many query words begin it."""
+    return len(matched_units(tokens, terms)) >= PRESELECT_MIN_TERMS
 
 
 def preselected(score: float, tokens: Sequence[str], terms: Sequence[str]) -> bool:
