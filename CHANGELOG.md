@@ -5,6 +5,8 @@ based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## Unreleased
 
+## [0.4.0] - 2026-10-22
+
 ### Added
 
 - `T2VAuth.start_anonymous(..., warm=True)`, for a guest started because the end-user's

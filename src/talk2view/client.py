@@ -54,7 +54,7 @@ _NO_REFRESH = object()
 
 DEFAULT_BASE_URL = "https://engine.talk2view.com"
 #: Keep in step with ``[project].version`` in pyproject.toml (test_release_surface checks).
-SDK_VERSION = "0.3.0"
+SDK_VERSION = "0.4.0"
 # Sent as X-T2V-Client so the engine can tell which SDK release a request came from.
 CLIENT_HEADER = "talk2view-python/" + SDK_VERSION
 #: Seconds for a request, and to connect a stream (TS ``requestTimeout``, 30 s).

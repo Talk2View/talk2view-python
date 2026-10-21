@@ -12,13 +12,13 @@ PACKAGE = Path(__file__).resolve().parents[1]
 
 
 def test_version_is_the_same_everywhere() -> None:
-    assert talk2view.__version__ == "0.3.0"
-    assert importlib.metadata.version("talk2view") == "0.3.0"
+    assert talk2view.__version__ == "0.4.0"
+    assert importlib.metadata.version("talk2view") == "0.4.0"
     pyproject = (PACKAGE / "pyproject.toml").read_text(encoding="utf-8")
-    assert 'version = "0.3.0"' in pyproject
+    assert 'version = "0.4.0"' in pyproject
     from talk2view.client import SDK_VERSION
 
-    assert SDK_VERSION == "0.3.0"
+    assert SDK_VERSION == "0.4.0"
 
 
 def test_mit_licence_matches_the_typescript_sdk() -> None:
