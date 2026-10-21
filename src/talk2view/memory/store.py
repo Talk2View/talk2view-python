@@ -466,18 +466,17 @@ _SELECT_TITLES = "SELECT id, title FROM conversations WHERE title != '' ORDER BY
 # Search's reads (search.py ranks and fuses). A search lists the facts and the rounds that
 # match, each list best first: bm25() ascending (FTS5's sign: lower is better), then the
 # newer, then the later row. It lists only visible facts, superseded ones only when asked,
-# and only rounds with text from conversations that aren't incognito. A date filter keeps
-# what was recorded or said at or after one time and before another (days.bounds: the
-# starts of the user's first day and of the day after the last), and for a turn's payload
-# a fact whose valid_until is before the user's today is left out too. The FTS5 lists take
-# the query, (for facts, whether superseded ones count,) the two times, (for facts, the
-# user's today; for rounds, the conversation to leave out,) and a LIMIT.
+# and only rounds with text from conversations that aren't incognito. A fact's valid_until
+# never leaves it out (R65): facts stay true as history. A date filter keeps what was
+# recorded or said at or after one time and before another (days.bounds: the starts of the
+# user's first day and of the day after the last). The FTS5 lists take the query, (for
+# facts, whether superseded ones count,) the two times, (for rounds, the conversation to
+# leave out,) and a LIMIT.
 _FTS_FACTS = (
     "SELECT f.id, f.recorded_at FROM facts_index JOIN facts AS f ON f.id = facts_index.fact_id"
     " WHERE facts_index MATCH ?1 AND f.hidden_at IS NULL AND (?2 OR f.superseded_by IS NULL)"
     " AND (?3 IS NULL OR f.recorded_at >= ?3) AND (?4 IS NULL OR f.recorded_at < ?4)"
-    " AND (?5 IS NULL OR f.valid_until IS NULL OR f.valid_until >= ?5)"
-    " ORDER BY bm25(facts_index), f.recorded_at DESC, f.rowid DESC LIMIT ?6"
+    " ORDER BY bm25(facts_index), f.recorded_at DESC, f.rowid DESC LIMIT ?5"
 )
 _FTS_ROUNDS = (
     "SELECT r.conversation_id, r.idx, r.at FROM rounds_index"
@@ -492,13 +491,12 @@ _FTS_ROUNDS = (
 )
 # The scan backend reads every index row, since bm25_scan measures the whole table as FTS5
 # does, each with its time, its row and whether the same filters list it (and, for a fact,
-# whether it is superseded). They take the two times (and, for facts, the user's today;
-# for rounds, the conversation to leave out).
+# whether it is superseded). They take the two times (and, for rounds, the conversation to
+# leave out).
 _SCAN_FACTS = (
     "SELECT fs.fact_id, fs.seg_text, f.recorded_at, f.rowid,"
     " f.id IS NOT NULL AND f.hidden_at IS NULL"
-    " AND (?1 IS NULL OR f.recorded_at >= ?1) AND (?2 IS NULL OR f.recorded_at < ?2)"
-    " AND (?3 IS NULL OR f.valid_until IS NULL OR f.valid_until >= ?3),"
+    " AND (?1 IS NULL OR f.recorded_at >= ?1) AND (?2 IS NULL OR f.recorded_at < ?2),"
     " f.superseded_by IS NOT NULL"
     " FROM facts_scan AS fs LEFT JOIN facts AS f ON f.id = fs.fact_id"
 )
@@ -512,11 +510,11 @@ _SCAN_ROUNDS = (
     " LEFT JOIN rounds AS r ON r.conversation_id = rs.conversation_id AND r.idx = rs.idx"
     " LEFT JOIN conversations AS c ON c.id = r.conversation_id"
 )
-# A hit's text, time and conversation names. A fact whose conversation has since turned
-# incognito takes no name from it.
+# A hit's text, time and conversation names (and a fact's valid_until). A fact whose
+# conversation has since turned incognito takes no name from it.
 _FACT_HIT = (
-    "SELECT f.text, f.recorded_at, c.title, c.summary_title, c.incognito FROM facts AS f"
-    " LEFT JOIN conversations AS c ON c.id = f.conversation_id WHERE f.id = ?"
+    "SELECT f.text, f.recorded_at, f.valid_until, c.title, c.summary_title, c.incognito"
+    " FROM facts AS f LEFT JOIN conversations AS c ON c.id = f.conversation_id WHERE f.id = ?"
 )
 _ROUND_HIT = (
     "SELECT r.user_text, r.assistant_text, r.at, c.title, c.summary_title FROM rounds AS r"
@@ -1495,7 +1493,7 @@ class MemoryStore:
         is, both with empty lists. Otherwise "on": the visible entries not yet expired; the
         recent conversations but the current one and incognito ones; and the hits of a search
         for ``latest_user_message`` in older conversations (the current one's rounds left
-        out) that clear the pre-selection floor, facts that have expired left out."""
+        out) that clear the pre-selection floor."""
         today = days.today(_utc(self._clock()), timezone).isoformat()
         with self._read():
             if self.paused:
@@ -1517,7 +1515,6 @@ class MemoryStore:
                 limit=payload.PRESELECT_SEARCH_LIMIT,
                 exclude_conversation=exclude_conversation,
                 timezone=timezone,
-                valid_on=today,
             )
         return {
             "status": "on",
@@ -1535,12 +1532,10 @@ class MemoryStore:
         limit: int,
         exclude_conversation: Optional[str] = None,
         timezone: Optional[str] = None,
-        valid_on: Optional[str] = None,
     ) -> List[Tuple[SearchHit, str]]:
         """``search``'s hits for ``terms``, each with the whole text it was indexed by
         (pre-selection's floor counts the terms in it), leaving out the rounds of
-        ``exclude_conversation`` and, with ``valid_on`` (the user's today), the facts whose
-        ``valid_until`` is before it."""
+        ``exclude_conversation``."""
         for name, value in (("from_date", from_date), ("to_date", to_date)):
             if date_problem(value):
                 raise ValueError(name + " must be a YYYY-MM-DD date")
@@ -1550,9 +1545,9 @@ class MemoryStore:
         start, end = span
         with self._read():
             rounds = self._ranked_rounds(terms, start, end, exclude_conversation, limit)
-            facts = self._ranked_facts(terms, start, end, valid_on, False, limit)
+            facts = self._ranked_facts(terms, start, end, False, limit)
             if not facts and not rounds:  # superseded facts only when nothing else matches
-                facts = self._ranked_facts(terms, start, end, valid_on, True, limit)
+                facts = self._ranked_facts(terms, start, end, True, limit)
             lists = [[ref for ref, _ in facts], [ref for ref, _ in rounds]]
             fused = fuse(lists, dict(facts + rounds))[:limit]
             return [self._hit(ref, score, terms, timezone) for ref, score in fused]
@@ -1562,21 +1557,19 @@ class MemoryStore:
         terms: List[str],
         start: Optional[str],
         end: Optional[str],
-        valid_on: Optional[str],
         superseded: bool,
         limit: int,
     ) -> List[Tuple[str, str]]:
         """The facts that match, best first, at most ``limit``, as ``(id, recorded_at)``:
-        recorded from ``start`` to before ``end``, still valid on ``valid_on``."""
+        recorded from ``start`` to before ``end``."""
         if self.backend != "scan":
             return [
                 (fact_id, recorded_at)
                 for fact_id, recorded_at in self._query(
-                    _FTS_FACTS,
-                    (fts_query(terms), int(superseded), start, end, valid_on, limit),
+                    _FTS_FACTS, (fts_query(terms), int(superseded), start, end, limit)
                 )
             ]
-        rows = self._query(_SCAN_FACTS, (start, end, valid_on))
+        rows = self._query(_SCAN_FACTS, (start, end))
         scores = dict(
             bm25_scan([(row[0], row[1]) for row in rows], terms, cache=self._scan_cache["facts"])
         )
@@ -1639,9 +1632,12 @@ class MemoryStore:
             date = days.day(at, timezone)
             hit = round_hit(ref, score, user_text, assistant_text, date, name, terms)
             return hit, user_text + "\n" + assistant_text
-        text, recorded_at, title, summary_title, incognito = self._query(_FACT_HIT, (ref,))[0]
+        text, recorded_at, valid_until, title, summary_title, incognito = self._query(
+            _FACT_HIT, (ref,)
+        )[0]
         name = "" if incognito else conversation_title(title, summary_title)
-        return fact_hit(ref, score, text, days.day(recorded_at, timezone), name), text
+        date = days.day(recorded_at, timezone)
+        return fact_hit(ref, score, text, date, name, valid_until), text
 
     # ── settings and lifecycle ──
 

@@ -26,7 +26,7 @@ from typing import Any, Callable, Dict, Iterator, List, Optional, Sequence, Set,
 import pytest
 
 from talk2view.memory import TOPICS, MemoryStore, SearchHit, days, index_tokens, normalise_for_index
-from talk2view.memory.models import RESULT_CHARS_MAX
+from talk2view.memory.models import FACT_TEXT_MAX, RECALLED_TEXT_MAX, RESULT_CHARS_MAX
 from talk2view.memory.payload import keep_within, recalled_items
 from talk2view.memory.search import (
     CJK_STOP_BIGRAMS,
@@ -1115,20 +1115,30 @@ def test_an_entry_is_sent_until_its_last_day_ends_where_the_user_is(
     ]
 
 
-def test_a_fact_past_its_valid_until_is_not_preselected_but_still_found(
+def test_a_fact_gives_its_valid_until_and_is_recalled_past_it(
     store: MemoryStore, clock: FakeClock
 ) -> None:
-    """R64: a fact whose valid_until is over where the user is goes unsent with a turn, as
-    an expired entry does. A search still finds it: facts stay true as history."""
-    clock.now = EVENING
+    """R65: a fact's valid_until never keeps it out of a search or a turn, wherever the user
+    is: facts stay true as history. A fact hit with one, past or to come, gives it before
+    its text, in a search_memory result and in a recalled item, within the engine's cap."""
+    clock.now = EVENING  # the 11th in Sydney, the 10th in Los Angeles
     flight = "Flies home from Tokyo on 10 November."
+    again = "Flies home from Tokyo again on 3 December."
     _know(store, "f1", flight, recorded_at="2026-10-01T09:00:00Z", valid_until="2026-11-10")
+    _know(store, "f2", again, recorded_at="2026-10-02T09:00:00Z", valid_until="2026-12-03")
+    shown = ["(until 2026-11-10) " + flight, "(until 2026-12-03) " + again]
     question = "When is my flight home from Tokyo?"
-    assert [item["text"] for item in store.turn_payload(question, timezone=LA)["recalled"]] == [
-        flight
-    ]
-    assert store.turn_payload(question, timezone=SYDNEY)["recalled"] == []
-    assert _refs(store.search(question, timezone=SYDNEY)) == ["f1"]
+    for zone in (SYDNEY, LA):
+        recalled = store.turn_payload(question, timezone=zone)["recalled"]
+        assert sorted(item["text"] for item in recalled) == shown
+        result = json.loads(store.search_result_json(question, timezone=zone))
+        assert sorted(item["text"] for item in result["results"]) == shown
+    # The longest fact the store keeps, with its bound, is within the engine's cap whole.
+    longest = (flight + " " + WORD * 40)[:FACT_TEXT_MAX]
+    _know(store, "f3", longest, recorded_at="2026-10-03T09:00:00Z", valid_until="2026-11-10")
+    recalled = store.turn_payload(question, timezone=SYDNEY)["recalled"]
+    assert "(until 2026-11-10) " + longest in [item["text"] for item in recalled]
+    assert FACT_TEXT_MAX + len("(until 2026-11-10) ") <= RECALLED_TEXT_MAX
 
 
 def test_the_date_filter_and_hit_dates_are_the_users_days(store: MemoryStore) -> None:

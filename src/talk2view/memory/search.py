@@ -464,10 +464,16 @@ def excerpt(
     return (ELLIPSIS if start > 0 else "") + piece + (ELLIPSIS if end < len(text) else "")
 
 
-def fact_hit(ref: str, score: float, text: str, date: str, title: str) -> SearchHit:
+def fact_hit(
+    ref: str, score: float, text: str, date: str, title: str, valid_until: Optional[str] = None
+) -> SearchHit:
     """A fact as a search result: its text whole, dated ``date``, the user's day it was
-    recorded (``days.day``)."""
-    return SearchHit(kind="fact", date=date, conversation=title, text=text, score=score, ref=ref)
+    recorded (``days.day``). A fact with a ``valid_until`` gives it before its text, as the
+    engine shows an entry's (R65): "(until 2026-11-10) Flies home on 10 November.". One past
+    it is a hit still, true as history. The bound's 19 code points and FACT_TEXT_MAX (400)
+    keep within RECALLED_TEXT_MAX (1,000)."""
+    shown = "(until " + valid_until + ") " + text if valid_until else text
+    return SearchHit(kind="fact", date=date, conversation=title, text=shown, score=score, ref=ref)
 
 
 def round_hit(
