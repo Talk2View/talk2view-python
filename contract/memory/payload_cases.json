@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "about": "A turn's `memory` field (spec §8.1). Each case gives `now`, `timezone` (optional), `conversation` (the current one, or null), `message` (the user's latest, the query of pre-selection, or null) and its own `corpus`: `conversations`, `rounds` and `facts` as in search_cases.json, and `entries` ({id, topic, text, updated_at, valid_until?, locked?}, locked false when left out). A conversation marked `incognito` has no rounds. `expect` is turn_payload(message, exclude_conversation=conversation, timezone) at `now`: {status, entries, recent, recalled}, every list in order. A case without `timezone` runs in UTC; with one, each day (today, for expiry, each entry's updated_at, each conversation's last_active_at and each recalled date) is a day in that IANA zone. Every cap counts code points. `entries`: the visible ones still valid today (a valid_until before today has expired), as {id, topic, text, updated_at, valid_until?}, at most 40 and 6,000 of text; over a cap, unlocked entries are left out before locked ones, the least recently updated first, so what is kept is the longest run that fits of them ranked locked first, then the most recently updated first, sent in the store's order. `recent`: the conversations most recently active first, but the current one and incognito ones, as {id, title, summary, last_active_at}, at most 8 and 3,000 of title and summary; the title is the conversation's, else its summary's, and one with neither is passed over. `recalled`: the hits of a search for `message` (limit 8), leaving out the current conversation's rounds and the facts drawn from it, that clear pre-selection's floor: a fused score of at least 1/64, and 2 units of a maximum matching of query words to the words of the text they begin, a CJK or Thai bigram one unit (R63, R75); as {kind, date, conversation_title, text}, at most 4 and 4,000 of conversation_title and text. A fact with a valid_until reads \"(until YYYY-MM-DD) \" before its text, and one past it is still recalled (R65). Python's MemoryStore.turn_payload replays every case on each backend (talk2view-python, tests/test_contract_memory.py).",
+  "about": "A turn's `memory` field (spec §8.1). Each case gives `now`, `timezone` (optional), `conversation` (the current one, or null), `message` (the user's latest, the query of pre-selection, its terms built as search_cases.json's about says, or null) and its own `corpus`: `conversations`, `rounds` and `facts` as in search_cases.json, and `entries` ({id, topic, text, updated_at, valid_until?, locked?}, locked false when left out). An incognito conversation's rounds are recorded first, as any other's; marking it then deletes them and its summary, and keeps its title. `expect` is turn_payload(message, exclude_conversation=conversation, timezone) at `now`: {status, entries, recent, recalled}, every list in order. A case without `timezone` runs in UTC; with one, each day (today, for expiry, each entry's updated_at, each conversation's last_active_at and each recalled date) is a day in that IANA zone. Every cap counts code points, and a list over a cap keeps the longest run of its items, in its order, that fits: an item that would fit after one that doesn't is left out too. `entries`: the visible ones still valid today (a valid_until before today has expired), as {id, topic, text, updated_at, valid_until?}, at most 40 and 6,000 of text, ranked for the caps locked first, then the most recently updated first, so unlocked entries are left out before locked ones, the least recently updated first; they are sent in the store's order. `recent`: the conversations most recently active first, but the current one and incognito ones, as {id, title, summary, last_active_at}, at most 8 and 3,000 of title and summary; the title is the conversation's, else its summary's, and one with neither is passed over before the caps are counted. `recalled`: the hits of a search for `message` (limit 8), best first, leaving out the current conversation's rounds and the facts drawn from it, that clear pre-selection's floor: a fused score of at least 1/64, and 2 units of the text, which for a round is its user_text and assistant_text without labels, and for a fact its text without the (until) prefix. Each CJK or Thai term of the query that the text holds is one unit, and the query's words make as many as a maximum matching pairs them with distinct words of the text that they begin, each word on either side in one pair at most (R63, R75). Recalled hits are {kind, date, conversation_title, text}, at most 4 and 4,000 of conversation_title and text; the 4,000 can't bind with the store's own maxima, as 4 times (120 + 614) is 2,936, a title being at most 120 code points and an excerpt 614 with its ellipses and label. A fact with a valid_until reads \"(until YYYY-MM-DD) \" before its text, and one past it is still recalled (R65). Python's MemoryStore.turn_payload replays every case on each backend (talk2view-python, tests/test_contract_memory.py).",
   "cases": [
     {
       "id": "over_40_entries_drops_oldest_unlocked",
@@ -1228,6 +1228,7 @@
           },
           {
             "id": "c2",
+            "title": "Private chat",
             "incognito": true
           },
           {
@@ -1249,6 +1250,13 @@
             "user_text": "Plan a weekend hike.",
             "assistant_text": "Here is a plan.",
             "at": "2026-10-15T09:00:00Z"
+          },
+          {
+            "conversation_id": "c2",
+            "idx": 1,
+            "user_text": "Keep this between us.",
+            "assistant_text": "Of course.",
+            "at": "2026-10-21T09:00:00Z"
           },
           {
             "conversation_id": "c3",
@@ -1291,6 +1299,402 @@
           }
         ],
         "recalled": []
+      }
+    },
+    {
+      "id": "recent_over_8_keeps_the_most_recent",
+      "now": "2026-10-21T10:00:00Z",
+      "conversation": null,
+      "message": null,
+      "corpus": {
+        "conversations": [
+          {
+            "id": "c1",
+            "title": "Chat 1"
+          },
+          {
+            "id": "c2",
+            "title": "Chat 2"
+          },
+          {
+            "id": "c3",
+            "title": "Chat 3"
+          },
+          {
+            "id": "c4",
+            "title": "Chat 4"
+          },
+          {
+            "id": "c5",
+            "title": "Chat 5"
+          },
+          {
+            "id": "c6",
+            "title": "Chat 6"
+          },
+          {
+            "id": "c7",
+            "title": "Chat 7"
+          },
+          {
+            "id": "c8",
+            "title": "Chat 8"
+          },
+          {
+            "id": "c9",
+            "title": "Chat 9"
+          },
+          {
+            "id": "c10",
+            "title": "Chat 10"
+          },
+          {
+            "id": "c11"
+          }
+        ],
+        "rounds": [
+          {
+            "conversation_id": "c1",
+            "idx": 1,
+            "user_text": "Hello 1.",
+            "assistant_text": "Hi.",
+            "at": "2026-10-11T09:00:00Z"
+          },
+          {
+            "conversation_id": "c2",
+            "idx": 1,
+            "user_text": "Hello 2.",
+            "assistant_text": "Hi.",
+            "at": "2026-10-12T09:00:00Z"
+          },
+          {
+            "conversation_id": "c3",
+            "idx": 1,
+            "user_text": "Hello 3.",
+            "assistant_text": "Hi.",
+            "at": "2026-10-13T09:00:00Z"
+          },
+          {
+            "conversation_id": "c4",
+            "idx": 1,
+            "user_text": "Hello 4.",
+            "assistant_text": "Hi.",
+            "at": "2026-10-14T09:00:00Z"
+          },
+          {
+            "conversation_id": "c5",
+            "idx": 1,
+            "user_text": "Hello 5.",
+            "assistant_text": "Hi.",
+            "at": "2026-10-15T09:00:00Z"
+          },
+          {
+            "conversation_id": "c6",
+            "idx": 1,
+            "user_text": "Hello 6.",
+            "assistant_text": "Hi.",
+            "at": "2026-10-16T09:00:00Z"
+          },
+          {
+            "conversation_id": "c7",
+            "idx": 1,
+            "user_text": "Hello 7.",
+            "assistant_text": "Hi.",
+            "at": "2026-10-17T09:00:00Z"
+          },
+          {
+            "conversation_id": "c8",
+            "idx": 1,
+            "user_text": "Hello 8.",
+            "assistant_text": "Hi.",
+            "at": "2026-10-18T09:00:00Z"
+          },
+          {
+            "conversation_id": "c9",
+            "idx": 1,
+            "user_text": "Hello 9.",
+            "assistant_text": "Hi.",
+            "at": "2026-10-19T09:00:00Z"
+          },
+          {
+            "conversation_id": "c10",
+            "idx": 1,
+            "user_text": "Hello 10.",
+            "assistant_text": "Hi.",
+            "at": "2026-10-20T09:00:00Z"
+          },
+          {
+            "conversation_id": "c11",
+            "idx": 1,
+            "user_text": "Hello again.",
+            "assistant_text": "Hi.",
+            "at": "2026-10-21T09:00:00Z"
+          }
+        ]
+      },
+      "expect": {
+        "status": "on",
+        "entries": [],
+        "recent": [
+          {
+            "id": "c10",
+            "title": "Chat 10",
+            "summary": "",
+            "last_active_at": "2026-10-20"
+          },
+          {
+            "id": "c9",
+            "title": "Chat 9",
+            "summary": "",
+            "last_active_at": "2026-10-19"
+          },
+          {
+            "id": "c8",
+            "title": "Chat 8",
+            "summary": "",
+            "last_active_at": "2026-10-18"
+          },
+          {
+            "id": "c7",
+            "title": "Chat 7",
+            "summary": "",
+            "last_active_at": "2026-10-17"
+          },
+          {
+            "id": "c6",
+            "title": "Chat 6",
+            "summary": "",
+            "last_active_at": "2026-10-16"
+          },
+          {
+            "id": "c5",
+            "title": "Chat 5",
+            "summary": "",
+            "last_active_at": "2026-10-15"
+          },
+          {
+            "id": "c4",
+            "title": "Chat 4",
+            "summary": "",
+            "last_active_at": "2026-10-14"
+          },
+          {
+            "id": "c3",
+            "title": "Chat 3",
+            "summary": "",
+            "last_active_at": "2026-10-13"
+          }
+        ],
+        "recalled": []
+      }
+    },
+    {
+      "id": "recent_over_3000_code_points_keeps_the_longest_run",
+      "now": "2026-10-21T10:00:00Z",
+      "conversation": null,
+      "message": null,
+      "corpus": {
+        "conversations": [
+          {
+            "id": "c1",
+            "title": "éééééééééééééééééééééééééééééé😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀TA",
+            "summary_text": "éééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééé😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀SA"
+          },
+          {
+            "id": "c2",
+            "title": "éééééééééééééééééééééééééééééé😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀TB",
+            "summary_text": "éééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééé😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀SB"
+          },
+          {
+            "id": "c3",
+            "title": "éééééééééééééééééééééééééééééé😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀TC",
+            "summary_text": "éééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééé😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀SC"
+          },
+          {
+            "id": "c4",
+            "title": "éééééééééééééééééééééééééééééé😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀TD",
+            "summary_text": "éééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééé😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀SD"
+          },
+          {
+            "id": "c5",
+            "title": "éééééééééééééééééééééééééééééé😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀TE",
+            "summary_text": "😀"
+          },
+          {
+            "id": "c6",
+            "title": "Short chat"
+          }
+        ],
+        "rounds": [
+          {
+            "conversation_id": "c1",
+            "idx": 1,
+            "user_text": "Hello.",
+            "assistant_text": "Hi.",
+            "at": "2026-10-20T09:00:00Z"
+          },
+          {
+            "conversation_id": "c2",
+            "idx": 1,
+            "user_text": "Hello.",
+            "assistant_text": "Hi.",
+            "at": "2026-10-19T09:00:00Z"
+          },
+          {
+            "conversation_id": "c3",
+            "idx": 1,
+            "user_text": "Hello.",
+            "assistant_text": "Hi.",
+            "at": "2026-10-18T09:00:00Z"
+          },
+          {
+            "conversation_id": "c4",
+            "idx": 1,
+            "user_text": "Hello.",
+            "assistant_text": "Hi.",
+            "at": "2026-10-17T09:00:00Z"
+          },
+          {
+            "conversation_id": "c5",
+            "idx": 1,
+            "user_text": "Hello.",
+            "assistant_text": "Hi.",
+            "at": "2026-10-16T09:00:00Z"
+          },
+          {
+            "conversation_id": "c6",
+            "idx": 1,
+            "user_text": "Hello.",
+            "assistant_text": "Hi.",
+            "at": "2026-10-15T09:00:00Z"
+          }
+        ]
+      },
+      "expect": {
+        "status": "on",
+        "entries": [],
+        "recent": [
+          {
+            "id": "c1",
+            "title": "éééééééééééééééééééééééééééééé😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀TA",
+            "summary": "éééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééé😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀SA",
+            "last_active_at": "2026-10-20"
+          },
+          {
+            "id": "c2",
+            "title": "éééééééééééééééééééééééééééééé😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀TB",
+            "summary": "éééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééé😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀SB",
+            "last_active_at": "2026-10-19"
+          },
+          {
+            "id": "c3",
+            "title": "éééééééééééééééééééééééééééééé😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀TC",
+            "summary": "éééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééé😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀SC",
+            "last_active_at": "2026-10-18"
+          },
+          {
+            "id": "c4",
+            "title": "éééééééééééééééééééééééééééééé😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀TD",
+            "summary": "éééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééé😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀SD",
+            "last_active_at": "2026-10-17"
+          }
+        ],
+        "recalled": []
+      }
+    },
+    {
+      "id": "recalled_over_4_keeps_the_best",
+      "now": "2026-10-21T10:00:00Z",
+      "conversation": null,
+      "message": "When is my kayak trip to Norway?",
+      "corpus": {
+        "conversations": [
+          {
+            "id": "c1",
+            "title": "Norway trip"
+          }
+        ],
+        "rounds": [
+          {
+            "conversation_id": "c1",
+            "idx": 1,
+            "user_text": "Should we rent a kayak from the club or buy one before the summer?",
+            "assistant_text": "Renting is cheaper unless you paddle often, so plan the trip first and decide after.",
+            "at": "2026-10-15T09:00:00Z"
+          },
+          {
+            "conversation_id": "c1",
+            "idx": 2,
+            "user_text": "Is the kayak trip to Norway still on this week?",
+            "assistant_text": "Yes, but pack warm layers and check the forecast again on Friday.",
+            "at": "2026-10-17T09:00:00Z"
+          },
+          {
+            "conversation_id": "c1",
+            "idx": 3,
+            "user_text": "Booked the kayak trip to Norway.",
+            "assistant_text": "Great, enjoy the fjords!",
+            "at": "2026-10-20T09:00:00Z"
+          }
+        ],
+        "facts": [
+          {
+            "id": "f1",
+            "text": "Kayak trip to Norway in June.",
+            "topic": "ongoing",
+            "recorded_at": "2026-10-19T09:00:00Z"
+          },
+          {
+            "id": "f2",
+            "text": "Packed dry bags and a spare paddle for the kayak trip to Norway.",
+            "topic": "ongoing",
+            "recorded_at": "2026-10-18T09:00:00Z"
+          },
+          {
+            "id": "f3",
+            "text": "Asked the club about renting a kayak for a weekend trip up the coast.",
+            "topic": "ongoing",
+            "recorded_at": "2026-10-16T09:00:00Z"
+          }
+        ]
+      },
+      "expect": {
+        "status": "on",
+        "entries": [],
+        "recent": [
+          {
+            "id": "c1",
+            "title": "Norway trip",
+            "summary": "",
+            "last_active_at": "2026-10-20"
+          }
+        ],
+        "recalled": [
+          {
+            "kind": "excerpt",
+            "date": "2026-10-20",
+            "conversation_title": "Norway trip",
+            "text": "User: Booked the kayak trip to Norway.\nAssistant: Great, enjoy the fjords!"
+          },
+          {
+            "kind": "fact",
+            "date": "2026-10-19",
+            "conversation_title": "",
+            "text": "Kayak trip to Norway in June."
+          },
+          {
+            "kind": "fact",
+            "date": "2026-10-18",
+            "conversation_title": "",
+            "text": "Packed dry bags and a spare paddle for the kayak trip to Norway."
+          },
+          {
+            "kind": "excerpt",
+            "date": "2026-10-17",
+            "conversation_title": "Norway trip",
+            "text": "User: Is the kayak trip to Norway still on this week?\nAssistant: Yes, but pack warm layers and check the forecast again on Friday."
+          }
+        ]
       }
     },
     {

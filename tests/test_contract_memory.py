@@ -1,10 +1,11 @@
-"""Replay contract/memory: the memory store's op, search and payload cases.
+"""Replay contract/memory: the memory store's op, search and payload cases, and its word lists.
 
 The cases pin the on-device store (spec §7.1 to §7.3, §8.1) for every port: the Swift and
 TypeScript stores replay the same files. Here ``apply_entry_ops`` and ``MemoryStore`` replay
 each case, the store on each backend, so the scan backend must find and rank what FTS5 does.
 A case's days are in its ``timezone``, or in UTC when it gives none: the system's zone, as
-``days`` reads it, is pinned to UTC.
+``days`` reads it, is pinned to UTC. word_lists.json ships the lists the cases turn on, and
+must stay the store's own.
 """
 
 from __future__ import annotations
@@ -21,8 +22,9 @@ import pytest
 
 from talk2view.memory import Backend, MemoryStore, days
 from talk2view.memory.models import Fact, MemoryEntry
-from talk2view.memory.ops import apply_entry_ops
-from talk2view.memory.search import result_json
+from talk2view.memory.ops import FORGET_VAGUE_WORDS, apply_entry_ops
+from talk2view.memory.search import CJK_STOP_BIGRAMS, result_json
+from talk2view.memory.text import STOP_WORDS
 
 from .test_memory_search import _loaded_zone
 from .test_memory_store import BACKENDS, FakeClock
@@ -75,6 +77,16 @@ def test_units_note_present() -> None:
         assert len(rows) == 1, name
         assert "code points" in rows[0], name
         assert "code points" in fixture["about"], name
+
+
+def test_word_lists_are_the_stores() -> None:
+    """word_lists.json holds the store's own lists, sorted, so a port's lists and this
+    store's can't drift apart (R80)."""
+    lists = _load("word_lists.json")
+    assert lists["version"] == 1
+    assert lists["stop_words"] == sorted(STOP_WORDS)
+    assert lists["cjk_stop_bigrams"] == sorted(CJK_STOP_BIGRAMS)
+    assert lists["forget_vague_words"] == sorted(FORGET_VAGUE_WORDS)
 
 
 # ── op_cases.json ──
