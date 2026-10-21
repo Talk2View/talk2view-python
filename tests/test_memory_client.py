@@ -521,6 +521,56 @@ def test_undo_is_false_and_never_raises(
     ]
 
 
+def test_an_approval_with_no_paused_turn_shows_no_earlier_batch(memory: T2VMemory) -> None:
+    """The rest of a paused turn keeps the batch its first half applied, but an approval
+    answered with no paused turn to go on with (another turn ran since, say) starts
+    last_applied from None, as a turn does: an earlier turn's batch never shows."""
+    paused = [
+        ChatEvent(type="memory", tool_call_id="c1", memory_ops=[add("Works at Canva")]),
+        ChatEvent(type="approval_required", tool_call_id="ap1"),
+    ]
+    rest = [ChatEvent(type="text", content="Sent."), ChatEvent(type="done")]
+    list(memory.observe_turn("Email Alex that I work at Canva", iter(paused)))
+    batch = memory.last_applied
+    assert batch is not None
+    assert [memory.last_applied for _ in memory.observe_approval(iter(rest))] == [batch, batch]
+
+    other = [
+        ChatEvent(type="memory", tool_call_id="c2", memory_ops=[add("Lives in Perth")]),
+        ChatEvent(type="done"),
+    ]
+    list(memory.observe_turn("I live in Perth", iter(other)))
+    assert memory.last_applied is not None
+
+    assert [memory.last_applied for _ in memory.observe_approval(iter(rest))] == [None, None]
+
+
+def test_last_applied_stays_none_when_every_op_was_dropped(memory: T2VMemory) -> None:
+    """R87: a memory event whose ops were all dropped (a duplicate add) changed nothing, so
+    last_applied is None and no host shows "Memory updated"; on_event still returns the
+    batch, with the rule that dropped them. Such an event replaces an earlier event's
+    batch with None, as every memory event replaces the one before."""
+    memory.store.apply_ops([add("Works at Canva")], source="said")
+    duplicate = ChatEvent(type="memory", tool_call_id="c1", memory_ops=[add("Works at Canva")])
+
+    batch = memory.on_event(duplicate)
+
+    assert batch is not None and (batch.applied, batch.dropped) == ([], ["duplicate"])
+    turn = [
+        ChatEvent(type="memory", tool_call_id="c2", memory_ops=[add("Lives in Perth")]),
+        duplicate,
+        ChatEvent(type="done"),
+    ]
+    seen = [
+        memory.last_applied
+        for event in memory.observe_turn("I live in Perth and work at Canva", iter(turn))
+        if event.type == "memory"
+    ]
+    assert seen[0] is not None and [record["op"] for record in seen[0].applied] == ["add"]
+    assert seen[1:] == [None] and memory.last_applied is None
+    assert _texts(memory) == ["Works at Canva", "Lives in Perth"]
+
+
 # ── search_memory ──
 
 

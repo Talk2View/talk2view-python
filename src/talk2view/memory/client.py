@@ -160,9 +160,10 @@ class T2VMemory:
         §10.1: the "Memory updated" chip, with its undo). It is set before that event is
         passed on, so a host that receives a ``memory`` event from ``chat()`` finds the
         event's batch here; ``undo(last_applied.id)`` takes it back within 30 s. None at the
-        start of each turn, and after an event the memory didn't apply (paused, incognito,
-        no ops, or the store failed). A batch whose ops were all dropped has an empty
-        ``applied``."""
+        start of each turn, and after an event that changed nothing (R87): memory paused,
+        the chat incognito, no ops, every op dropped (``on_event`` still returns that batch,
+        with the rules that dropped them), or the store failed. A batch here always has
+        something in ``applied``."""
         return self._last_applied
 
     def undo(self, batch_id: str) -> bool:
@@ -276,7 +277,8 @@ class T2VMemory:
         """Apply a ``memory`` event's ops (spec §7.3) to the store as one undoable batch, and
         return it. None for any other event, for an event with no ops (R62: no empty batch),
         while memory is paused or the conversation incognito, when closed, or when the store
-        fails (logged)."""
+        fails (logged). A batch whose ops were all dropped is returned too, its ``applied``
+        empty and its ``dropped`` naming the rules; ``last_applied`` never shows one (R87)."""
         if event.type != "memory" or not event.memory_ops:
             return None
         with self._lock:
@@ -298,12 +300,13 @@ class T2VMemory:
 
     def observe_turn(self, user_text: str, events: Iterator[ChatEvent]) -> Iterator[ChatEvent]:
         """Pass a turn's events through, following them. Each ``memory`` event is applied
-        (``on_event``), and its batch made ``last_applied``, before it is passed on; the
-        reply's ``text`` is gathered, and on ``done`` the round is recorded in the store's
-        log, once. Never for a turn that met an ``error`` or was stopped, and never for one
-        that applied a ``forget`` or a ``remove`` (R67): its own words name what was
-        forgotten. A paused or incognito turn applies and records nothing. A turn an
-        ``approval_required`` pauses goes on in ``observe_approval``."""
+        (``on_event``) before it is passed on, and ``last_applied`` set to its batch, or to
+        None when it changed nothing; the reply's ``text`` is gathered, and on ``done`` the
+        round is recorded in the store's log, once. Never for a turn that met an ``error``
+        or was stopped, and never for one that applied a ``forget`` or a ``remove`` (R67):
+        its own words name what was forgotten. A paused or incognito turn applies and
+        records nothing. A turn an ``approval_required`` pauses goes on in
+        ``observe_approval``."""
         with self._lock:
             turn = _Turn(user_text, self.conversation_id, self._live())
             self._parked = None
@@ -313,10 +316,15 @@ class T2VMemory:
     def observe_approval(self, events: Iterator[ChatEvent]) -> Iterator[ChatEvent]:
         """Pass through the events of ``Talk2View.respond_to_approval``, the rest of the turn
         an approval paused, following them as ``observe_turn`` does, so that turn's memory
-        events apply and its round is recorded when it is done. With no paused turn to go
-        on with, the events are applied and no round is recorded."""
+        events apply and its round is recorded when it is done; ``last_applied`` keeps what
+        its first half applied until a memory event replaces it. With no paused turn to go
+        on with (another turn ran since, or ``new_conversation``), the events are applied,
+        no round is recorded and ``last_applied`` starts from None, as at a turn's start."""
         with self._lock:
-            turn = self._parked or _Turn(None, self.conversation_id, self._live())
+            turn = self._parked
+            if turn is None:
+                turn = _Turn(None, self.conversation_id, self._live())
+                self._last_applied = None  # never an earlier turn's batch
             self._parked = None
         yield from self._follow(turn, events)
 
@@ -333,7 +341,9 @@ class T2VMemory:
             if event.type == "memory":
                 batch = self.on_event(event) if turn.live else None
                 with self._lock:
-                    self._last_applied = batch  # R85: there when the host gets the event
+                    # R85: there when the host gets the event. R87: only a batch that
+                    # changed something, so no host shows "Memory updated" for nothing.
+                    self._last_applied = batch if batch is not None and batch.applied else None
                 if batch is not None and any(
                     record.get("op") in ("forget", "remove") for record in batch.applied
                 ):
