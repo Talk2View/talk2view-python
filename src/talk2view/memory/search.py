@@ -44,8 +44,10 @@ QUERY_TERMS_MAX = 12
 QUERY_BIGRAMS_MAX = 24
 #: Chinese and Japanese function bigrams a query leaves out, as it leaves out STOP_WORDS:
 #: question words, pronouns, conjunctions and verb endings, which nearly every round holds.
-#: 么时 and 为什 are the inner bigrams of 什么时候 ("when") and 为什么 ("why"). Each pair is
-#: written as its code points, with the bigram in the comment.
+#: 么时, 为什, 是什, 么样, 是不 and 有没 are on it so that these question words give no term
+#: at all: 什么时候 ("when"), 为什么 ("why"), 是什么 ("what is"), 怎么样 and 什么样 ("how",
+#: "what kind of"), 是不是 ("is it") and 有没有 ("is there"). Each pair is written as its
+#: code points, with the bigram in the comment.
 CJK_STOP_BIGRAMS: FrozenSet[str] = frozenset(
     chr(first) + chr(second)
     for first, second in (
@@ -54,6 +56,10 @@ CJK_STOP_BIGRAMS: FrozenSet[str] = frozenset(
         (0x4E48, 0x65F6),  # 么时, in 什么时候
         (0x65F6, 0x5019),  # 时候 time, when
         (0x4E3A, 0x4EC0),  # 为什, in 为什么
+        (0x662F, 0x4EC0),  # 是什, in 是什么
+        (0x4E48, 0x6837),  # 么样, in 怎么样 and 什么样
+        (0x662F, 0x4E0D),  # 是不, in 是不是
+        (0x6709, 0x6CA1),  # 有没, in 有没有
         (0x600E, 0x4E48),  # 怎么 how
         (0x54EA, 0x91CC),  # 哪里 where
         (0x591A, 0x5C11),  # 多少 how many

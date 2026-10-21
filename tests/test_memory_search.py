@@ -355,11 +355,24 @@ def test_words_and_bigrams_have_caps_of_their_own() -> None:
 
 
 def test_stop_bigrams_are_left_out() -> None:
-    """R63: a stop bigram is not a term, as a stop word is not; the rest of its run stays."""
+    """R63: a stop bigram is not a term, as a stop word is not; the rest of its run stays.
+    The junctions inside question words are stop bigrams too (fix round 1), so the question
+    words give no term at all."""
     we_go = _chars(0x6211, 0x4EEC, 0x53BB)  # 我们去, "we go": 我们 is a stop bigram
     assert query_terms(we_go) == [we_go[1] + " " + we_go[2]]
     assert build_fts_query(_chars(0x4EC0, 0x4E48, 0x65F6, 0x5019)) is None  # 什么时候, "when"
-    assert len(CJK_STOP_BIGRAMS) <= 40
+    assert len(CJK_STOP_BIGRAMS) == 42
+    for points in (
+        (0x662F, 0x4EC0, 0x4E48),  # 是什么 what is
+        (0x600E, 0x4E48, 0x6837),  # 怎么样 how
+        (0x4EC0, 0x4E48, 0x6837),  # 什么样 what kind of
+        (0x662F, 0x4E0D, 0x662F),  # 是不是 is it
+        (0x6709, 0x6CA1, 0x6709),  # 有没有 is there
+    ):
+        assert build_fts_query(_chars(*points)) is None, points
+    # The brief's question keeps its bigrams up to 程是; 是什 and the rest are stop bigrams.
+    pairs = zip(TRIP_QUESTION[:9], TRIP_QUESTION[1:10])
+    assert query_terms(TRIP_QUESTION) == [first + " " + second for first, second in pairs]
     assert all(len(pair) == 2 and all(map(is_segmented, pair)) for pair in CJK_STOP_BIGRAMS)
 
 
