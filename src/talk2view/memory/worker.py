@@ -1,16 +1,22 @@
 """Where ``T2VMemory``'s engine calls run (spec §7.4), so a chat never waits for one:
 ``Worker`` runs them one at a time on one background daemon thread, never two under the
-same key, and ``Ticker`` calls a function every few seconds for a host with no loop of
-its own."""
+same key, ``Ticker`` calls a function every few seconds for a host with no loop of its
+own, and ``Cooldown`` holds the automatic calls back after failed ones."""
 
 from __future__ import annotations
 
 import collections
 import logging
 import threading
+from datetime import datetime, timedelta
 from typing import Any, Callable, Deque, Optional, Set
 
 logger = logging.getLogger("talk2view.memory")
+
+# R81: after a failed engine memory call, the automatic calls hold off for COOLDOWN_S,
+# twice as long after each further failure in a row, at most COOLDOWN_MAX_S.
+COOLDOWN_S = 60.0
+COOLDOWN_MAX_S = 3600.0
 
 
 class Worker:
@@ -121,3 +127,31 @@ class Ticker:
     def _run(self, tick: Callable[[], Any], interval_s: float) -> None:
         while not self._stopped.wait(interval_s):
             tick()
+
+
+class Cooldown:
+    """How long the automatic engine calls hold off after failed ones (R81): COOLDOWN_S
+    after the first failure in a row, twice the last wait after each further one, at most
+    COOLDOWN_MAX_S. A ``retry_after`` makes that failure's wait at least so long, capped the
+    same, without changing how the next ones double. A success ends it.
+
+    It keeps no clock and no lock: its owner passes the times, read from its own clock, and
+    calls it under its own lock."""
+
+    def __init__(self) -> None:
+        self._wait_s = 0.0  # the last failure's wait before any retry_after; 0 after a success
+        self._until: Optional[datetime] = None
+
+    def cooling(self, at: datetime) -> bool:
+        """Whether the cooldown still runs at ``at``."""
+        return self._until is not None and at < self._until
+
+    def failed(self, at: datetime, retry_after: Optional[float] = None) -> None:
+        """A call failed at ``at``: the cooldown starts there, or lengthens."""
+        self._wait_s = min(self._wait_s * 2, COOLDOWN_MAX_S) if self._wait_s else COOLDOWN_S
+        wait = min(max(self._wait_s, retry_after or 0.0), COOLDOWN_MAX_S)
+        self._until = at + timedelta(seconds=wait)
+
+    def recovered(self) -> None:
+        """A call succeeded: the cooldown ends, and the next failure starts it afresh."""
+        self._wait_s, self._until = 0.0, None

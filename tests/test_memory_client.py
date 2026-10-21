@@ -18,7 +18,7 @@ import sqlite3
 import stat
 import threading
 import time
-from datetime import timedelta, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterator, List, Optional, Tuple
 
@@ -30,9 +30,9 @@ from talk2view import ChatController, Talk2View, _memory_file
 from talk2view.auth import T2VAuth
 from talk2view.cancel import CancelToken
 from talk2view.client import T2VClient
-from talk2view.memory import MemoryStore, T2VMemory, bodies, days
+from talk2view.memory import AppliedBatch, MemoryStore, T2VMemory, bodies, days
 from talk2view.memory import client as memory_client
-from talk2view.memory.worker import Worker
+from talk2view.memory.worker import Cooldown, Worker
 from talk2view.storage import MemoryStorage
 from talk2view.types import Capabilities, ChatEvent, Decision
 
@@ -357,7 +357,7 @@ def test_incognito_sends_status_and_records_nothing(
         (body,) = _sent(engine, "/messages")
         assert body["memory"] == {"status": "incognito"}
         assert _rounds(memory) == []
-        assert _texts(memory) == ["Lives in Perth"]
+        assert _texts(memory) == ["Lives in Perth"] and memory.last_applied is None
         assert memory.handle_search({"query": "Perth"}) == NO_RESULTS
         assert memory.new_conversation() and memory.incognito is False
         assert "Perth" in memory.handle_search({"query": "Perth"})
@@ -379,7 +379,7 @@ def test_paused_sends_status_paused(engine: MemoryCallsEngine, tmp_path: Path) -
         (body,) = _sent(engine, "/messages")
         assert body["memory"] == {"status": "paused"}
         assert _rounds(memory) == []
-        assert _texts(memory) == ["Lives in Perth"]
+        assert _texts(memory) == ["Lives in Perth"] and memory.last_applied is None
         assert memory.handle_search({"query": "Perth"}) == NO_RESULTS
         assert memory.run_due() == []
         assert memory.wait_idle(5)
@@ -447,6 +447,78 @@ def test_a_turn_paused_midway_records_nothing(memory: T2VMemory) -> None:
     memory.store.paused = False
     memory.store.set_incognito(memory.conversation_id, True)
     assert memory.turn_payload("hi") == {"status": "incognito"}
+
+
+# ── what a memory event applied, and its undo (R85) ──
+
+
+def test_last_applied_holds_the_events_batch_and_undo_takes_it_back(
+    engine: MemoryCallsEngine, tmp_path: Path
+) -> None:
+    """R85 (spec §10.1: "Memory updated", with an undo): a host that gets a memory event from
+    chat() finds the batch it applied in last_applied already, and undo takes it back
+    within the window, once. Each turn starts with None, so one with no memory event
+    leaves it None."""
+    with _talk2view(engine, tmp_path) as t2v:
+        memory = _memory_of(t2v)
+        assert memory.last_applied is None
+        engine.streams[:] = [[_text("Noted. "), _memory_event(add("Works at Canva")), _STOP, DONE]]
+        seen: List[Optional[AppliedBatch]] = []
+
+        for event in t2v.chat("I started at Canva"):
+            if event.type == "memory":
+                seen.append(memory.last_applied)
+
+        assert len(seen) == 1
+        batch = seen[0]
+        assert batch is not None and memory.last_applied is batch
+        assert [record["op"] for record in batch.applied] == ["add"]
+        assert _texts(memory) == ["Works at Canva"]
+
+        assert memory.undo(batch.id) is True
+
+        assert _texts(memory) == []
+        assert memory.undo(batch.id) is False  # undone already
+        engine.streams[:] = [[_text("Hello."), _STOP, DONE]]
+        assert list(t2v.chat("Hi"))[-1].type == "done"
+        assert memory.last_applied is None
+
+
+def test_undo_is_false_and_never_raises(
+    memory: T2VMemory,
+    clock: FakeClock,
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """R85: undo is False, never raising, for a batch past the 30 s window or unknown, when
+    the store fails (one WARNING naming the error's class, never its message), and once
+    closed, when it never reaches the store, so nothing is logged."""
+    turn = [
+        ChatEvent(type="memory", tool_call_id="c1", memory_ops=[add("Works at Canva")]),
+        ChatEvent(type="done"),
+    ]
+    assert list(memory.observe_turn("I started at Canva", iter(turn))) == turn
+    old = memory.last_applied
+    assert old is not None
+    clock.now = T0 + timedelta(seconds=31)
+    batch = memory.store.apply_ops([add("Lives in Perth")], source="said")
+
+    def failing(*args: Any, **kwargs: Any) -> Any:
+        raise sqlite3.OperationalError("near 'Perth': peanut")
+
+    with caplog.at_level(logging.DEBUG, logger="talk2view"):
+        assert memory.undo(old.id) is False  # past the window
+        assert memory.undo("b-unknown") is False
+        with monkeypatch.context() as patch:
+            patch.setattr(memory.store, "undo", failing)
+            assert memory.undo(batch.id) is False
+        assert _texts(memory) == ["Works at Canva", "Lives in Perth"]
+        memory.close()
+        assert memory.undo(batch.id) is False
+
+    assert _logged(caplog) == [
+        (logging.WARNING, "Memory: undoing a memory change failed (OperationalError)")
+    ]
 
 
 # ── search_memory ──
@@ -1059,6 +1131,104 @@ def test_the_cooldown_stays_within_an_hour_and_honours_retry_after(
     assert len(engine.calls) == 12
 
 
+def _cools_for(cooldown: Cooldown, start: datetime, seconds: int) -> bool:
+    """Whether the cooldown runs ``seconds`` from ``start``: still at its last second, and
+    over at its end."""
+    end = start + timedelta(seconds=seconds)
+    return cooldown.cooling(end - timedelta(seconds=1)) and not cooldown.cooling(end)
+
+
+def test_cooldown_doubles_to_an_hour_and_a_success_ends_it(clock: FakeClock) -> None:
+    """R86: Cooldown alone, on a clock and with no engine. 60 s after the first failure in a
+    row, twice the last wait after each further one, at most 3600 s; a failure during the
+    cooldown restarts it from its own time; a success ends it, and the next failure waits
+    60 s again."""
+    cooldown = Cooldown()
+    assert not cooldown.cooling(clock())
+    for wait in (60, 120, 240, 480, 960, 1920, 3600, 3600):
+        cooldown.failed(clock())
+        assert _cools_for(cooldown, clock(), wait), wait
+        clock.now += timedelta(seconds=wait)
+    cooldown.recovered()
+    assert not cooldown.cooling(clock())
+    cooldown.failed(clock())
+    assert _cools_for(cooldown, clock(), 60)
+    clock.now += timedelta(seconds=10)
+    cooldown.failed(clock())  # during the cooldown: 120 s from this failure
+    assert _cools_for(cooldown, clock(), 120)
+
+
+def test_cooldown_honours_retry_after(clock: FakeClock) -> None:
+    """R86: a retry_after makes that failure's wait at least so long, still at most 3600 s,
+    and never shortens it; the waits after it double from where they were."""
+    cooldown = Cooldown()
+    cases: List[Tuple[Optional[float], int]] = [
+        (300, 300),  # the first failure: 60 s, raised to 300
+        (None, 120),  # doubling from 60, not from 300
+        (7200, 3600),  # held to an hour
+        (10, 480),  # shorter than the doubled wait: no effect
+        (0, 960),
+    ]
+    for retry_after, wait in cases:
+        cooldown.failed(clock(), retry_after)
+        assert _cools_for(cooldown, clock(), wait), (retry_after, wait)
+        clock.now += timedelta(seconds=wait)
+
+
+@pytest.mark.parametrize("inline", [True, False], ids=["inline", "background"])
+def test_queued_jobs_check_the_cooldown_as_they_start(
+    engine: MemoryCallsEngine,
+    client: T2VClient,
+    tmp_path: Path,
+    clock: FakeClock,
+    caplog: pytest.LogCaptureFixture,
+    inline: bool,
+) -> None:
+    """R86: each job run_due or new_conversation queued checks the cooldown when it starts.
+    Three idle conversations and a due consolidation against a failing engine: the first
+    extraction fails and starts the cooldown, and the jobs after it, the extraction
+    new_conversation queues included, make no call. One call and a 60 s cooldown, not five
+    calls and one doubled four times; all of it stays due, and goes once the cooldown has
+    run."""
+    store = MemoryStore(tmp_path / "user-ann.sqlite3", clock=clock)
+    for hours, conversation in ((3, "c1"), (2, "c2"), (1, "c3")):
+        store.record_round(conversation, "I like tea", "Noted.", at=T0 - timedelta(hours=hours))
+    store.apply_ops([add("Capped entry {}.".format(n)) for n in range(41)], source="said")
+    assert len(store.entries()) == 41  # over ENTRY_MAX: consolidation is due
+    failure = (503, "credit_check_unavailable")
+    engine.replies["extract"][:] = [failure] * 4
+    engine.replies["consolidate"][:] = [failure]
+    memory = T2VMemory(client, store, clock=clock, inline=inline)
+    conversations = ["c1", "c2", "c3", memory.conversation_id]
+    try:
+        with caplog.at_level(logging.INFO, logger="talk2view"):
+            assert memory.run_due() == ["extract:c1", "extract:c2", "extract:c3", "consolidate"]
+            store.record_round(
+                conversations[3], "I like coffee", "Noted.", at=T0 - timedelta(minutes=30)
+            )
+            memory.new_conversation()  # queues the extraction of the one that ended
+            assert memory.wait_idle(5)
+            assert engine.kinds() == ["extract"]
+            assert [_conversation_mark(store, c) for c in conversations] == [0, 0, 0, 0]
+
+            engine.replies["extract"].clear()  # the engine is back
+            engine.replies["consolidate"].clear()
+            clock.now = T0 + timedelta(seconds=59)
+            assert memory.run_due() == []
+            clock.now = T0 + timedelta(seconds=60)
+            due = ["extract:" + conversation for conversation in conversations]
+            assert memory.run_due() == due + ["consolidate"]
+            assert memory.wait_idle(5)
+            assert [_conversation_mark(store, c) for c in conversations] == [1, 1, 1, 1]
+    finally:
+        memory.close()
+    assert engine.kinds() == ["extract"] * 5 + ["consolidate"]
+    extracted = [body["conversation"]["id"] for body in engine.bodies_of("extract")]
+    assert extracted == ["c1"] + conversations
+    failed = (logging.WARNING, "Memory: extraction failed (HTTP 503 credit_check_unavailable)")
+    assert _logged(caplog) == [failed]
+
+
 def test_a_guest_makes_no_memory_calls(engine: MemoryCallsEngine, tmp_path: Path) -> None:
     """The engine refuses extract and consolidate to guests, so a guest's memory never asks:
     its turns still send the payload."""
@@ -1469,7 +1639,8 @@ def test_no_round_after_an_error_or_a_stop(engine: MemoryCallsEngine, tmp_path: 
 
 def test_an_approval_continues_the_turn(engine: MemoryCallsEngine, tmp_path: Path) -> None:
     """The turn an approval pauses goes on in respond_to_approval: its memory event is
-    applied, its resume carries the same field, and its round is recorded once, whole."""
+    applied, its batch is last_applied as the event arrives (R85), its resume carries the
+    same field, and its round is recorded once, whole."""
     with _talk2view(engine, tmp_path) as t2v:
         memory = _memory_of(t2v)
         engine.streams[:] = [
@@ -1478,10 +1649,16 @@ def test_an_approval_continues_the_turn(engine: MemoryCallsEngine, tmp_path: Pat
         ]
         asked = list(t2v.chat("Email Alex that I prefer metric units"))[-1]
         assert asked.type == "approval_required"
-        assert _rounds(memory) == []
+        assert _rounds(memory) == [] and memory.last_applied is None
 
-        assert list(t2v.respond_to_approval(asked, Decision("once")))[-1].type == "done"
+        applied = [
+            (event.type, memory.last_applied)
+            for event in t2v.respond_to_approval(asked, Decision("once"))
+            if event.type in ("memory", "done")
+        ]
 
+        batch = applied[0][1]
+        assert batch is not None and applied == [("memory", batch), ("done", batch)]
         assert _rounds(memory) == [("Email Alex that I prefer metric units", "Sending. Sent.")]
         assert _texts(memory) == ["Prefers metric units"]
         message, resume = _sent(engine, "/messages", "/resume")
@@ -1772,7 +1949,7 @@ def test_store_failures_never_raise(
         (logging.WARNING, "Memory: checking what is due failed (OperationalError)"),
         (logging.WARNING, "Memory: extraction failed (OperationalError)"),
         (logging.WARNING, "Memory: consolidation failed (OperationalError)"),
-        (logging.WARNING, "Memory: the import failed (OperationalError)"),
+        (logging.WARNING, "Memory: import failed (OperationalError)"),
         (logging.WARNING, "Memory: queueing an extraction failed (OperationalError)"),
         (logging.WARNING, "Memory: marking the chat incognito failed (OperationalError)"),
     ]
@@ -1869,6 +2046,7 @@ def test_no_memory_text_in_sdk_logs(
     records = [record for record in caplog.records if record.name.startswith("talk2view")]
     messages = [record.getMessage() for record in records]
     assert "Memory: extraction failed (HTTP 502 upstream_error)" in messages
+    assert "Memory: import failed (200001 code points, over the 200000 one call takes)" in messages
     assert "Memory: recording the round failed (OperationalError)" in messages
     assert "Memory: a memory event applied 1 ops and dropped 2 (duplicate, missing)" in messages
     assert all(record.exc_info is None for record in records)
