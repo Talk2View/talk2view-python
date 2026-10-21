@@ -47,6 +47,7 @@ from typing import (
 from ..storage import _DIR_MODE, _FILE_MODE, _POSIX_PERMISSIONS
 from . import days, payload
 from .models import (
+    CONSOLIDATE_ENTRIES_MAX,
     CONSOLIDATE_EVERY_S,
     CONSOLIDATE_FACTS_MAX,
     CONSOLIDATE_MIN_CHANGES,
@@ -420,9 +421,15 @@ _SELECT_VISIBLE_FACTS = (
     " superseded_by, superseded_at, source, hidden_at FROM facts"
     " WHERE hidden_at IS NULL ORDER BY rowid"
 )
-# What a consolidate request carries (consolidation_snapshot): the newest visible facts no
-# other superseded, and the newest summaries, never an incognito conversation's. Each takes
-# a LIMIT.
+# What a consolidate request carries (consolidation_snapshot): the visible entries, locked
+# ones first, then the most recently updated (the later row on a tie); the newest visible
+# facts no other superseded; and the newest summaries, never an incognito conversation's.
+# Each takes a LIMIT.
+_SELECT_CONSOLIDATED_ENTRIES = (
+    "SELECT id, topic, text, created_at, updated_at, valid_until, source, locked,"
+    " source_conversation_id, hidden_at FROM entries WHERE hidden_at IS NULL"
+    " ORDER BY locked DESC, updated_at DESC, rowid DESC LIMIT ?"
+)
 _SELECT_NEWEST_FACTS = (
     "SELECT id, text, topic, recorded_at, occurred_at, valid_until, conversation_id,"
     " superseded_by, superseded_at, source, hidden_at FROM facts"
@@ -1059,53 +1066,67 @@ class MemoryStore:
         merge_facts: Sequence[Dict[str, Any]],
         expire_facts: Sequence[str],
         *,
-        expected_revision: int,
+        snapshot: ConsolidationSnapshot,
+        timezone: Optional[str] = None,
     ) -> bool:
         """Apply a consolidation's result, all or nothing, in one transaction: consolidation
-        applies its result only through this. ``expected_revision`` is the ``revision`` of
-        the ``consolidation_snapshot`` its request was built from. If memory has changed
-        since, the result would undo that change, so nothing is written and it returns
-        False. Otherwise it replaces the entries (``replace_entries``), merges each
-        ``{"keep": id, "drop": [ids]}`` group of facts (``merge_facts``; a malformed group is
-        skipped), expires the facts named (``expire_facts``), records the consolidation
-        (``mark_consolidated``) and returns True."""
+        applies its result only through this. ``snapshot`` is the ``consolidation_snapshot``
+        its request was built from. If memory has changed since (its ``revision`` moved),
+        the result would undo that change, so nothing is written and it returns False.
+
+        Otherwise it replaces the entries the snapshot carried (``replace_entries``, within
+        them: a visible entry the snapshot left out is neither changed nor deleted), merges
+        each ``{"keep": id, "drop": [ids]}`` group of facts (``merge_facts``; a malformed
+        group is skipped), expires the facts named (``expire_facts``, by the days of
+        ``timezone``, the one the request was sent with), records the consolidation
+        (``mark_consolidated``) and returns True. Entries the snapshot left out keep a
+        consolidation due (``needs_consolidation``), so later ones reach them."""
+        carried = {entry.id for entry in snapshot.entries}
         with self._write():
-            if self.revision() != expected_revision:
+            if self.revision() != snapshot.revision:
                 return False
-            self.replace_entries(entries)
+            left_out = any(
+                entry_id not in carried
+                for (entry_id,) in self._db.execute(
+                    "SELECT id FROM entries WHERE hidden_at IS NULL"
+                )
+            )
+            self._replace_entries(entries, carried)
             for group in merge_facts:
                 keep: Any = group.get("keep") if isinstance(group, dict) else None
                 drop: Any = group.get("drop") if isinstance(group, dict) else None
                 if isinstance(keep, str) and isinstance(drop, list):
                     self.merge_facts(keep, drop)
-            self.expire_facts(expire_facts)
+            self.expire_facts(expire_facts, timezone=timezone)
+            self._set_meta("entries_left_out", "1" if left_out else "0")
             self.mark_consolidated()
         return True
 
     def consolidation_snapshot(
         self,
         *,
+        entries_max: int = CONSOLIDATE_ENTRIES_MAX,
         facts_max: int = CONSOLIDATE_FACTS_MAX,
         summaries_max: int = CONSOLIDATE_SUMMARIES_MAX,
     ) -> ConsolidationSnapshot:
         """What a consolidate request carries, with the ``revision`` it was read at, in one
         read: under the lock and in one read transaction, so no write, from this store or
         another connection to the file, lands between its reads. Build the request only
-        from this, and give its ``revision`` to ``apply_consolidation`` as
-        ``expected_revision``.
+        from this, and give the snapshot itself to ``apply_consolidation``.
 
-        It holds the visible entries, locked ones marked; the visible facts no newer one
+        It holds ``entries_max`` (200) of the visible entries: the locked ones first, then
+        the most recently updated, in that order; the visible facts no newer one
         superseded, the ``facts_max`` (400) recorded last, newest first; and the summaries
         of the ``summaries_max`` (30) most recently active conversations that have one,
         newest first, never an incognito one's."""
         with self._read():
             revision = self.revision()
-            entries = self.entries()
+            entries = self._query(_SELECT_CONSOLIDATED_ENTRIES, (entries_max,))
             facts = self._query(_SELECT_NEWEST_FACTS, (facts_max,))
             summaries = self._query(_SELECT_NEWEST_SUMMARIES, (summaries_max,))
         return ConsolidationSnapshot(
             revision=revision,
-            entries=entries,
+            entries=[_entry_from_row(row) for row in entries],
             facts=[_fact_from_row(row) for row in facts],
             summaries=[_conversation_from_row(row) for row in summaries],
         )
@@ -1139,11 +1160,22 @@ class MemoryStore:
         ENTRY_TEXT_MAX code points, a YYYY-MM-DD ``valid_until``) stays as it was, and a new
         one is dropped. Only the first item with an id counts, and an id that is no longer
         a visible entry is skipped rather than brought back."""
+        self._replace_entries(entries, None)
+
+    def _replace_entries(
+        self, entries: Sequence[Dict[str, Any]], carried: Optional[Set[str]]
+    ) -> None:
+        """``replace_entries`` within the visible entries whose ids are in ``carried`` (all
+        of them when None): one outside it is neither changed nor deleted, as an item that
+        names it is skipped, and a new item with its ``normalise_dedupe`` text is not
+        added, since it stays."""
         now = _timestamp(self._clock())
         with self._write():
+            visible = [
+                _entry_from_row(row) for row in self._db.execute(_SELECT_VISIBLE_ENTRY_IMAGES)
+            ]
             current = {
-                row[0]: _entry_from_row(row)
-                for row in self._db.execute(_SELECT_VISIBLE_ENTRY_IMAGES)
+                entry.id: entry for entry in visible if carried is None or entry.id in carried
             }
             kept: Dict[str, MemoryEntry] = {}  # each entry an item names, as the call leaves it
             new: List[Tuple[Any, Any, Any]] = []  # each new item's topic, text and valid_until
@@ -1177,11 +1209,12 @@ class MemoryStore:
                     image = _entry_image(replace(entry, updated_at=now), None)
                     self._db.execute(_UPDATE_ENTRY_IMAGE, image[1:] + [entry.id])
                     changed = True
-            # A locked entry stays whether an item names it or not.
+            # A locked entry stays whether an item names it or not, as does one outside
+            # ``carried``.
             texts = {
                 normalise_dedupe(kept.get(entry.id, entry).text)
-                for entry in current.values()
-                if entry.id in kept or entry.locked
+                for entry in visible
+                if entry.id in kept or entry.locked or entry.id not in current
             }
             for topic, text, valid_until in new:
                 if normalise_dedupe(text) in texts:
@@ -1212,10 +1245,14 @@ class MemoryStore:
                 self._raise_revision()
 
     def needs_consolidation(self) -> bool:
-        """Whether a consolidation is due: the visible entries are over the caps (more than
-        ENTRY_MAX (40) of them, or more than ENTRIES_CHARS_MAX (6,000) code points of text),
-        or CONSOLIDATE_MIN_CHANGES (10) changes have built up and CONSOLIDATE_EVERY_S (7
-        days) have passed since the last one, or since the store was created."""
+        """Whether a consolidation is due: the last one left entries out (its snapshot
+        carried CONSOLIDATE_ENTRIES_MAX (200) of more), the visible entries are over the caps
+        (more than ENTRY_MAX (40) of them, or more than ENTRIES_CHARS_MAX (6,000) code points
+        of text), or CONSOLIDATE_MIN_CHANGES (10) changes have built up and
+        CONSOLIDATE_EVERY_S (7 days) have passed since the last one, or since the store was
+        created."""
+        if self._meta_value("entries_left_out") == "1":
+            return True
         texts = self._query("SELECT text FROM entries WHERE hidden_at IS NULL")
         if len(texts) > ENTRY_MAX:
             return True
@@ -1723,6 +1760,7 @@ class MemoryStore:
                 self._db.execute(statement)
             self._set_meta("changes_since_consolidation", "0")
             self._set_meta("last_consolidated_at", now)
+            self._set_meta("entries_left_out", "0")
             self._raise_revision()
             self._scrub()
 

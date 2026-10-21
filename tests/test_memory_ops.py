@@ -1668,41 +1668,39 @@ def test_apply_consolidation_is_all_or_nothing(store: MemoryStore, clock: FakeCl
     merges: List[Any] = [{"keep": "f1", "drop": ["f2"]}]
     tables = ("entries", "facts")
 
-    def refused(result: List[Dict[str, Any]], revision: int) -> None:
+    def refused(result: List[Dict[str, Any]], snapshot: ConsolidationSnapshot) -> None:
         """The result is refused, and nothing is written."""
         rows = [_rows(store, table) for table in tables]
         meta = store._query("SELECT key, value FROM meta ORDER BY key")
-        assert (
-            store.apply_consolidation(result, merges, ["f3"], expected_revision=revision) is False
-        )
+        assert store.apply_consolidation(result, merges, ["f3"], snapshot=snapshot) is False
         assert [_rows(store, table) for table in tables] == rows
         assert store._query("SELECT key, value FROM meta ORDER BY key") == meta
 
     # An entry update_memory adds while the call runs survives: the result never saw it.
-    revision = store.revision()  # read as the request is built
+    snapshot = store.consolidation_snapshot()  # read as the request is built
     dog = store.apply_ops([add("Has a dog.", topic="people")])
-    refused([designer, tea], revision)
+    refused([designer, tea], snapshot)
     assert store.entries()[-1].text == "Has a dog."
 
     # So does one added while an older batch is undone, which leaves the count of changes
     # where it was: the revision still moved.
-    revision = store.revision()
+    snapshot = store.consolidation_snapshot()
     changes = store.changes_since_consolidation()
     store.apply_ops([add("Has a cat.", topic="people")])
     assert store.undo(dog.id) is True
     assert store.changes_since_consolidation() == changes
-    refused([designer, tea, entry("e3", "people", "Has a dog.")], revision)
+    refused([designer, tea, entry("e3", "people", "Has a dog.")], snapshot)
     assert store.entries()[-1].text == "Has a cat."
 
     # Built again, the result names every entry. A failure at its last write leaves
     # nothing behind either.
     result = [designer, tea, entry("e4", "people", "Has a cat.")]
-    revision = store.revision()
+    snapshot = store.consolidation_snapshot()
     before = [_rows(store, table) for table in tables]
     meta = store._query("SELECT key, value FROM meta ORDER BY key")
     _fail_marking_consolidated(store)
     with pytest.raises(Exception, match="disk full"):
-        store.apply_consolidation(result, merges, ["f3"], expected_revision=revision)
+        store.apply_consolidation(result, merges, ["f3"], snapshot=snapshot)
     _stop_failing(store)
     assert [_rows(store, table) for table in tables] == before
     assert store._query("SELECT key, value FROM meta ORDER BY key") == meta
@@ -1712,8 +1710,7 @@ def test_apply_consolidation_is_all_or_nothing(store: MemoryStore, clock: FakeCl
     clock.now = T0 + timedelta(days=1)
     malformed = [{"keep": "f1"}, "not a group", {"keep": ["f3"], "drop": ["f2"]}]
     assert (
-        store.apply_consolidation(result, malformed + merges, ["f3", 7], expected_revision=revision)
-        is True
+        store.apply_consolidation(result, malformed + merges, ["f3", 7], snapshot=snapshot) is True
     )
     assert [entry.text for entry in store.entries()] == [
         "Works as a senior designer.",
@@ -1726,7 +1723,7 @@ def test_apply_consolidation_is_all_or_nothing(store: MemoryStore, clock: FakeCl
     ] == [("f1", None, None), ("f2", "f1", None), ("f3", None, "2026-10-21")]
     assert store.changes_since_consolidation() == 0
     assert store._meta_value("last_consolidated_at") == at(86400)
-    assert store.revision() == revision + 1
+    assert store.revision() == snapshot.revision + 1
 
 
 def _items(entries: Sequence[MemoryEntry]) -> List[Dict[str, Any]]:
@@ -1741,11 +1738,11 @@ def test_consolidation_snapshot_is_one_read(
     store: MemoryStore, clock: FakeClock, backend: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A consolidate request is built from one read of the store: the revision, the visible
-    entries (locked ones marked), the visible facts no newer fact superseded, newest first,
-    and the summaries of the most recently active conversations, newest first, never an
-    incognito one's. So the revision is the one its contents were read at: a write after it,
-    even from another connection between the snapshot's own reads, makes
-    apply_consolidation refuse the result."""
+    entries (locked ones first, then the most recently updated), the visible facts no newer
+    fact superseded, newest first, and the summaries of the most recently active
+    conversations, newest first, never an incognito one's. So the revision is the one its
+    contents were read at: a write after it, even from another connection between the
+    snapshot's own reads, makes apply_consolidation refuse the result."""
     store.apply_ops([add("Works as a designer.", topic="work"), add("Likes tea.")])
     store.edit_entry("e2", text="Likes green tea.")
     store.add_facts(
@@ -1772,16 +1769,17 @@ def test_consolidation_snapshot_is_one_read(
     for conversation_id in ("c1", "c2", "c3", "c5"):
         store.set_summary(conversation_id, "Chat " + conversation_id, "About " + conversation_id)
     store.set_incognito("c3", True)  # its summary stays out; c4 has none
+    entries = {entry.id: entry for entry in store.entries()}
     facts = {fact.id: fact for fact in store.facts()}
 
     snapshot = store.consolidation_snapshot(facts_max=2, summaries_max=2)
     assert snapshot == ConsolidationSnapshot(
         revision=store.revision(),
-        entries=store.entries(),
+        entries=[entries["e2"], entries["e1"]],
         facts=[facts["f5"], facts["f4"]],
         summaries=[_conversation(store, "c2"), _conversation(store, "c5")],
     )
-    assert [entry.locked for entry in snapshot.entries] == [False, True]
+    assert [entry.locked for entry in snapshot.entries] == [True, False]
     whole = store.consolidation_snapshot()  # 400 facts and 30 summaries at most
     assert [fact.id for fact in whole.facts] == ["f5", "f4", "f2"]
     assert [record.id for record in whole.summaries] == ["c2", "c5", "c1"]
@@ -1794,7 +1792,7 @@ def test_consolidation_snapshot_is_one_read(
     # write added survives.
     store.apply_ops([add("Has a dog.", topic="people")])
     result = _items(snapshot.entries)
-    assert store.apply_consolidation(result, [], [], expected_revision=snapshot.revision) is False
+    assert store.apply_consolidation(result, [], [], snapshot=snapshot) is False
     assert store.entries()[-1].text == "Has a dog."
 
     # Another connection writes after the snapshot's first read: the reads that follow see
@@ -1818,9 +1816,13 @@ def test_consolidation_snapshot_is_one_read(
         other.close()
     assert wrote and store.revision() == revision + 1
     assert snapshot.revision == revision
-    assert [entry.text for entry in snapshot.entries][-1] == "Has a dog."
+    assert [entry.text for entry in snapshot.entries] == [
+        "Likes green tea.",
+        "Has a dog.",
+        "Works as a designer.",
+    ]
     result = _items(snapshot.entries)
-    assert store.apply_consolidation(result, [], [], expected_revision=snapshot.revision) is False
+    assert store.apply_consolidation(result, [], [], snapshot=snapshot) is False
     assert store.entries()[-1].text == "Has a cat."
 
     # A read that fails ends the snapshot's transaction with it: the next write can begin.
@@ -1867,9 +1869,92 @@ def test_replace_entries_adds_no_copy_of_an_entry_it_keeps(store: MemoryStore) -
     assert [(entry.id, entry.text) for entry in store.entries()] == kept
 
     result = _items(store.entries()) + [{"id": None, "topic": "people", "text": "has a dog"}]
-    revision = store.consolidation_snapshot().revision
-    assert store.apply_consolidation(result, [], [], expected_revision=revision) is True
+    snapshot = store.consolidation_snapshot()
+    assert store.apply_consolidation(result, [], [], snapshot=snapshot) is True
     assert [(entry.id, entry.text) for entry in store.entries()] == kept
+
+
+def test_apply_consolidation_leaves_the_entries_its_snapshot_left_out(
+    store: MemoryStore, clock: FakeClock
+) -> None:
+    """R59: a consolidate request carries at most 200 entries (CONSOLIDATE_ENTRIES_MAX),
+    the locked ones first, then the most recently updated, and its result changes only
+    those. An entry the snapshot left out is neither deleted nor rewritten, a new item
+    with its text is not added beside it, and it keeps a consolidation due until one
+    carries it. A reset starts consolidation afresh."""
+    store.apply_ops([add("Old entry number {}.".format(n)) for n in range(5)])  # e1-e5
+    clock.now = T0 + timedelta(minutes=30)
+    store.edit_entry("e1", text="Old entry number 0, edited.")  # locked
+    clock.now = T0 + timedelta(hours=1)
+    store.apply_ops([add("Entry number {}.".format(n)) for n in range(200)])  # e6-e205
+    left_out = [entry for entry in store.entries() if entry.id in ("e2", "e3", "e4", "e5", "e6")]
+
+    snapshot = store.consolidation_snapshot()
+    # e6 is the earliest of the 200 entries updated last, so it is the one they lose.
+    newest = ["e" + str(n) for n in range(205, 6, -1)]
+    assert [entry.id for entry in snapshot.entries] == ["e1"] + newest
+    result = [
+        {"id": "e1", "topic": "preferences", "text": "Rewritten."},  # locked: verbatim
+        {"id": "e7", "topic": "preferences", "text": "Entries 1 to 199, merged."},
+        {"id": "e2", "topic": "preferences", "text": "Not in the request."},  # skipped
+        {"id": None, "topic": "preferences", "text": "Old entry number 4."},  # e5 stays
+        {"id": None, "topic": "work", "text": "A new entry."},
+    ]
+    assert store.apply_consolidation(result, [], [], snapshot=snapshot) is True
+
+    assert [entry for entry in store.entries() if entry.id in ("e2", "e3", "e4", "e5", "e6")] == (
+        left_out
+    )
+    assert [(entry.id, entry.text) for entry in store.entries()] == [
+        ("e1", "Old entry number 0, edited."),
+        ("e2", "Old entry number 1."),
+        ("e3", "Old entry number 2."),
+        ("e4", "Old entry number 3."),
+        ("e5", "Old entry number 4."),
+        ("e6", "Entry number 0."),
+        ("e7", "Entries 1 to 199, merged."),
+        ("e206", "A new entry."),
+    ]
+    # Under the caps, with no changes since: due only for the entries it left out.
+    assert store.changes_since_consolidation() == 0
+    assert store.needs_consolidation() is True
+
+    snapshot = store.consolidation_snapshot()
+    assert len(snapshot.entries) == 8
+    assert store.apply_consolidation(_items(snapshot.entries), [], [], snapshot=snapshot) is True
+    assert store.needs_consolidation() is False
+
+    snapshot = store.consolidation_snapshot(entries_max=1)
+    assert store.apply_consolidation(_items(snapshot.entries), [], [], snapshot=snapshot) is True
+    assert store.needs_consolidation() is True
+    store.reset()
+    assert store.needs_consolidation() is False
+
+
+def test_apply_consolidation_expires_facts_in_the_requests_timezone(
+    store: MemoryStore, clock: FakeClock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R65: a fact consolidation expires ends the day before the user's today, in the
+    timezone the request was sent with; with none, the system's."""
+    plus_fourteen = timezone(timedelta(hours=14))
+    monkeypatch.setattr(
+        days, "_named_zone", lambda name: plus_fourteen if name == "Plus/Fourteen" else None
+    )
+    store.add_facts(
+        [
+            {"text": "The user has exams this week.", "topic": "ongoing"},
+            {"text": "The user is moving house.", "topic": "ongoing"},
+        ],
+        conversation_id=None,
+        source="said",
+    )
+    clock.now = T0 + timedelta(hours=12)  # 22:00 on the 21st in UTC: the 22nd at UTC+14
+
+    snapshot = store.consolidation_snapshot()
+    assert store.apply_consolidation([], [], ["f1"], snapshot=snapshot, timezone="Plus/Fourteen")
+    snapshot = store.consolidation_snapshot()
+    assert store.apply_consolidation([], [], ["f2"], snapshot=snapshot)
+    assert [fact.valid_until for fact in store.facts()] == ["2026-10-21", "2026-10-20"]
 
 
 # ── the store: settings, export and reset ──

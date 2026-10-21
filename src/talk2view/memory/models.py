@@ -28,7 +28,8 @@ RESULT_CHARS_MAX = 8000
 RESULT_LIMIT_MAX = 20  # the most results a search_memory call may ask for
 SUMMARY_TITLE_MAX = 120
 SUMMARY_TEXT_MAX = 600
-CONSOLIDATE_FACTS_MAX = 400  # the facts a consolidate request carries
+CONSOLIDATE_ENTRIES_MAX = 200  # the entries a consolidate request carries (the engine's)
+CONSOLIDATE_FACTS_MAX = 400  # its facts
 CONSOLIDATE_SUMMARIES_MAX = 30  # and its summaries (the engine's SUMMARIES_MAX)
 
 # ── timing (seconds) ──
@@ -124,10 +125,11 @@ class AppliedBatch:
 @dataclass(frozen=True)
 class ConsolidationSnapshot:
     """What a consolidate request carries, read from the store in one read
-    (``MemoryStore.consolidation_snapshot``): the visible entries, locked ones marked; the
-    visible facts no newer one superseded, newest first; the summaries of the most recently
-    active conversations, newest first; and the ``revision`` they were read at, for
-    ``apply_consolidation``'s ``expected_revision``."""
+    (``MemoryStore.consolidation_snapshot``): the visible entries, locked ones first, then
+    the most recently updated, up to a cap; the visible facts no newer one superseded,
+    newest first; the summaries of the most recently active conversations, newest first;
+    and the ``revision`` they were read at. ``apply_consolidation`` takes the snapshot
+    itself: it checks the revision, and changes only the entries the snapshot carried."""
 
     revision: int
     entries: List[MemoryEntry]
@@ -136,6 +138,7 @@ class ConsolidationSnapshot:
 
 
 __all__ = [
+    "CONSOLIDATE_ENTRIES_MAX",
     "CONSOLIDATE_EVERY_S",
     "CONSOLIDATE_FACTS_MAX",
     "CONSOLIDATE_MIN_CHANGES",
