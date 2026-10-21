@@ -613,12 +613,13 @@ class MemoryStore:
         A removed entry is hidden, not deleted: ``undo`` can bring it back for
         UNDO_WINDOW_S (30) seconds, and ``purge`` deletes it after that. A ``forget`` also
         hides every fact, superseded ones included, whose ``normalise_dedupe`` text holds its
-        own, and clears it from the log of the chats: both texts of each round where either
-        holds it are blanked, and the round's index row deleted, and each summary whose title
-        or text holds it is cleared. Its record gains the facts' ids (``fact_ids``) and the
-        counts (``cleared_rounds``, ``cleared_summaries``). The batch keeps each entry row it
-        changed as it was before and after, the facts it hid, and the rounds and summaries
-        as they were, for ``undo``."""
+        own, and clears it from the log of the chats: both texts of each round whose user
+        text and reply, joined with a space, hold it once normalised are blanked, and the
+        round's index row deleted, and each summary whose title or text holds it is cleared.
+        Its record gains the facts' ids (``fact_ids``) and the counts (``cleared_rounds``,
+        ``cleared_summaries``). The batch keeps each entry row it changed as it was before
+        and after, the facts it hid, and the rounds and summaries as they were, for
+        ``undo``."""
         if source not in _SOURCES:
             raise ValueError("source must be one of " + ", ".join(_SOURCES))
         now = _timestamp(self._clock())
@@ -681,33 +682,27 @@ class MemoryStore:
         ``removed_facts`` are exactly what went; ``cleared_rounds`` and ``cleared_summaries``
         count what was cleared. A locked entry it holds is passed by, with "locked" in
         ``dropped``, and a phrase under FORGET_TEXT_MIN (2) code points once normalised is
-        dropped whole."""
+        dropped whole, as "forget text too short"."""
         return self.apply_ops([{"op": "forget", "text": text}])
 
-    def delete_entry(self, entry_id: str) -> AppliedBatch:
+    def delete_entry(self, entry_id: str) -> Optional[str]:
         """The user's own delete of an entry (spec §10.1), locked or not: it is hidden as a
-        ``remove`` hides one, in one batch ``undo`` can reverse for UNDO_WINDOW_S (30)
-        seconds, and ``purge`` deletes it after that. Raises KeyError for an entry that
-        doesn't exist or is hidden already."""
+        ``remove`` hides one, in a batch ``undo`` can reverse for UNDO_WINDOW_S (30)
+        seconds, and ``purge`` deletes it after that. Returns the batch's id, for ``undo``;
+        None, changing nothing, for an id that is not a visible entry: unknown, or deleted
+        already."""
         now = _timestamp(self._clock())
         with self._write():
             rows = self._db.execute(_SELECT_ENTRY_IMAGE, (entry_id,))
             entry = _entry_from_row(rows[0]) if rows else None
             if entry is None or entry.hidden_at is not None:
-                raise KeyError(entry_id)
+                return None
             batch_id = self._new_id("batch")
-            hidden = replace(entry, hidden_at=now)
-            image = _entry_image(hidden, batch_id)
+            image = _entry_image(replace(entry, hidden_at=now), batch_id)
             self._db.execute(_UPDATE_ENTRY_IMAGE, image[1:] + [entry_id])
             self._save_batch(batch_id, now, entries=[[entry_id, list(rows[0]), image]], changes=1)
             self._add_changes(1)
-        return AppliedBatch(
-            id=batch_id,
-            applied=[{"op": "remove", "id": entry_id}],
-            dropped=[],
-            removed_entries=[hidden],
-            removed_facts=[],
-        )
+        return batch_id
 
     def undo(self, batch_id: str) -> bool:
         """Reverse the batch ``batch_id`` exactly, in one transaction: the entries it added
@@ -1329,15 +1324,16 @@ class MemoryStore:
         self, forgets: List[Dict[str, Any]]
     ) -> Tuple[List[List[Any]], List[List[Any]]]:
         """In the caller's write: for each forget record in ``forgets``, blank both texts of
-        every round where either holds the forget's ``normalise_dedupe`` text, deleting the
-        round's index row, and clear every summary whose title or text holds it; record the
-        counts in its ``cleared_rounds`` and ``cleared_summaries``. Returns the rounds and the
-        summaries as they were, for undo, as _SELECT_ROUNDS_WITH_TEXT and _SELECT_SUMMARIES
-        give them."""
+        every round whose user text and reply, joined with a space and normalised
+        (``normalise_dedupe``), hold the forget's normalised text, so a phrase split between
+        them is found too, and delete the round's index row; and clear every summary whose
+        title or text holds it. Record the counts in its ``cleared_rounds`` and
+        ``cleared_summaries``. Returns the rounds and the summaries as they were, for undo,
+        as _SELECT_ROUNDS_WITH_TEXT and _SELECT_SUMMARIES give them."""
         if not forgets:
             return [], []
         rounds = [
-            (list(row), normalise_dedupe(row[2]), normalise_dedupe(row[3]))
+            (list(row), normalise_dedupe(row[2] + " " + row[3]))
             for row in self._db.execute(_SELECT_ROUNDS_WITH_TEXT)
         ]
         summaries = [
@@ -1351,9 +1347,7 @@ class MemoryStore:
         for record in forgets:
             key = normalise_dedupe(record["text"])
             blanked = [
-                row
-                for row, user, reply in rounds
-                if (row[0], row[1]) not in taken_rounds and (key in user or key in reply)
+                row for row, text in rounds if (row[0], row[1]) not in taken_rounds and key in text
             ]
             for conversation_id, idx, _, _ in blanked:
                 self._db.execute(

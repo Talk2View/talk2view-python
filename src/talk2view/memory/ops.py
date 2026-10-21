@@ -79,8 +79,9 @@ def apply_entry_ops(
       "changes nothing" when it gives none of them, or only the values the entry has.
     - ``remove`` hides the entry: it stays in the list with ``hidden_at`` set to ``now``.
     - ``forget`` hides every unlocked visible entry whose ``normalise_dedupe`` text holds
-      its own, which must be at least FORGET_TEXT_MIN (2) code points. It is applied even
-      when nothing matches; its record lists the ids it hid (``entry_ids``).
+      its own. That must be at least FORGET_TEXT_MIN (2) code points ("forget text too
+      short"): one letter is in nearly every text. It is applied even when nothing
+      matches; its record lists the ids it hid (``entry_ids``).
 
     ``update`` and ``remove`` need the id of a visible entry ("missing" otherwise) that is
     not locked: changes the engine proposes never touch a locked entry. Text is at most
@@ -217,10 +218,8 @@ def _forget(
     if reason is not None:
         return [reason]
     key = normalise_dedupe(text)
-    if not key:  # an empty key is in every text
-        return ["no text"]
     if len(key) < FORGET_TEXT_MIN:
-        return ["text under {} code points".format(FORGET_TEXT_MIN)]
+        return ["forget text too short"]
     hidden: List[str] = []
     passed: List[str] = []
     for position, entry in enumerate(state):

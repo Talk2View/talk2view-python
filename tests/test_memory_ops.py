@@ -312,9 +312,10 @@ def test_ops_are_checked_as_the_engine_checks_them() -> None:
             {"op": "update", "id": "e1", "topic": "pets"},
             {"op": "update", "id": "e1", "valid_until": "2026-11-31x"},
             {"op": "forget"},
-            {"op": "forget", "text": " ...! "},  # nothing left once normalised
-            # One letter is in nearly every text. The phrase is measured once normalised:
-            # "e" and a combining acute are one code point after NFKC.
+            # A forget's phrase is measured once normalised, and needs 2 code points: one
+            # letter is in nearly every text. Nothing is left of the first; "e" and a
+            # combining acute are one code point after NFKC.
+            {"op": "forget", "text": " ...! "},
             {"op": "forget", "text": " A. "},
             {"op": "forget", "text": "e" + chr(0x301)},
             # Accepted: the fields each op uses are well formed; the rest are ignored.
@@ -338,9 +339,9 @@ def test_ops_are_checked_as_the_engine_checks_them() -> None:
         "unknown topic",
         "bad date",
         "no text",
-        "no text",
-        "text under 2 code points",
-        "text under 2 code points",
+        "forget text too short",
+        "forget text too short",
+        "forget text too short",
     ]
     assert applied == [
         {"op": "remove", "id": "e1"},
@@ -786,35 +787,51 @@ def test_forget_clears_the_memory_log(store: MemoryStore, clock: FakeClock) -> N
     assert not _in_files(store, WORD)
 
 
+def test_forget_matches_a_round_on_its_two_texts_joined(store: MemoryStore) -> None:
+    """A round is matched on its user text and its reply joined with a space, normalised:
+    a phrase the user started and the reply finished is found, and the same words apart
+    are not."""
+    store.record_round("c1", "I could eat deep", "Dish pizza, then?", at=T0)
+    store.record_round("c1", "Deep breaths.", "Dish soap is under the sink.", at=T0)
+    store.record_round("c1", "Deep-dish pizza.", "Noted.", at=T0)
+
+    batch = store.forget("Deep dish")
+    assert batch.cleared_rounds == 1
+    assert store.rounds("c1") == [
+        (1, "", "", NOW),
+        (2, "Deep breaths.", "Dish soap is under the sink.", NOW),
+        (3, "Deep-dish pizza.", "Noted.", NOW),
+    ]
+    assert [(c, i) for c, i, _ in _indexed_rounds(store)] == [("c1", 2), ("c1", 3)]
+
+
 def test_delete_entry_is_the_users_own_delete(store: MemoryStore, clock: FakeClock) -> None:
-    """Spec §10.1: the user can delete any entry, their own locked ones included, with the
-    same undo window as a removal."""
+    """Spec §10.1: the user can delete any entry, their own locked ones included. It is
+    hidden, with the same undo window as a removal, and purged after it."""
     store.apply_ops([add("My locker code is " + WORD + "."), add("Likes tea.")])
     locked = store.edit_entry("e1", text="My locker code is " + WORD + ", for now.")
     tea = store.entries()[1]
     rows_before = _rows(store, "entries")
     changes = store.changes_since_consolidation()
 
-    batch = store.delete_entry("e1")
-    assert batch.applied == [{"op": "remove", "id": "e1"}]
-    assert (batch.dropped, batch.removed_entries, batch.removed_facts) == (
-        [],
-        [replace(locked, hidden_at=NOW)],
-        [],
-    )
+    batch_id = store.delete_entry("e1")
+    assert batch_id == "b2"  # the batch to undo
     assert store.entries() == [tea]
+    assert store.entries(include_hidden=True) == [replace(locked, hidden_at=NOW), tea]
     assert store.changes_since_consolidation() == changes + 1
-    assert store.undo(batch.id) is True
+    assert store.undo(batch_id) is True
     assert _rows(store, "entries") == rows_before
     assert store.changes_since_consolidation() == changes
 
-    with pytest.raises(KeyError):
-        store.delete_entry("e9")
-    store.delete_entry("e1")
-    with pytest.raises(KeyError):  # hidden already, in its undo window
-        store.delete_entry("e1")
+    assert store.delete_entry("e9") is None
+    assert store.delete_entry("e1") == "b3"
+    rows_deleted = _rows(store, "entries")
+    assert store.delete_entry("e1") is None  # deleted already, in its undo window
+    assert _rows(store, "entries") == rows_deleted
+    assert store.changes_since_consolidation() == changes + 1
     clock.now = T0 + timedelta(seconds=31)
     assert store.purge() == 1
+    assert store.delete_entry("e1") is None
     assert store.entries(include_hidden=True) == [tea]
     assert not _in_files(store, WORD)
 
@@ -826,15 +843,24 @@ def test_a_scrub_waits_for_the_outermost_write_to_commit(
     write (a method that deletes text, run in a caller's transaction), it waits until the
     outermost write commits; after a rollback, which deleted nothing, it never runs."""
     wal = store.path.with_name(store.path.name + "-wal")
+    chat_word = "numbatvortex"  # as WORD: no other text holds it
     store.apply_ops([add("My locker code is " + WORD + "."), add("Likes tea.")])
     store.apply_ops([{"op": "remove", "id": "e1"}])
+    store.record_round("c1", "My gate code is " + chat_word + ".", "Noted.", at=T0)
+    store.set_summary("c1", "Gate", "The user's gate code is " + chat_word + ".")
     clock.now = T0 + timedelta(seconds=31)
     with store._write():
         assert store.purge() == 1
-        store.delete_conversation("c404")
         assert wal.stat().st_size > 0  # not scrubbed yet
     assert wal.stat().st_size == 0  # the checkpoint truncated it
     assert not _in_files(store, WORD)
+    assert _in_files(store, chat_word)
+
+    with store._write():
+        store.delete_conversation("c1")
+        assert _in_files(store, chat_word)  # not scrubbed yet
+    assert store.conversation("c1") is None
+    assert not _in_files(store, chat_word)
 
     store.record_round("c1", "Hello", "Hi.", at=T0)
     with pytest.raises(RuntimeError):
