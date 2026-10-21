@@ -27,7 +27,15 @@ from typing import Any, Callable, Dict, Iterator, List, Optional, Sequence, Set,
 
 import pytest
 
-from talk2view.memory import TOPICS, MemoryStore, SearchHit, days, index_tokens, normalise_for_index
+from talk2view.memory import (
+    TOPICS,
+    Backend,
+    MemoryStore,
+    SearchHit,
+    days,
+    index_tokens,
+    normalise_for_index,
+)
 from talk2view.memory import payload as payload_module
 from talk2view.memory import search as search_module
 from talk2view.memory import store as store_module
@@ -137,8 +145,9 @@ SCRIPT_FACT = "Python" + _chars(0x811A, 0x672C, 0x6BCF, 0x5929, 0x65E9, 0x4E0A, 
 
 
 @pytest.fixture(params=BACKENDS)
-def backend(request: pytest.FixtureRequest) -> str:
-    return str(request.param)
+def backend(request: pytest.FixtureRequest) -> Backend:
+    name: Backend = request.param  # one of BACKENDS' names
+    return name
 
 
 @pytest.fixture
@@ -147,8 +156,8 @@ def clock() -> FakeClock:
 
 
 @pytest.fixture
-def store(tmp_path: Path, backend: str, clock: FakeClock) -> Iterator[MemoryStore]:
-    memory = MemoryStore(tmp_path / "u1.sqlite3", backend=backend, clock=clock)  # type: ignore[arg-type]
+def store(tmp_path: Path, backend: Backend, clock: FakeClock) -> Iterator[MemoryStore]:
+    memory = MemoryStore(tmp_path / "u1.sqlite3", backend=backend, clock=clock)
     try:
         yield memory
     finally:
@@ -308,7 +317,7 @@ def test_a_cjk_run_becomes_its_overlapping_bigrams(store: MemoryStore) -> None:
     assert query_terms(TOKYO) == [TOKYO_PHRASE]
     assert build_fts_query(TOKYO) == '"' + TOKYO_PHRASE + '"'
     assert build_fts_query(TOKYO + "Tower") == '"' + TOKYO_PHRASE + '" OR "tower"*'
-    i, want, go = WANT_TO_GO
+    i, want, go = list(WANT_TO_GO)
     assert query_terms(WANT_TO_GO + "Google" + TOKYO) == [
         i + " " + want,
         want + " " + go,
@@ -382,7 +391,7 @@ def test_japanese_and_thai_questions_find_a_fact_sharing_a_word(store: MemorySto
 def test_a_mixed_query_has_the_latin_word_and_the_bigrams(store: MemoryStore) -> None:
     """R63: Latin written against Chinese is a prefix word between the runs' bigrams, and a
     fact matching the word and one bigram has two terms, enough to be pre-selected."""
-    wo, yong, xie, jiao, ben = CODING[:2] + CODING[-3:]  # 我用 and 写脚本, in pinyin
+    wo, yong, xie, jiao, ben = list(CODING[:2] + CODING[-3:])  # 我用 and 写脚本, in pinyin
     assert query_terms(CODING) == [wo + " " + yong, "python", xie + " " + jiao, jiao + " " + ben]
     assert build_fts_query(CODING) == '"{} {}" OR "python"* OR "{} {}" OR "{} {}"'.format(
         wo, yong, xie, jiao, jiao, ben
@@ -449,8 +458,9 @@ def test_date_filter_applies_to_both_corpora(store: MemoryStore) -> None:
     _say(store, "c1", "Kayak lesson today.", days_ago=11)  # 2026-10-10
     _say(store, "c2", "Kayak race today.", days_ago=1)  # 2026-10-20
 
-    def found(**dates: str) -> List[str]:
-        return sorted(_refs(store.search("kayak", timezone="UTC", **dates)))
+    def found(from_date: Optional[str] = None, to_date: Optional[str] = None) -> List[str]:
+        hits = store.search("kayak", from_date=from_date, to_date=to_date, timezone="UTC")
+        return sorted(_refs(hits))
 
     assert found() == ["f1", "f2", "r:c1:1", "r:c2:1"]
     assert found(from_date="2026-10-15") == ["f2", "r:c2:1"]
@@ -783,7 +793,7 @@ def test_the_current_conversations_facts_are_not_recalled(store: MemoryStore) ->
     assert recalled(question, None) == sorted([booked, june, packed])
     assert sorted(_refs(store.search(question))) == ["f1", "f2", "f3"]
     # Superseded facts, which count only when nothing else matches, are left out alike.
-    gone = {"superseded_by": "f9", "superseded_at": "2026-10-21T09:00:00Z"}
+    gone: Dict[str, Any] = {"superseded_by": "f9", "superseded_at": "2026-10-21T09:00:00Z"}
     _know(store, "f4", "Sketched a zebracorn in pencil.", conversation_id="c1", **gone)
     _know(store, "f5", "Painted a zebracorn in pencil.", **gone)
     assert recalled("zebracorn in pencil", "c1") == ["Painted a zebracorn in pencil."]
@@ -963,7 +973,7 @@ def test_conversation_title_and_round_text() -> None:
 def test_turn_payload_status_paused_and_incognito(store: MemoryStore) -> None:
     store._insert_entry(_entry("e1", "Has a dog."))
     _say(store, "c1", "Walked the dog.", "Nice.", days_ago=1, title="Dog walk")
-    nothing = {"entries": [], "recent": [], "recalled": []}
+    nothing: Dict[str, List[Any]] = {"entries": [], "recent": [], "recalled": []}
     store.paused = True
     assert store.turn_payload("dog walk") == {"status": "paused", **nothing}
     store.paused = False
@@ -1485,13 +1495,13 @@ def test_forgetting_part_of_a_word_leaves_the_word_findable(store: MemoryStore) 
 # ── reads (R61) ──
 
 
-def test_a_read_inside_a_read_joins_it(tmp_path: Path, backend: str) -> None:
+def test_a_read_inside_a_read_joins_it(tmp_path: Path, backend: Backend) -> None:
     """R61: a ``_read`` inside a ``_read`` starts no transaction: it sees the snapshot the
     outer one took, whatever another connection commits meanwhile, and leaves the outer
     read working. A ``_read`` inside a ``_write`` sees the write's own changes."""
     path = tmp_path / "u1.sqlite3"
-    first = MemoryStore(path, backend=backend, clock=FakeClock())  # type: ignore[arg-type]
-    second = MemoryStore(path, backend=backend, clock=FakeClock())  # type: ignore[arg-type]
+    first = MemoryStore(path, backend=backend, clock=FakeClock())
+    second = MemoryStore(path, backend=backend, clock=FakeClock())
     try:
         _know(first, "f1", "Has a kayak.")
         with first._read():
@@ -1655,7 +1665,7 @@ def _vocabulary(rng: random.Random, size: int) -> List[str]:
 
 
 @pytest.mark.skipif(bool(os.environ.get("T2V_CI_SLOW")), reason="T2V_CI_SLOW: a slow runner")
-def test_search_is_fast_enough(tmp_path: Path, backend: str) -> None:
+def test_search_is_fast_enough(tmp_path: Path, backend: Backend) -> None:
     """The plan's bound, informational: over 5,000 rounds and 2,000 facts of Zipf-distributed
     words, a search's median time is under 50 ms with FTS5 and under 500 ms on the scan
     backend. A slow runner sets T2V_CI_SLOW to skip it."""
@@ -1667,7 +1677,7 @@ def test_search_is_fast_enough(tmp_path: Path, backend: str) -> None:
         count = rng.randint(low, high)
         return " ".join(rng.choices(vocabulary, cum_weights=weights, k=count))
 
-    memory = MemoryStore(tmp_path / "u1.sqlite3", backend=backend, clock=FakeClock())  # type: ignore[arg-type]
+    memory = MemoryStore(tmp_path / "u1.sqlite3", backend=backend, clock=FakeClock())
     try:
         with memory._write():  # one transaction: seconds to build, not minutes
             for number in range(5000):
