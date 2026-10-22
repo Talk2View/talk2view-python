@@ -255,6 +255,7 @@ _META_DEFAULTS = (
     ("include_sensitive", "0"),
     ("changes_since_consolidation", "0"),
     ("revision", "0"),
+    ("forget_revision", "0"),
 )
 
 # The search index, kept by the store (no triggers): one row per fact and per round with
@@ -262,10 +263,8 @@ _META_DEFAULTS = (
 # of the round's user message and reply (``_round_text``). A round a forget blanked has no
 # row. The sqlite3 and apsw backends keep it in the FTS5 tables ``facts_index`` and
 # ``rounds_index``; scan keeps the same columns in the plain tables ``facts_scan`` and
-# ``rounds_scan``. (The plan's data model gives scan the ``*_index`` names as well; the
-# schema is internal to the SDK, and names of its own keep scan from ever naming an FTS5
-# table, which a SQLite without FTS5 cannot open.) ``meta``'s ``index_kind`` records which
-# kind the file holds.
+# ``rounds_scan``: names of their own, so scan never names an FTS5 table, which a SQLite
+# without FTS5 cannot open. ``meta``'s ``index_kind`` records which kind the file holds.
 
 
 @dataclass(frozen=True)
@@ -339,8 +338,9 @@ def _round_text(user_text: str, assistant_text: str) -> str:
 
 def _create_private_file(path: Path) -> None:
     """Create the store's file 0600 before SQLite opens it, so it never exists with looser
-    permissions; SQLite gives its ``-wal`` and ``-shm`` files the same mode. A directory this
-    call creates is 0700. An existing file is tightened to 0600; an existing directory is
+    permissions; SQLite gives its ``-wal`` and ``-shm`` files the same mode. The file's own
+    directory, when this call creates it, is 0700; a parent it creates on the way gets the
+    umask's default mode. An existing file is tightened to 0600; an existing directory is
     left as it was found. Modes are set on POSIX only, as ``FileStorage`` sets them."""
     directory = path.parent
     try:
@@ -459,7 +459,7 @@ _SELECT_TITLES = "SELECT id, title FROM conversations WHERE title != '' ORDER BY
 # match, each list best first: bm25() ascending (FTS5's sign: lower is better), then the
 # newer, then the later row. It lists only visible facts, superseded ones only when asked,
 # and only rounds with text from conversations that aren't incognito. A fact's valid_until
-# never leaves it out (R65): facts stay true as history. A date filter keeps what was
+# never leaves it out: facts stay true as history. A date filter keeps what was
 # recorded or said at or after one time and before another (days.bounds: the starts of the
 # user's first day and of the day after the last), and the conversation to leave out, when
 # there is one, takes its rounds and the facts drawn from it along. The FTS5 lists take the
@@ -646,7 +646,21 @@ class MemoryStore:
             raise
 
     def close(self) -> None:
+        """Close the file. A scrub that failed and is still due (see ``_write``) runs first:
+        SQLite's own checkpoint at close takes the WAL, but not a deleted row's words in an
+        FTS5 segment that never merged. If it fails again, that is logged, and the file
+        closes all the same."""
         with self._lock:
+            if self._scrub_due:
+                self._scrub_due = False
+                try:
+                    self._scrub()
+                except Exception as error:
+                    logger.warning(
+                        "Memory: scrubbing the store failed (%s) as it closed; deleted text"
+                        " may stay in the file until the next scrub",
+                        type(error).__name__,
+                    )
             self._db.close()
 
     # ── entries and facts ──
@@ -738,7 +752,8 @@ class MemoryStore:
         ``cleared_summaries``, ``cleared_titles``). The batch keeps each entry row it changed
         as it was before and after, the facts it hid, and the rounds, summaries and titles
         as they were, for ``undo``. A batch that changed entries or facts, or applied a
-        forget, raises the ``revision``."""
+        forget, raises the ``revision``; one that applied a forget or a remove raises the
+        ``forget_revision`` too."""
         if source not in _SOURCES:
             raise ValueError("source must be one of " + ", ".join(_SOURCES))
         now = _timestamp(self._clock())
@@ -784,10 +799,12 @@ class MemoryStore:
                     titles=titles,
                     changes=changes,
                 )
-            # Every forget (R55a): a consolidation built before it may hold the phrase in a
-            # summary or a title, even when it matched nothing here, and would write it back.
+            # Every forget: a consolidation built before it may hold the phrase in a summary
+            # or a title, even when it matched nothing here, and would write it back.
             if images or removed_facts or forgets:
                 self._raise_revision()
+            if any(record["op"] in ("forget", "remove") for record in applied):
+                self._raise_forget_revision()
             self._add_changes(changes)
         return AppliedBatch(
             id=batch_id,
@@ -829,15 +846,16 @@ class MemoryStore:
             self._db.execute(_UPDATE_ENTRY_IMAGE, image[1:] + [entry_id])
             self._save_batch(batch_id, now, entries=[[entry_id, list(rows[0]), image]], changes=1)
             self._raise_revision()
+            self._raise_forget_revision()
             self._add_changes(1)
         return batch_id
 
     def undo(self, batch_id: str) -> bool:
         """Reverse the batch ``batch_id`` exactly, in one transaction, raising the
-        ``revision``: the entries it added are deleted, the entries it changed or hid get
-        back the rows they had, the facts it hid are shown again, and the rounds, summaries
-        and chat titles a forget cleared get their text back, with the rounds' index rows.
-        Then the file is scrubbed of the text that went.
+        ``revision`` and the ``forget_revision``: the entries it added are deleted, the
+        entries it changed or hid get back the rows they had, the facts it hid are shown
+        again, and the rounds, summaries and chat titles a forget cleared get their text
+        back, with the rounds' index rows. Then the file is scrubbed of the text that went.
 
         True when undone. False for a batch applied over UNDO_WINDOW_S (30) seconds ago,
         one undone already, one that changed nothing, or an unknown id; and False, changing
@@ -882,6 +900,7 @@ class MemoryStore:
             self._db.execute("DELETE FROM undo_batches WHERE id = ?", (batch_id,))
             self._add_changes(-payload["changes"])
             self._raise_revision()
+            self._raise_forget_revision()
             self._scrub()
         return True
 
@@ -977,7 +996,7 @@ class MemoryStore:
         YYYY-MM-DD is left out.
 
         Nothing is recorded for a conversation marked incognito: an extraction already on
-        its way when the chat turned incognito writes nothing back (review Minor 8)."""
+        its way when the chat turned incognito writes nothing back."""
         if source not in _SOURCES:
             raise ValueError("source must be one of " + ", ".join(_SOURCES))
         now = _timestamp(self._clock())
@@ -1144,6 +1163,20 @@ class MemoryStore:
         added in between pass the check, and the result, which never saw that entry, would
         delete it."""
         return int(self._meta_value("revision") or 0)
+
+    def forget_revision(self) -> int:
+        """A count, kept in the file, that each committed write able to take text out of
+        memory, or to put it back, raises, and nothing lowers: a batch that applied a
+        ``forget`` or a ``remove`` (``apply_ops``, ``forget``), ``delete_entry``, ``undo``
+        and ``reset``. Adds, edits, facts, the log's writes, consolidation, purge and the
+        switches leave it.
+
+        Extraction and imports check it as consolidation checks ``revision``: read before
+        the request is built, it must still hold when the result is applied, or the result
+        is dropped, since it was drawn from memory as it was and could write back what went
+        while the call ran. ``revision`` would serve too, but it rises with every add, so a
+        busy store would drop most results."""
+        return int(self._meta_value("forget_revision") or 0)
 
     def replace_entries(self, entries: Sequence[Dict[str, Any]]) -> None:
         """Make consolidation's result the set of visible entries, in one transaction.
@@ -1350,7 +1383,7 @@ class MemoryStore:
         """Store extraction's summary of a conversation, cut to ``SUMMARY_TITLE_MAX`` (120)
         and ``SUMMARY_TEXT_MAX`` (600) code points. A conversation with no record is left
         without one, and one marked incognito keeps none: an extraction already on its way
-        when the chat turned incognito writes nothing back (review Minor 8)."""
+        when the chat turned incognito writes nothing back."""
         with self._write():
             self._db.execute(
                 "UPDATE conversations SET summary_title = ?, summary_text = ?"
@@ -1361,7 +1394,7 @@ class MemoryStore:
     def mark_extracted(self, conversation_id: str, through: int) -> None:
         """Record that extraction has seen the conversation's rounds up to index
         ``through``. It never moves back, and stays put for a conversation marked
-        incognito (review Minor 8)."""
+        incognito."""
         with self._write():
             self._db.execute(
                 "UPDATE conversations SET extracted_through = max(extracted_through, ?)"
@@ -1579,7 +1612,7 @@ class MemoryStore:
     ) -> List[Tuple[SearchHit, str]]:
         """``search``'s hits for ``terms``, each with the whole text it was indexed by
         (pre-selection's floor counts the terms in it), leaving out the rounds of
-        ``exclude_conversation`` and the facts drawn from it (review Minor 3)."""
+        ``exclude_conversation`` and the facts drawn from it."""
         for name, value in (("from_date", from_date), ("to_date", to_date)):
             if date_problem(value):
                 raise ValueError(name + " must be a YYYY-MM-DD date")
@@ -1747,7 +1780,7 @@ class MemoryStore:
         """Forget everything (spec §10.1): delete every entry, fact, conversation record,
         round and batch, and the search index, in one transaction, then scrub the file. The
         user's switches stay, and so do the id counters, so no id is ever used twice; the
-        ``revision`` rises."""
+        ``revision`` and the ``forget_revision`` rise."""
         now = _timestamp(self._clock())
         with self._write():
             for statement in self._index.clear + (
@@ -1762,6 +1795,7 @@ class MemoryStore:
             self._set_meta("last_consolidated_at", now)
             self._set_meta("entries_left_out", "0")
             self._raise_revision()
+            self._raise_forget_revision()
             self._scrub()
 
     # ── internals ──
@@ -1849,7 +1883,7 @@ class MemoryStore:
     ) -> List[Fact]:
         """In the caller's write: for each forget record in ``forgets``, hide every visible
         fact, superseded ones included, that holds its phrase as whole words, as an entry
-        does (``forget_pattern``, R68), and record their ids in its ``fact_ids``. Returns the
+        does (``forget_pattern``), and record their ids in its ``fact_ids``. Returns the
         facts hidden."""
         if not forgets:
             return []
@@ -2039,6 +2073,12 @@ class MemoryStore:
             "UPDATE meta SET value = CAST(value AS INTEGER) + 1 WHERE key = 'revision'"
         )
         self._revision_raised = True
+
+    def _raise_forget_revision(self) -> None:
+        """In the caller's write: raise the ``forget_revision`` by one."""
+        self._db.execute(
+            "UPDATE meta SET value = CAST(value AS INTEGER) + 1 WHERE key = 'forget_revision'"
+        )
 
     def _new_id(self, kind: str) -> str:
         """In the caller's write: a new id of ``kind`` (see _ID_KINDS), its prefix and a

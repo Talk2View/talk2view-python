@@ -80,7 +80,7 @@ _NOWHERE = re.compile("(?!)")  # a pattern that matches no text
 
 
 def forget_pattern(text: str) -> re.Pattern[str]:
-    """What finds a forget's phrase in an entry, a fact or the log of the chats (R57, R68):
+    """What finds a forget's phrase in an entry, a fact or the log of the chats:
     its tokens in order, whole, in a ``token_line``, the last allowed an "s" or "es" ("cat"
     finds "cats", "box" "boxes"). So "ex" never finds "for example", nor "Sam" "Same time"
     or "Samsung". A phrase with no tokens finds nothing, rather than nearly every text;
@@ -112,7 +112,7 @@ def apply_entry_ops(
       "changes nothing" when it gives none of them, or only the values the entry has.
     - ``remove`` hides the entry: it stays in the list with ``hidden_at`` set to ``now``.
     - ``forget`` hides every unlocked visible entry that holds its phrase as whole words
-      (``forget_pattern``, R68): the phrase's tokens (``index_tokens``) in order among the
+      (``forget_pattern``): the phrase's tokens (``index_tokens``) in order among the
       entry's, the last allowed an "s" or "es", so "Sam" hides "Sam's birthday" and never
       "Same time next week". The phrase must be at least FORGET_TEXT_MIN (2) code points
       once normalised (``normalise_dedupe``; "forget text too short"): one letter is in

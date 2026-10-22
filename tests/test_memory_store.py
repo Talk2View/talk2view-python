@@ -179,19 +179,25 @@ def _found(store: MemoryStore, word: str) -> Tuple[List[Tuple[Any, ...]], List[T
 
 @posix_only
 def test_open_creates_file_0600_and_dir_0700(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, backend: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     path = tmp_path / "memory" / "u1.sqlite3"
     modes_at_connect: List[int] = []
-    real_connect = sqlite3.connect
 
-    def connect_spy(database: str, *args: Any, **kwargs: Any) -> sqlite3.Connection:
-        if database != ":memory:":  # the FTS5 probe
-            modes_at_connect.append(stat.S_IMODE(os.stat(database).st_mode))
-        return real_connect(database, *args, **kwargs)
+    def spy(real_open: Any) -> Any:
+        def open_spy(database: str, *args: Any, **kwargs: Any) -> Any:
+            if database != ":memory:":  # the FTS5 probe
+                modes_at_connect.append(stat.S_IMODE(os.stat(database).st_mode))
+            return real_open(database, *args, **kwargs)
 
-    monkeypatch.setattr(sqlite3, "connect", connect_spy)
-    memory = MemoryStore(path, backend="scan")  # stdlib sqlite3 opens the file
+        return open_spy
+
+    # The stdlib sqlite3 opens the file for sqlite3 and scan, and apsw its own SQLite.
+    monkeypatch.setattr(sqlite3, "connect", spy(sqlite3.connect))
+    if backend == "apsw":
+        apsw = importlib.import_module("apsw")
+        monkeypatch.setattr(apsw, "Connection", spy(apsw.Connection))
+    memory = MemoryStore(path, backend=backend)  # type: ignore[arg-type]
     try:
         memory.record_round("c1", "hello", "hi")  # a write, so the WAL files exist
         # The file existed, already 0600, before SQLite first opened it.
@@ -205,7 +211,7 @@ def test_open_creates_file_0600_and_dir_0700(
 
 @posix_only
 def test_open_tightens_an_existing_file_and_leaves_an_existing_directory(
-    tmp_path: Path,
+    tmp_path: Path, backend: str
 ) -> None:
     directory = tmp_path / "shared"
     directory.mkdir()
@@ -213,7 +219,7 @@ def test_open_tightens_an_existing_file_and_leaves_an_existing_directory(
     path = directory / "u1.sqlite3"
     path.touch()
     os.chmod(path, 0o644)
-    MemoryStore(path).close()
+    MemoryStore(path, backend=backend).close()  # type: ignore[arg-type]
     assert stat.S_IMODE(path.stat().st_mode) == 0o600
     assert stat.S_IMODE(directory.stat().st_mode) == 0o755
 
@@ -297,6 +303,7 @@ def test_schema_version_and_meta_defaults(tmp_path: Path, backend: str) -> None:
         "include_sensitive": "0",
         "changes_since_consolidation": "0",
         "revision": "0",
+        "forget_revision": "0",
         "index_kind": "scan" if backend == "scan" else "fts5",
         # A new store counts the days to its first consolidation from when it was created.
         "last_consolidated_at": "2026-10-21T10:00:00Z",

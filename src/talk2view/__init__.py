@@ -132,7 +132,7 @@ SessionRecoveredCallback = Callable[[str], None]
 AnonymousUnavailableCallback = Callable[[str], None]
 
 
-#: A user id that names its memory file as it is (D22); any other is hashed. Lowercase only,
+#: A user id that names its memory file as it is; any other is hashed. Lowercase only,
 #: as the engine's ids are, so two ids that differ only in case never share a file where
 #: the filesystem ignores case (macOS and Windows by default).
 _MEMORY_FILE_ID = re.compile(r"[a-z0-9_-]{1,128}")
@@ -318,7 +318,7 @@ class Talk2View:
         self.auth = T2VAuth(self._client)
         self.tools = T2VTools(self._client, dispatcher=dispatcher)
         if self._memory_path is not None:
-            # Engine-defined: answered here, its schema never registered (B5).
+            # Engine-defined: answered here, its schema never registered.
             self.tools.handle("search_memory", self._search_memory)
         self.voice = T2VVoice(self._client, require_session=self._require_session)
         self.skills = T2VSkills(self._client, self._data_storage)
@@ -468,7 +468,7 @@ class Talk2View:
             return None, None
         if memory is None:
             return None, None
-        memory.timezone = capabilities.timezone  # R64: the turn's
+        memory.timezone = capabilities.timezone  # the user's zone, as the turn sends it
         memory.run_due()
         return memory, memory.turn_payload(message)
 
@@ -958,7 +958,9 @@ class Talk2View:
 
         Creates a session if one doesn't exist. If the engine has lost the
         session (a deploy, a restart, an eviction) and nothing of the reply has
-        arrived yet, a new session is created and the turn is resent once.
+        arrived yet, a new session is created and the turn is resent once. Not when
+        someone else has signed in since the turn began: its history and memory are
+        the previous user's, so it ends with a ``session_lost`` error instead.
 
         ``stop()`` (or ``cancel.cancel()``) from another thread ends the
         iteration quietly; events already yielded are kept. A token that is
@@ -972,6 +974,7 @@ class Talk2View:
             self._require_session()
             if token.cancelled:
                 return  # stop() landed during the anonymous start
+            user_id = self._auth_user_id  # whose turn it is, a guest just started included
             session = self._current_session
             known_fresh = False
             if session is not None:
@@ -1009,7 +1012,7 @@ class Talk2View:
             # Once per turn: the same field rides /messages, every /resume and the resend.
             memory, field = self._memory_turn(message)
             events = self._send_with_session_recovery(
-                session, token, message, system_prompt, history, attachments, field
+                session, token, message, system_prompt, history, attachments, field, user_id
             )
             yield from memory.observe_turn(message, events) if memory is not None else events
         except Cancelled:
@@ -1027,6 +1030,7 @@ class Talk2View:
         history: Optional[List[ChatMessage]],
         attachments: Optional[List[Attachment]],
         memory: Optional[Dict[str, Any]] = None,
+        user_id: Optional[str] = None,
     ) -> Iterator[ChatEvent]:
         """Send a turn, and recover once if the engine has lost the chat session.
 
@@ -1034,7 +1038,10 @@ class Talk2View:
         replays, so resending is safe — but only before any event has been
         yielded: once the reply has started, a client tool handler may already
         have run, and resending could run it twice. ``memory``, the turn's memory
-        field, goes with the resend as it went the first time.
+        field, goes with the resend as it went the first time. ``user_id`` is who
+        was signed in as the turn began: when that has changed by the resend, the
+        history and the memory field belong to someone else, so nothing is resent
+        and the turn ends with ``session_lost``.
         """
         started = False
         try:
@@ -1069,6 +1076,11 @@ class Talk2View:
         # may have run on another thread in that window. Only resend if this
         # recovery's session is still the one in play.
         if not self._is_current_session(new_session):
+            return
+        if self._auth_user_id != user_id:
+            # Someone else signed in during the turn: the session just created is theirs,
+            # and the history and the memory field are the previous user's.
+            yield ChatEvent(type="error", message=SESSION_LOST_MESSAGE, error_type="session_lost")
             return
         for listener in list(self._session_recovered_listeners):
             try:

@@ -1142,6 +1142,53 @@ def test_a_scrub_that_fails_after_its_write_committed_is_retried(
     assert not _in_files(store, WORD)
 
 
+def test_close_runs_a_scrub_left_due(
+    tmp_path: Path,
+    backend: str,
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A scrub left due lives in the store object alone, so close runs it: the file it leaves
+    holds none of the text deleted before. (SQLite's own checkpoint at close takes the WAL,
+    but not a deleted round's words in an index segment that never merged.) A scrub that
+    fails again there is logged, and the file closes all the same."""
+
+    def scrub_fails(store: MemoryStore) -> None:
+        execute = store._db.execute
+
+        def failing(sql: str, params: Sequence[Any] = ()) -> List[Tuple[Any, ...]]:
+            if "'optimize'" in sql or sql.startswith("PRAGMA wal_checkpoint"):
+                raise sqlite3.OperationalError("disk I/O error")
+            return execute(sql, params)
+
+        monkeypatch.setattr(store._db, "execute", failing)
+
+    store = MemoryStore(tmp_path / "u1.sqlite3", backend=backend)  # type: ignore[arg-type]
+    store.record_round("c1", "My locker code is " + WORD + ".", "Noted.", at=T0)
+    scrub_fails(store)
+    store.delete_conversation("c1")
+    monkeypatch.undo()
+    assert _in_files(store, WORD)  # not scrubbed yet
+    store.close()
+    assert not _in_files(store, WORD)
+
+    store = MemoryStore(tmp_path / "u2.sqlite3", backend=backend)  # type: ignore[arg-type]
+    execute = store._db.execute
+    store.record_round("c1", "Hello", "Hi.", at=T0)
+    scrub_fails(store)
+    caplog.clear()
+    with caplog.at_level(logging.WARNING, logger="talk2view.memory"):
+        store.delete_conversation("c1")
+        store.close()
+    assert [record.getMessage() for record in caplog.records] == [
+        "Memory: scrubbing the store failed (OperationalError); the next write retries it",
+        "Memory: scrubbing the store failed (OperationalError) as it closed; deleted text may"
+        " stay in the file until the next scrub",
+    ]
+    with pytest.raises(Exception, match="(?i)closed"):
+        execute("SELECT 1")
+
+
 def test_expired_entries_stay_in_entries_and_are_never_purged(
     store: MemoryStore, clock: FakeClock
 ) -> None:
@@ -1643,6 +1690,79 @@ def test_revision_rises_with_every_change_to_memory(tmp_path: Path, backend: str
         assert store.revision() == seen
     finally:
         store.close()
+
+
+def test_forget_revision_rises_only_with_writes_that_take_text_out(
+    store: MemoryStore, clock: FakeClock
+) -> None:
+    """An extraction or an import applies its result only while the forget revision it read
+    before building its request holds: the result was drawn from memory as it was then,
+    and could write back what went while its call ran. So each committed write that can
+    take text out of memory, or put it back, raises it: a batch that applied a forget or a
+    remove, delete_entry, undo and reset. Nothing else does, so the adds and edits of a
+    busy store never cost an extraction its result."""
+    seen = store.forget_revision()
+
+    def rose() -> bool:
+        """Whether it rose since the last call."""
+        nonlocal seen
+        before, seen = seen, store.forget_revision()
+        return seen > before
+
+    assert seen == 0
+    # Writes that add, change or tidy leave it...
+    store.apply_ops([add("Likes tea."), add("Has a dog."), add("Owns a bike.")])
+    store.apply_ops([{"op": "update", "id": "e1", "text": "Likes green tea."}])
+    store.edit_entry("e2", text="Has a dog called Rex.")
+    store.add_facts(
+        [
+            {"text": "The dog is called Rex.", "topic": "people"},
+            {"text": "The user's dog is called Rex.", "topic": "people"},
+        ],
+        conversation_id=None,
+        source="said",
+    )
+    store.merge_facts("f2", ["f1"])
+    store.expire_facts(["f2"])
+    store.replace_entries([{"id": "e1", "topic": "preferences", "text": "Likes tea."}])
+    assert [entry.id for entry in store.entries()] == ["e1", "e2"]  # consolidation's e3 went
+    store.record_round("c1", "Talked about zebras.", "Noted.", at=T0, title="Zebras")
+    store.set_summary("c1", "Zebras", "The user talked about zebras.")
+    store.mark_extracted("c1", 1)
+    store.set_incognito("c2", True)
+    store.paused = True
+    store.paused = False
+    # ...as do a forget or a remove the rules drop, and a delete or an undo of nothing.
+    store.forget("x")
+    store.apply_ops([{"op": "remove", "id": "e404"}])
+    assert store.delete_entry("e404") is None
+    assert store.undo("b404") is False
+    assert not rose()
+
+    # Each write that takes text out, or puts it back, raises it.
+    batch = store.apply_ops([{"op": "remove", "id": "e1"}])
+    assert rose()
+    assert store.undo(batch.id) is True
+    assert rose()
+    store.forget("zebras")  # the log alone held it
+    assert rose()
+    store.forget("matches nothing")
+    assert rose()
+    assert store.delete_entry("e2") is not None  # locked: the user's own delete all the same
+    assert rose()
+    # A chat's own delete, and the purge once the undo window has passed, leave it.
+    store.delete_conversation("c1")
+    clock.now = T0 + timedelta(seconds=31)
+    assert store.purge() == 1  # e2
+    assert not rose()
+    # A write that fails leaves it; a reset raises it.
+    _fail_last_write(store)
+    with pytest.raises(Exception, match="disk full"):
+        store.forget("tea")
+    _stop_failing(store)
+    assert not rose()
+    store.reset()
+    assert rose()
 
 
 def test_apply_consolidation_is_all_or_nothing(store: MemoryStore, clock: FakeClock) -> None:

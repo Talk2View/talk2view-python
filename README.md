@@ -1195,9 +1195,11 @@ store.reset()                              # forget everything
 - **Import.** `import_text` sends the text to extraction in import mode and keeps what comes
   back as imported, then queues a consolidation. It returns `True` when applied, and `False`
   when the call failed or was refused (a guest, memory off for the partner, memory paused),
-  and for text that is blank or over 200,000 characters. `import_text`, `extract` and
-  `consolidate` wait for the engine, up to 180 seconds, in the calling thread: call them
-  from a worker thread, never a UI thread.
+  for text that is blank or over 200,000 characters, and when something was forgotten,
+  deleted, undone or reset while the call ran: its result could bring that back, so it is
+  discarded, and the import can be tried again. `import_text`, `extract` and `consolidate`
+  wait for the engine, up to 180 seconds, in the calling thread: call them from a worker
+  thread, never a UI thread.
 - **Reset** deletes every entry, fact, conversation record, round and undo batch, and
   scrubs the file. The switches (`paused`, `include_sensitive`) stay.
 
@@ -1253,12 +1255,12 @@ them, together with `run_due`, `turn_payload` and `handle_search`.
   a folder only the user can read.
 - **Deleted text is scrubbed** from the file once its undo window has passed (at once for
   a reset or a deleted chat).
-- **Search** runs on SQLite's FTS5, and the store picks a backend when it opens: the
-  standard library's `sqlite3` when it was built with FTS5; else `apsw`, which bundles a
-  SQLite with FTS5; else `scan`, which needs no FTS5, keeps the index in plain tables and
-  scores it in Python, so a very large memory searches more slowly. Memory works on all
-  three, `t2v.memory.store.backend` says which is in use, and a file can move between them
-  (the store rebuilds the index when it opens a file indexed the other way). To have
+- **Search** runs on SQLite's FTS5 where it can, and the store picks a backend when it
+  opens: the standard library's `sqlite3` when it was built with FTS5; else `apsw`, which
+  bundles a SQLite with FTS5; else `scan`, which needs no FTS5, keeps the index in plain
+  tables and scores it in Python, so a very large memory searches more slowly. Memory works
+  on all three, `t2v.memory.store.backend` says which is in use, and a file can move between
+  them (the store rebuilds the index when it opens a file indexed the other way). To have
   `apsw` (3.54 or later), install the `[memory]` extra; apsw needs Python 3.11, so on 3.10
   the extra adds nothing:
 

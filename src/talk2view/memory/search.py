@@ -39,7 +39,7 @@ from .text import (
 #: The most words a query keeps, its terms in every script but CJK and Thai: the first 12
 #: distinct ones.
 QUERY_TERMS_MAX = 12
-#: The most CJK and Thai terms a query keeps (R63): the first 24 distinct ones, bigrams and
+#: The most CJK and Thai terms a query keeps: the first 24 distinct ones, bigrams and
 #: lone characters, in the order they appear.
 QUERY_BIGRAMS_MAX = 24
 #: Chinese and Japanese function bigrams a query leaves out, as it leaves out STOP_WORDS:
@@ -99,14 +99,14 @@ CJK_STOP_BIGRAMS: FrozenSet[str] = frozenset(
 )
 #: Reciprocal rank fusion's k (spec §7.2 step 3).
 RRF_K = 60
-#: Pre-selection's floor (D18). A hit goes with a turn only when its fused score is at least
+#: Pre-selection's floor. A hit goes with a turn only when its fused score is at least
 #: 1 / (60 + 4), rank 4 or better in its list, and at least PRESELECT_MIN_TERMS units of its
-#: text match (``matched_units``, R75): pairs of a query word and a word of the text it
-#: begins, each word in one pair at most, and CJK or Thai terms (R63). The name is the
-#: plan's. Module constants, so the ablation can tune them.
+#: text match (``matched_units``): pairs of a query word and a word of the text it begins,
+#: each word in one pair at most, and CJK or Thai terms. PRESELECT_MIN_TERMS counts those
+#: units, whatever its name says. Module constants, so the ablation can tune them.
 PRESELECT_FLOOR = 1 / 64
 PRESELECT_MIN_TERMS = 2
-#: A round excerpt's width in code points, ellipses aside (D19).
+#: A round excerpt's width in code points, ellipses aside.
 EXCERPT_WIDTH = 600
 ELLIPSIS = chr(0x2026)
 #: The note a ``search_memory`` result carries when results were dropped to fit.
@@ -119,7 +119,7 @@ _B = 0.75
 _SPACE = re.compile(r"\s")
 
 
-# ── the query (D17) ──
+# ── the query ──
 
 
 def query_terms(text: str) -> List[str]:
@@ -128,7 +128,7 @@ def query_terms(text: str) -> List[str]:
 
     The tokens are the index's own (``index_tokens``: NFKC, casefolded, no combining marks,
     no Latin diacritics). A run of n CJK or Thai characters written together, with nothing
-    but combining marks between them, gives its n - 1 overlapping bigrams (R63): phrases of
+    but combining marks between them, gives its n - 1 overlapping bigrams: phrases of
     two characters between a space, matched whole, so "东京行程" gives "东 京", "京 行" and
     "行 程". One of CJK_STOP_BIGRAMS is left out. A run of one character is a term of one.
     Any other token is a word, matched as a prefix, unless it is one of STOP_WORDS or a
@@ -240,8 +240,8 @@ def term_frequency(tokens: Sequence[str], term: str) -> int:
 
 def matched_units(tokens: Sequence[str], terms: Sequence[str]) -> int:
     """How many units of a text with the index tokens ``tokens`` match ``terms``, as
-    pre-selection's floor counts them (R75). Each phrase, a CJK or Thai bigram or lone
-    character, that occurs is one unit (R63). The words, prefix terms, make as many units as
+    pre-selection's floor counts them. Each phrase, a CJK or Thai bigram or lone
+    character, that occurs is one unit. The words, prefix terms, make as many units as
     a maximum matching pairs them with the text's distinct tokens: a word with a token it
     begins, each word and each token in one pair at most. So "kayak" and "kayaking" in a
     query make one unit with a text's "kayaking", "kayak" makes one with a text's "kayak"
@@ -375,7 +375,7 @@ def bm25_scan(
     return scored
 
 
-# ── ranking, fusion and the floor (D18) ──
+# ── ranking, fusion and the floor ──
 
 
 def round_ref(conversation_id: str, idx: int) -> str:
@@ -419,8 +419,8 @@ def fuse(
 
 def strong_match(tokens: Sequence[str], terms: Sequence[str]) -> bool:
     """Whether a text with the index tokens ``tokens`` matches enough of ``terms`` to be
-    pre-selected: PRESELECT_MIN_TERMS (2) ``matched_units`` (R75), in every script. A CJK
-    or Thai bigram is one unit (R63), so a two-character CJK or Thai run (one bigram) alone
+    pre-selected: PRESELECT_MIN_TERMS (2) ``matched_units``, in every script. A CJK
+    or Thai bigram is one unit, so a two-character CJK or Thai run (one bigram) alone
     is not enough, as one word of the query or of the text is not, however many words it
     pairs with."""
     return matched_units(tokens, terms) >= PRESELECT_MIN_TERMS
@@ -432,7 +432,7 @@ def preselected(score: float, tokens: Sequence[str], terms: Sequence[str]) -> bo
     return score >= PRESELECT_FLOOR and strong_match(tokens, terms)
 
 
-# ── hits and excerpts (D19) ──
+# ── hits and excerpts ──
 
 
 def conversation_title(title: Optional[str], summary_title: Optional[str]) -> str:
@@ -533,7 +533,7 @@ def fact_hit(
 ) -> SearchHit:
     """A fact as a search result: its text whole, dated ``date``, the user's day it was
     recorded (``days.day``). A fact with a ``valid_until`` gives it before its text, as the
-    engine shows an entry's (R65): "(until 2026-11-10) Flies home on 10 November.". One past
+    engine shows an entry's: "(until 2026-11-10) Flies home on 10 November.". One past
     it is a hit still, true as history. The bound's 19 code points and FACT_TEXT_MAX (400)
     keep within RECALLED_TEXT_MAX (1,000)."""
     shown = "(until " + valid_until + ") " + text if valid_until else text
@@ -553,7 +553,7 @@ def round_hit(
     user's day it was said (``days.day``). The excerpt is centred on a term in what was
     said, never in a label: "use" begins "User". One cut after the round's start gives the
     label of the side it starts in after the ellipsis, "… Assistant: …", so whose words
-    they are is never lost (review Minor 2); its width is excerpt's."""
+    they are is never lost; its width is excerpt's."""
     text = round_text(user_text, assistant_text)
     said = _labelled(user_text, assistant_text, " " * len(_USER_LABEL), " " * len(_ASSISTANT_LABEL))
     start, end = _window(text, terms, EXCERPT_WIDTH, said)
@@ -602,7 +602,7 @@ def _dumps(value: Dict[str, Any]) -> str:
     return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
 
 
-# The plan's interfaces, and what store.py and payload.py use (review Minor 5).
+# The search steps, and what the other memory modules use.
 __all__ = [
     "PRESELECT_FLOOR",
     "PRESELECT_MIN_TERMS",

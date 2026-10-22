@@ -56,6 +56,16 @@ EXTRACTED: Dict[str, Any] = {
     "model": "m",
 }
 
+# An extract answer about a peanut allergy: all of it is what a forget of "peanut" removes.
+PEANUT_ANSWER: Dict[str, Any] = {
+    "summary": {"title": "Peanut allergy", "text": "The user is allergic to peanuts."},
+    "facts": [
+        {"text": "Is allergic to peanuts.", "topic": "identity", "supersedes": [], "source": "said"}
+    ],
+    "entry_ops": [{"op": "add", "topic": "identity", "text": "Allergic to peanuts"}],
+    "model": "m",
+}
+
 NO_RESULTS = '{"results":[]}'
 
 
@@ -1560,6 +1570,129 @@ def test_extraction_drops_entry_ops_when_the_chat_turned_incognito(
     assert (record.summary_title, record.extracted_through) == (None, 0)
 
 
+def _forget_peanut(store: MemoryStore) -> Callable[[str], None]:
+    """``during``: the user forgets their peanut allergy while the call runs."""
+
+    def forget(kind: str) -> None:
+        store.forget("peanut")
+
+    return forget
+
+
+def _peanut_free(memory: T2VMemory) -> bool:
+    """Whether no fact, entry or summary holds the word."""
+    store = memory.store
+    texts = [fact.text for fact in store.facts(include_superseded=True)] + _texts(memory)
+    for record in store.recent_conversations(100):
+        texts += [record.summary_title or "", record.summary_text or ""]
+    return not any("peanut" in text.lower() for text in texts)
+
+
+def test_a_forget_during_extraction_drops_its_result(
+    engine: MemoryCallsEngine, memory: T2VMemory, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A forget while the extract call runs (the user's first message in the next chat
+    can be "forget my peanut allergy"): the result was drawn from what it removed, so none
+    of it is applied, one line with counts only says so, and the extracted point stays.
+    The next extraction reads the log as the forget left it."""
+    store = memory.store
+    store.record_round("c1", "I'm allergic to peanuts", "Noted.")
+    store.record_round("c1", "I live in Perth", "Nice.")
+    engine.replies["extract"].append(PEANUT_ANSWER)
+    engine.during = _forget_peanut(store)
+
+    with caplog.at_level(logging.INFO, logger="talk2view"):
+        assert memory.extract("c1") is False
+
+    assert _peanut_free(memory)
+    assert store.facts() == [] and store.entries() == []
+    assert _conversation_mark(store, "c1") == 0
+    assert _logged(caplog) == [
+        (
+            logging.INFO,
+            "Memory: something was forgotten during the extraction, so its result (1 facts, 1"
+            " entry ops) was not applied",
+        )
+    ]
+    engine.during = None
+    assert memory.extract("c1") is True
+    first, second = engine.bodies_of("extract")
+    assert first["conversation"]["messages"][0]["text"] == "I'm allergic to peanuts"
+    assert [m["text"] for m in second["conversation"]["messages"]] == ["I live in Perth", "Nice."]
+    assert _conversation_mark(store, "c1") == 2
+    assert _peanut_free(memory)
+
+
+def test_a_forget_while_the_request_is_built_drops_the_result(
+    engine: MemoryCallsEngine, memory: T2VMemory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The forget revision is read before anything the request carries: a forget that lands
+    after the log was read for the request, and before the request is sent, drops the
+    result too."""
+    store = memory.store
+    store.record_round("c1", "I'm allergic to peanuts", "Noted.")
+    engine.replies["extract"].append(PEANUT_ANSWER)
+    related = bodies._related_facts
+    forget = _forget_peanut(store)
+
+    def forget_then_relate(*args: Any, **kwargs: Any) -> Any:
+        forget("extract")
+        return related(*args, **kwargs)
+
+    monkeypatch.setattr(bodies, "_related_facts", forget_then_relate)
+
+    assert memory.extract("c1") is False
+
+    (body,) = engine.bodies_of("extract")
+    assert body["conversation"]["messages"][0]["text"] == "I'm allergic to peanuts"
+    assert _peanut_free(memory)
+
+
+def test_a_forget_from_another_thread_never_lands_between_the_check_and_the_writes(
+    engine: MemoryCallsEngine, memory: T2VMemory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The host's own forget, on another thread, as the result is applied: it waits for the
+    result's one transaction, then takes out what the result wrote too."""
+    store = memory.store
+    store.record_round("c1", "I'm allergic to peanuts", "Noted.")
+    engine.replies["extract"].append(PEANUT_ANSWER)
+    add_facts = store.add_facts
+    host = threading.Thread(target=_forget_peanut(store), args=("host",))
+
+    def forget_meanwhile(*args: Any, **kwargs: Any) -> Any:
+        host.start()
+        host.join(0.2)  # it can't finish while the result's transaction is open
+        return add_facts(*args, **kwargs)
+
+    monkeypatch.setattr(store, "add_facts", forget_meanwhile)
+
+    assert memory.extract("c1") is True
+    host.join(5)
+
+    assert not host.is_alive()
+    assert _peanut_free(memory)
+
+
+def test_an_add_during_extraction_keeps_its_result(
+    engine: MemoryCallsEngine, memory: T2VMemory
+) -> None:
+    """Only a write that takes text out of memory, or puts it back, drops a result: an
+    entry a turn adds while the call runs, as any turn may, leaves it to be applied."""
+    store = memory.store
+    store.record_round("c1", "I moved to Perth", "Noted.")
+
+    def add_an_entry(kind: str) -> None:
+        store.apply_ops([add("Likes tea")], source="said")
+
+    engine.during = add_an_entry
+
+    assert memory.extract("c1") is True
+
+    assert _texts(memory) == ["Likes tea", "Hiking on Saturday"]
+    assert [fact.text for fact in store.facts()] == ["Plans a hike on Saturday."]
+    assert _conversation_mark(store, "c1") == 1
+
+
 def test_import_text_uses_import_mode_and_sensitive_switch(
     engine: MemoryCallsEngine, memory: T2VMemory
 ) -> None:
@@ -1630,6 +1763,35 @@ def test_an_import_keeps_its_consolidation_due_until_one_is_applied(
     assert engine.kinds() == ["extract", "consolidate", "consolidate", "extract", "extract"]
 
 
+def test_a_forget_during_an_import_discards_it(
+    engine: MemoryCallsEngine, memory: T2VMemory, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The same for an import: a forget while its call runs discards it whole, and no
+    consolidation follows. import_text says False, as for a failed call; the host may
+    import again."""
+    store = memory.store
+    store.apply_ops([add("Allergic to peanuts", "identity")], source="said")
+    engine.replies["extract"].append(PEANUT_ANSWER)
+    engine.during = _forget_peanut(store)
+
+    with caplog.at_level(logging.INFO, logger="talk2view"):
+        assert memory.import_text("I'm allergic to peanuts.") is False
+
+    assert _peanut_free(memory)
+    assert store.facts() == [] and store.entries() == []
+    assert engine.kinds() == ["extract"]
+    assert _logged(caplog) == [
+        (
+            logging.INFO,
+            "Memory: something was forgotten during the import, so its result (1 facts, 1 entry"
+            " ops) was not applied",
+        )
+    ]
+    engine.during = None
+    assert memory.import_text("I prefer tea to coffee.") is True
+    assert engine.kinds() == ["extract", "extract", "consolidate"]
+
+
 # ── turns through Talk2View ──
 
 
@@ -1664,6 +1826,34 @@ def test_one_payload_rides_the_resend_and_the_resume(
         assert lost["memory"] == resent["memory"] == resume["memory"]
         assert [entry["text"] for entry in lost["memory"]["entries"]] == ["Lives in Perth"]
         assert _rounds(memory) == [("Where do I live?", "In Perth.")]
+
+
+def test_a_resend_never_carries_the_previous_users_memory(
+    engine: MemoryCallsEngine, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Someone else signs in once the turn's memory field is built: the send reaches the
+    previous user's session, which the engine doesn't hold for the new user, and the turn
+    ends with session_lost. Nothing is resent, so the previous user's memory field and
+    history never go out in the new user's session."""
+    with _talk2view(engine, tmp_path) as t2v:
+        memory = _memory_of(t2v)
+        memory.store.apply_ops([add("Lives in Perth", "identity")], source="said")
+        t2v.create_session()
+        turn_payload = memory.turn_payload
+
+        def build_then_switch(message: str) -> Optional[Dict[str, Any]]:
+            field = turn_payload(message)
+            t2v.auth.login("bob@example.com", "pw")
+            return field
+
+        monkeypatch.setattr(memory, "turn_payload", build_then_switch)
+
+        events = list(t2v.chat("Where do I live?"))
+
+        assert [(event.type, event.error_type) for event in events] == [("error", "session_lost")]
+        (refused,) = _sent(engine, "/messages", "/resume")  # bob's token, ann's session
+        assert [entry["text"] for entry in refused["memory"]["entries"]] == ["Lives in Perth"]
+        assert engine.histories_of("user-bob") == []
 
 
 def test_no_round_after_an_error_or_a_stop(engine: MemoryCallsEngine, tmp_path: Path) -> None:

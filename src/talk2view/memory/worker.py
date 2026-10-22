@@ -13,7 +13,7 @@ from typing import Any, Callable, Deque, Optional, Set
 
 logger = logging.getLogger("talk2view.memory")
 
-# R81: after a failed engine memory call, the automatic calls hold off for COOLDOWN_S,
+# After a failed engine memory call, the automatic calls hold off for COOLDOWN_S,
 # twice as long after each further failure in a row, at most COOLDOWN_MAX_S.
 COOLDOWN_S = 60.0
 COOLDOWN_MAX_S = 3600.0
@@ -130,7 +130,7 @@ class Ticker:
 
 
 class Cooldown:
-    """How long the automatic engine calls hold off after failed ones (R81): COOLDOWN_S
+    """How long the automatic engine calls hold off after failed ones: COOLDOWN_S
     after the first failure in a row, twice the last wait after each further one, at most
     COOLDOWN_MAX_S. A ``retry_after`` makes that failure's wait at least so long, capped the
     same, without changing how the next ones double. A success ends it.

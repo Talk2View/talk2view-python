@@ -61,7 +61,7 @@ class _Turn:
         self.live = live  # memory was on for it: its memory events apply
         self.reply: List[str] = []
         # Whether its round goes in the log when it is done: not after an error, nor once
-        # it applied a forget or a remove (R67).
+        # it applied a forget or a remove.
         self.keep = live and user_text is not None
 
 
@@ -77,7 +77,7 @@ class T2VMemory:
 
     ``conversation_id`` is the conversation in progress (32 hex characters, the shape the
     engine accepts); ``new_conversation`` starts another. ``timezone`` is the user's, an
-    IANA name, the one the turn's ``Capabilities.timezone`` sends (R64); None means the
+    IANA name, the one the turn's ``Capabilities.timezone`` sends; None means the
     system's zone.
 
     The engine calls (``extract``, ``consolidate``, ``import_text``) wait up to
@@ -85,10 +85,10 @@ class T2VMemory:
     daemon thread and return at once, unless ``inline=True`` (tests and the eval: they run
     in the caller, in order). A call that fails returns False and logs one line, with the
     status or the exception's class and never memory text. The automatic calls then cool
-    down (R81, ``worker.Cooldown``): none goes out for 60 s, twice as long after each
+    down (``worker.Cooldown``): none goes out for 60 s, twice as long after each
     further failure in a row, at most an hour and never less than the engine's
     ``Retry-After``; a call that succeeds ends the cooldown. Each queued call checks it
-    when it starts (R86). It runs on ``clock``, or on the ``now`` given to ``run_due``. A
+    when it starts. It runs on ``clock``, or on the ``now`` given to ``run_due``. A
     guest (``is_anonymous()`` true) makes no call: the engine refuses them to guests. After
     a 403 ``memory_disabled`` none goes out through this client again in this process.
 
@@ -160,7 +160,7 @@ class T2VMemory:
         §10.1: the "Memory updated" chip, with its undo). It is set before that event is
         passed on, so a host that receives a ``memory`` event from ``chat()`` finds the
         event's batch here; ``undo(last_applied.id)`` takes it back within 30 s. None at the
-        start of each turn, and after an event that changed nothing (R87): memory paused,
+        start of each turn, and after an event that changed nothing: memory paused,
         the chat incognito, no ops, every op dropped (``on_event`` still returns that batch,
         with the rules that dropped them), or the store failed. A batch here always has
         something in ``applied``."""
@@ -250,10 +250,11 @@ class T2VMemory:
     def handle_search(self, args: Dict[str, Any]) -> str:
         """Answer a ``search_memory`` call (spec §8.4) from the store, as its
         ``search_result_json``, leaving out the current conversation, which the agent has in
-        context already. A null argument counts as left out (A7): ``limit`` is 8 by default
-        and kept within 1 to 20 (R40), and ``query`` is cut to 200 code points. A malformed
-        argument gets a short ``{"error": ...}`` result that never quotes memory; nothing
-        raises. Paused, incognito or closed, nothing is found (NO_RESULTS)."""
+        context already. A null argument counts as left out (the engine sends null for one
+        the model left out): ``limit`` is 8 by default and kept within 1 to 20, and
+        ``query`` is cut to 200 code points. A malformed argument gets a short
+        ``{"error": ...}`` result that never quotes memory; nothing raises. Paused,
+        incognito or closed, nothing is found (NO_RESULTS)."""
         problem, query, from_date, to_date, limit = _search_arguments(args)
         if problem is not None:
             return json.dumps({"error": problem})
@@ -275,10 +276,10 @@ class T2VMemory:
 
     def on_event(self, event: ChatEvent) -> Optional[AppliedBatch]:
         """Apply a ``memory`` event's ops (spec §7.3) to the store as one undoable batch, and
-        return it. None for any other event, for an event with no ops (R62: no empty batch),
+        return it. None for any other event, for an event with no ops (no empty batch),
         while memory is paused or the conversation incognito, when closed, or when the store
         fails (logged). A batch whose ops were all dropped is returned too, its ``applied``
-        empty and its ``dropped`` naming the rules; ``last_applied`` never shows one (R87)."""
+        empty and its ``dropped`` naming the rules; ``last_applied`` never shows one."""
         if event.type != "memory" or not event.memory_ops:
             return None
         with self._lock:
@@ -303,7 +304,7 @@ class T2VMemory:
         (``on_event``) before it is passed on, and ``last_applied`` set to its batch, or to
         None when it changed nothing; the reply's ``text`` is gathered, and on ``done`` the
         round is recorded in the store's log, once. Never for a turn that met an ``error``
-        or was stopped, and never for one that applied a ``forget`` or a ``remove`` (R67):
+        or was stopped, and never for one that applied a ``forget`` or a ``remove``:
         its own words name what was forgotten. A paused or incognito turn applies and
         records nothing. A turn an ``approval_required`` pauses goes on in
         ``observe_approval``."""
@@ -341,7 +342,7 @@ class T2VMemory:
             if event.type == "memory":
                 batch = self.on_event(event) if turn.live else None
                 with self._lock:
-                    # R85: there when the host gets the event. R87: only a batch that
+                    # Set before the host gets the event, and only to a batch that
                     # changed something, so no host shows "Memory updated" for nothing.
                     self._last_applied = batch if batch is not None and batch.applied else None
                 if batch is not None and any(
@@ -388,9 +389,9 @@ class T2VMemory:
           wants one, unless memory hasn't changed since the last one.
 
         Nothing but the purge while memory is paused, for a guest, once the partner has
-        memory off, or while a failed call's cooldown runs at ``now`` (R81). Each job it
+        memory off, or while a failed call's cooldown runs at ``now``. Each job it
         queues checks the cooldown again when it starts, and makes no call while it runs:
-        the conversation stays due (R86). A call that fails starts the cooldown at ``now``
+        the conversation stays due. A call that fails starts the cooldown at ``now``
         when it was given, so a simulated clock never mixes with the real one."""
         try:
             return self._run_due(now)
@@ -475,7 +476,7 @@ class T2VMemory:
     def _extract_job(self, conversation_id: str, since: Optional[datetime]) -> None:
         """An extraction run_due or new_conversation queued. It makes no call while a failed
         call's cooldown runs at ``since``, run_due's ``now``, or else now, and the
-        conversation stays due (R86): a queue of them meeting a failing engine makes one
+        conversation stays due: a queue of them meeting a failing engine makes one
         call, not one each."""
         if not self._cooling(since):
             self._extract_safely(conversation_id, "conversation", since)
@@ -527,8 +528,11 @@ class T2VMemory:
         It goes out during a failed call's cooldown too, and its outcome updates it.
 
         A result that arrives once the conversation has turned incognito is applied
-        without its entry ops (the store drops the rest), and one that arrives once memory
-        is paused or closed is dropped: a later trigger extracts again."""
+        without its entry ops (the store drops the rest). One that arrives once memory is
+        paused or closed is dropped, and so is one that arrives after something was
+        forgotten, deleted, undone or reset while the call ran (the store's
+        ``forget_revision`` moved), since it could write that back (logged with counts): a
+        later trigger extracts again, from the log as it is then."""
         if mode not in _MODES:
             raise ValueError("mode must be 'conversation' or 'import'")
         key = "extract:" + conversation_id
@@ -555,6 +559,8 @@ class T2VMemory:
         with self._lock:
             if self._closed or self.store.paused:
                 return False
+            # Read before anything the request carries: a forget after it drops the result.
+            forget_revision = self.store.forget_revision()
             record = self.store.conversation(conversation_id)
             if record is None or record.incognito:
                 return False
@@ -566,32 +572,61 @@ class T2VMemory:
                     self.store.mark_extracted(record.id, through)
                 return True
         data = self._call("extraction", "/v1/memory/extract", body, _extraction_answer, since)
-        return data is not None and self._apply_extraction(data, record.id, through, mode)
+        return data is not None and self._apply_extraction(
+            data, record.id, through, mode, forget_revision
+        )
 
     def _apply_extraction(
-        self, data: Dict[str, Any], conversation_id: Optional[str], through: int, mode: str
+        self,
+        data: Dict[str, Any],
+        conversation_id: Optional[str],
+        through: int,
+        mode: str,
+        forget_revision: int,
     ) -> bool:
         """Apply an extract answer (its shape checked by ``_extraction_answer``) to the
-        conversation, or with ``conversation_id`` None (an import) to none."""
+        conversation, or with ``conversation_id`` None (an import) to none, in one store
+        transaction. ``forget_revision`` is the store's as the request was built: when it
+        has moved since, something was forgotten, deleted, undone or reset while the call
+        ran, and the result, drawn from memory as it was, could write that back. Then none
+        of it is applied (logged with counts) and the extracted point stays where it was,
+        so a later trigger extracts again from what is left."""
         summary, facts, ops = data.get("summary"), data["facts"], data["entry_ops"]
         source = "imported" if mode == "import" else "inferred"
         with self._lock:
             if self._closed or self.store.paused:
                 return False
-            keep_ops = True
-            if conversation_id is not None:
-                record = self.store.conversation(conversation_id)
-                if record is None:  # deleted while the call ran
-                    return False
-                keep_ops = not record.incognito  # apply_ops isn't keyed by conversation
-            recorded = self.store.add_facts(facts, conversation_id=conversation_id, source=source)
-            batch = self.store.apply_ops(ops, source=source) if ops and keep_ops else None
-            if conversation_id is not None:
-                if isinstance(summary, dict):
-                    title, text = summary.get("title"), summary.get("text")
-                    if isinstance(title, str) and isinstance(text, str):
-                        self.store.set_summary(conversation_id, title, text)
-                self.store.mark_extracted(conversation_id, through)
+            # One transaction, so a forget the host makes on another thread lands before the
+            # check, or after every write.
+            with self.store._write():
+                forgotten = self.store.forget_revision() != forget_revision
+                if not forgotten:
+                    keep_ops = True
+                    if conversation_id is not None:
+                        record = self.store.conversation(conversation_id)
+                        if record is None:  # deleted while the call ran
+                            return False
+                        keep_ops = not record.incognito  # apply_ops isn't keyed by conversation
+                    recorded = self.store.add_facts(
+                        facts, conversation_id=conversation_id, source=source
+                    )
+                    batch = self.store.apply_ops(ops, source=source) if ops and keep_ops else None
+                    if conversation_id is not None:
+                        if isinstance(summary, dict):
+                            title, text = summary.get("title"), summary.get("text")
+                            if isinstance(title, str) and isinstance(text, str):
+                                self.store.set_summary(conversation_id, title, text)
+                        self.store.mark_extracted(conversation_id, through)
+        if forgotten:
+            # Counts only: the result holds memory text.
+            logger.info(
+                "Memory: something was forgotten during the %s, so its result (%d facts, %d entry"
+                " ops) was not applied",
+                "import" if conversation_id is None else "extraction",
+                len(facts),
+                len(ops),
+            )
+            return False
         logger.debug(
             "Memory: extraction recorded %d facts and applied %d entry ops, dropping %d%s",
             len(recorded),
@@ -673,7 +708,11 @@ class T2VMemory:
         call failed (logged) or is refused (a guest, the partner's memory off, memory
         paused), and for text that is blank or longer than bodies.EXTRACT_CHARS_MAX
         (200,000) code points. It goes out during a failed call's cooldown too, and its
-        outcome updates it."""
+        outcome updates it.
+
+        Something forgotten, deleted, undone or reset while the call runs discards the
+        import (False, logged with counts): its result could write back what went. The
+        host may import again."""
         try:
             return self._import(text)
         except Exception as error:
@@ -696,6 +735,7 @@ class T2VMemory:
         with self._lock:
             if self._closed or self.store.paused:
                 return False
+            forget_revision = self.store.forget_revision()  # first, as in _extract
             body = bodies.import_body(
                 self.store,
                 uuid.uuid4().hex,
@@ -705,7 +745,7 @@ class T2VMemory:
                 timezone=timezone,
             )
         data = self._call("import", "/v1/memory/extract", body, _extraction_answer, None)
-        if data is None or not self._apply_extraction(data, None, 0, "import"):
+        if data is None or not self._apply_extraction(data, None, 0, "import", forget_revision):
             return False
         with self._lock:
             self._import_pending = True
@@ -722,7 +762,7 @@ class T2VMemory:
     ) -> Optional[Dict[str, Any]]:
         """POST ``body`` to an engine memory route: its JSON answer, or None.
 
-        Once closed, None at once and nothing sent (R82): the body may hold the memory of a
+        Once closed, None at once and nothing sent: the body may hold the memory of a
         user who has just signed out. A failure (an error, a timeout, or an answer that is
         no JSON object or that ``well_formed`` refuses) logs one line with the status and
         the error type, or the exception's class, never its message, which could quote the
@@ -813,4 +853,4 @@ def _reasons(dropped: List[str]) -> str:
     return " (" + ", ".join(sorted(set(dropped))) + ")" if dropped else ""
 
 
-__all__ = ["NO_RESULTS", "T2VMemory"]
+__all__ = ["NO_RESULTS", "QUERY_MAX", "SEARCH_LIMIT", "T2VMemory"]

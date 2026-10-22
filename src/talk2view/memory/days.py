@@ -1,4 +1,4 @@
-"""The user's days (R64). The store keeps every time in UTC, such as
+"""The user's days. The store keeps every time in UTC, such as
 ``2026-10-21T10:00:00Z``, and every day it derives from one is a day in the user's
 timezone: "today" for expiry, a search's date filter, and the date a hit, an entry or a
 conversation goes with.

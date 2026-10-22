@@ -83,7 +83,7 @@ def _parse_memory(raw: Dict[str, Any]) -> MemoryEvent:
     ops = raw.get("ops")
     return MemoryEvent(
         ops=ops if isinstance(ops, list) else [],
-        tool_call_id=raw.get("tool_call_id", ""),
+        tool_call_id=raw.get("tool_call_id") or "",
     )
 
 

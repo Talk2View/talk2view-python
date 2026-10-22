@@ -110,6 +110,10 @@ def test_memory_public_exports() -> None:
     assert not missing, missing
     for name in MEMORY_NAMES:
         assert hasattr(memory, name), name
+    # The search_memory bounds handle_search documents, which the evals import.
+    from talk2view.memory import client
+
+    assert {"QUERY_MAX", "SEARCH_LIMIT"} <= set(client.__all__)
 
 
 def test_talk2view_takes_memory_path() -> None:

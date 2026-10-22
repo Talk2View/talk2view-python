@@ -46,7 +46,7 @@ def extract_body(
     ``messages`` holds up to CONTEXT_MESSAGES messages from the rounds extraction has read,
     then the new rounds', a round at a time while they fit the caps: a user message and an
     assistant message per round, each only when it has text. ``extracted_through`` counts
-    the context messages, so the engine reads every message after them as new (A9): a
+    the context messages, so the engine reads every message after them as new: a
     count of messages, where the index returned counts rounds, as ``mark_extracted`` takes
     it. Rounds the caps leave out wait for the next request."""
     start = record.extracted_through

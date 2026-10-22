@@ -279,6 +279,14 @@ def test_memory_is_read_from_its_key_alone() -> None:
     assert _parse_chunk({"memory": None}).memory is None
 
 
+def test_a_null_tool_call_id_reads_as_empty() -> None:
+    """The field is a string: a JSON null reads as "", as a missing key does."""
+    for raw in ({"ops": OPS, "tool_call_id": None}, {"ops": OPS}):
+        chunk = _parse_chunk({"memory": raw})
+        assert chunk.memory is not None
+        assert chunk.memory.tool_call_id == ""
+
+
 def test_unknown_chunk_keys_still_ignored(memory_engine: MemoryEngine) -> None:
     """A key this SDK doesn't know changes nothing, even one named like memory."""
     future = dict(_text("Hello"), memory_v2={"ops": OPS, "tool_call_id": "c1"})
