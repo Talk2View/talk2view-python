@@ -2007,6 +2007,46 @@ def test_controller_clear_starts_a_new_conversation(
             controller.close()
 
 
+def test_a_conversation_swap_starts_a_new_conversation(
+    engine: MemoryCallsEngine, tmp_path: Path
+) -> None:
+    """The chat page's New chat and its list of chats swap the conversation on screen
+    (exchange_conversation, restore_conversation), which detaches the engine session
+    instead of deleting it. The memory's conversation ends there as at clear(): the one put
+    aside is extracted in the background, and the next turn's field names it, where
+    before it was still the current one and left out."""
+    with _talk2view(engine, tmp_path) as t2v:
+        controller = ChatController(t2v, executor=lambda fn: fn())
+        try:
+            memory = _memory_of(t2v)
+            first = memory.conversation_id
+            controller.send("I go hiking most Saturdays")
+            identity, _off = controller.follow_identity(lambda change: None)
+
+            # New chat, as the list of chats asks for it.
+            put_aside = controller.exchange_conversation(
+                {"messages": [], "history": [], "threadId": None},
+                epoch=identity.epoch,
+                carry=True,
+            )
+
+            second = memory.conversation_id
+            assert second != first
+            assert memory.wait_idle(5)
+            assert [body["conversation"]["id"] for body in engine.bodies_of("extract")] == [first]
+            controller.send("What do I do on Saturdays?")
+            last = _sent(engine, "/messages")[-1]
+            assert [item["title"] for item in last["memory"]["recent"]] == ["Weekend plans"]
+            assert _rounds(memory) == [("What do I do on Saturdays?", "ok")]
+
+            # Back to the first chat: its transcript is replayed, in a conversation of its own.
+            assert put_aside is not None
+            controller.restore_conversation(put_aside)
+            assert memory.conversation_id not in (first, second)
+        finally:
+            controller.close()
+
+
 # ── the background worker and the timer ──
 
 

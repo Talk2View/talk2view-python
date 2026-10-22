@@ -1359,9 +1359,15 @@ class Talk2View:
         the conversation this session belongs to may be one the end-user switches back
         to, and its turn may still be finishing. The transcript is replayed with every
         message, so a new session costs a round trip and nothing else. A session recovery
-        in flight sees the change through ``_deletes``, as it does after a delete."""
+        in flight sees the change through ``_deletes``, as it does after a delete. With
+        ``memory_path``, the memory starts a new conversation too, as at ``clear_session``:
+        the one put aside is queued for extraction, and is no longer the current one that
+        the next turn's memory leaves out."""
         self._current_session = None
         self._deletes += 1
+        memory = self._memory
+        if memory is not None:
+            memory.new_conversation()
 
     def close(self) -> None:
         """Close the underlying HTTP client and release pooled connections.

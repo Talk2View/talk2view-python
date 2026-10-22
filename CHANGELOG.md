@@ -20,7 +20,8 @@ based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `t2v.memory.last_applied` is the batch a `memory` event applied, and
   `t2v.memory.undo(batch_id)` takes it back within 30 seconds, for a "Memory updated"
   notice with an undo button. Extraction and consolidation run on a background thread
-  (`run_due()` before every turn, a new conversation on `clear_session()`,
+  (`run_due()` before every turn, a new conversation on `clear_session()` and on
+  `detach_session()`, which the chat page's New chat and its list of chats use,
   `start_background()` for a host that can sit idle) and never hold up a chat. A failed
   call is silent: one log line, then a cooldown of 60 s that doubles up to an hour, which
   every queued call checks again as it starts. Incognito conversations and a pause switch

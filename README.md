@@ -189,6 +189,10 @@ this session belongs to may be one you switch back to, and its turn may still
 be finishing. `t2v.partner_key` is the partner key `Talk2View` was built with
 (read-only).
 
+With `memory_path`, it also starts a new memory conversation and queues the one put
+aside for extraction, as `clear_session()` does (see
+[On-device memory](#on-device-memory-memory_path)).
+
 #### `t2v.upload_attachment(file, filename=None, mime_type=None)`
 
 Upload an image or PDF and pass the returned `Attachment` to
@@ -1226,7 +1230,7 @@ call them directly, see below), and nothing runs on a timer unless you start one
 |---|---|
 | `chat()`, before every turn | `run_due()`: the purge of removed or forgotten items past their 30 s undo window, extraction of each conversation with unread rounds that has been idle for 10 minutes, and consolidation when it is due |
 | The first `run_due()` after the memory opens | Extraction of every conversation with unread rounds, idle or not, so a chat cut short by quitting is not lost |
-| `t2v.clear_session()` | A new conversation (`t2v.memory.conversation_id` changes; `ChatController.clear()` calls it) and extraction of the one that ended |
+| `t2v.clear_session()`, `t2v.detach_session()` | A new conversation (`t2v.memory.conversation_id` changes) and extraction of the one that ended. `ChatController.clear()` calls the first; `restore_conversation` and `exchange_conversation`, which the chat page's New chat and its list of chats use, call the second |
 | `t2v.memory.start_background(interval_s=60.0)` | `run_due()` every `interval_s` seconds on a daemon thread, until `t2v.memory.stop_background()` or the memory closes (a sign-out, or another user signing in: start it again for the next user). For a host that can sit idle after the last message, where no `chat()` would extract that conversation |
 
 Consolidation is due when the entries are over their caps (more than 40, or more than
@@ -1252,8 +1256,10 @@ t2v.memory.incognito = True      # ...marked incognito before its first message
 one step (it does not clear the engine session, as `clear_session()` does). An incognito
 turn sends only `{"status": "incognito"}`, applies no `memory` events, records no rounds
 and finds nothing when the agent searches, and extraction never reads the conversation.
-`clear_session()` ends it: the next conversation is not incognito. Setting `incognito`
-after the first message deletes the rounds recorded so far.
+`clear_session()` and `detach_session()` end it: the next conversation is not incognito,
+nor is a chat switched back to, so a host that keeps a list of chats marks one again when
+it puts it back on screen. Setting `incognito` after the first message deletes the rounds
+recorded so far.
 
 **Paused** is the user's switch for all memory, kept in the file
 (`t2v.memory.store.paused = True`). A paused turn sends only `{"status": "paused"}`, applies
