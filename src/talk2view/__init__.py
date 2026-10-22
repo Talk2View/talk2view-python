@@ -232,7 +232,7 @@ class Talk2View:
             up to 300 s between bytes, whatever this is.
         upload_timeout: Seconds for an upload: attachments and audio (default 120, as
             the TypeScript SDK).
-        memory_path: A directory for on-device memory (spec §10.2). Each user, a guest
+        memory_path: A directory for on-device memory. Each user, a guest
             included, keeps their memory there in a file of their own,
             ``<user id>.sqlite3``, that only they can read, and ``memory`` is the signed-in
             user's ``T2VMemory``. The ``memory`` and ``memory_search`` capabilities are set
@@ -350,7 +350,8 @@ class Talk2View:
         the other callers of a shared anonymous start are already on their way. So it
         only updates local state — no request, no listener, no lock held beyond a
         field update. Closing the previous user's memory waits at most for a store
-        read or write in progress, never for an engine call.
+        read or write in progress, and for a scrub a failed one left due, which runs
+        here (``MemoryStore.close``); never for an engine call.
         """
         self.invalidate_config_cache()
         user_id = user.id if user is not None else None
@@ -1012,7 +1013,14 @@ class Talk2View:
             # Once per turn: the same field rides /messages, every /resume and the resend.
             memory, field = self._memory_turn(message)
             events = self._send_with_session_recovery(
-                session, token, message, system_prompt, history, attachments, field, user_id
+                session,
+                token,
+                message,
+                system_prompt,
+                history,
+                attachments,
+                field,
+                user_id=user_id,
             )
             yield from memory.observe_turn(message, events) if memory is not None else events
         except Cancelled:
@@ -1030,7 +1038,8 @@ class Talk2View:
         history: Optional[List[ChatMessage]],
         attachments: Optional[List[Attachment]],
         memory: Optional[Dict[str, Any]] = None,
-        user_id: Optional[str] = None,
+        *,
+        user_id: Optional[str],
     ) -> Iterator[ChatEvent]:
         """Send a turn, and recover once if the engine has lost the chat session.
 
@@ -1038,10 +1047,10 @@ class Talk2View:
         replays, so resending is safe — but only before any event has been
         yielded: once the reply has started, a client tool handler may already
         have run, and resending could run it twice. ``memory``, the turn's memory
-        field, goes with the resend as it went the first time. ``user_id`` is who
-        was signed in as the turn began: when that has changed by the resend, the
-        history and the memory field belong to someone else, so nothing is resent
-        and the turn ends with ``session_lost``.
+        field, goes with the resend as it went the first time. ``user_id`` (required,
+        so no caller can skip the check) is who was signed in as the turn began:
+        when that has changed by the resend, the history and the memory field belong
+        to someone else, so nothing is resent and the turn ends with ``session_lost``.
         """
         started = False
         try:

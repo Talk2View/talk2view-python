@@ -1,5 +1,6 @@
-"""Memory search, the reference algorithm (spec §7.2): query terms, the FTS5 query, BM25 for
-the scan backend, fusion, the pre-selection floor, excerpts and the ``search_memory`` result.
+"""Memory search, the algorithm every client's store follows: query terms, the FTS5 query,
+BM25 for the scan backend, fusion, the pre-selection floor, excerpts and the
+``search_memory`` result.
 
 Pure functions: ``MemoryStore`` reads the rows and calls these, so every port can copy them
 and the contract fixtures can pin them. Text never reaches a log here.
@@ -97,7 +98,7 @@ CJK_STOP_BIGRAMS: FrozenSet[str] = frozenset(
         (0x3053, 0x306E),  # この
     )
 )
-#: Reciprocal rank fusion's k (spec §7.2 step 3).
+#: Reciprocal rank fusion's k, the usual 60, for fusing the facts' and the rounds' lists.
 RRF_K = 60
 #: Pre-selection's floor. A hit goes with a turn only when its fused score is at least
 #: 1 / (60 + 4), rank 4 or better in its list, and at least PRESELECT_MIN_TERMS units of its
@@ -579,7 +580,7 @@ def _side_label(text: str, start: int, end: int, user_text: str, assistant_text:
     return _ASSISTANT_LABEL if first > reply else ""
 
 
-# ── the search_memory result (spec §8.4) ──
+# ── the search_memory result ──
 
 
 def result_json(hits: Sequence[SearchHit]) -> str:

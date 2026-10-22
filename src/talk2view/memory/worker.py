@@ -1,7 +1,7 @@
-"""Where ``T2VMemory``'s engine calls run (spec §7.4), so a chat never waits for one:
-``Worker`` runs them one at a time on one background daemon thread, never two under the
-same key, ``Ticker`` calls a function every few seconds for a host with no loop of its
-own, and ``Cooldown`` holds the automatic calls back after failed ones."""
+"""Where ``T2VMemory``'s engine calls (extraction, consolidation, imports) run, so a chat
+never waits for one: ``Worker`` runs them one at a time on one background daemon thread,
+never two under the same key, ``Ticker`` calls a function every few seconds for a host with
+no loop of its own, and ``Cooldown`` holds the automatic calls back after failed ones."""
 
 from __future__ import annotations
 

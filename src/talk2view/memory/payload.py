@@ -1,4 +1,4 @@
-"""The ``memory`` field a turn sends (spec §8.1): the entries, recent conversations and
+"""The ``memory`` field a turn sends: the entries, recent conversations and
 pre-selected hits, chosen and capped here so the engine never has to trim one.
 
 The engine (``normalise_memory_field``) drops an item that breaks a per-item rule and then

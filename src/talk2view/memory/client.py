@@ -1,4 +1,4 @@
-"""The device's side of on-device memory (spec §7.4, §10.2): ``T2VMemory`` sends each turn's
+"""The device's side of on-device memory: ``T2VMemory`` sends each turn's
 memory field, applies the engine's ``memory`` events, answers ``search_memory`` from the
 store, records each round in the store's log, and asks the engine to extract and to
 consolidate.
@@ -36,7 +36,7 @@ logger = logging.getLogger("talk2view.memory")
 # One engine memory call can take about 120 s: a 60 s model call, then one retry when the
 # model's reply can't be parsed. The calls run in the background, so wait longer than that.
 CALL_TIMEOUT_S = 180.0
-# search_memory's arguments (spec §8.4).
+# search_memory's arguments, as the engine's definition of the tool bounds them.
 SEARCH_LIMIT = 8
 QUERY_MIN = 2
 QUERY_MAX = 200
@@ -66,7 +66,7 @@ class _Turn:
 
 
 class T2VMemory:
-    """One user's on-device memory in use (spec §10.2): what ``Talk2View(memory_path=...)``
+    """One user's on-device memory in use: what ``Talk2View(memory_path=...)``
     makes for each signed-in user as ``t2v.memory``, over that user's ``MemoryStore``.
 
     Each turn ``Talk2View.chat`` calls ``run_due`` (it only queues work), sends
@@ -144,9 +144,9 @@ class T2VMemory:
     def incognito(self) -> bool:
         """Whether the current conversation is incognito: its turns send only ``{"status":
         "incognito"}``, apply no memory events, record no rounds and find nothing when the
-        agent searches. Set it before the conversation's first message (spec §10.1), or use
-        ``new_conversation(incognito=True)``; set later, it deletes the rounds recorded so
-        far, as the store's ``set_incognito`` does."""
+        agent searches. Set it before the conversation's first message, so none of its turns
+        sends memory or changes it, or use ``new_conversation(incognito=True)``; set later,
+        it deletes the rounds recorded so far, as the store's ``set_incognito`` does."""
         return self._incognito
 
     @incognito.setter
@@ -156,8 +156,8 @@ class T2VMemory:
 
     @property
     def last_applied(self) -> Optional[AppliedBatch]:
-        """What the turn's latest ``memory`` event applied, as one undoable batch (spec
-        §10.1: the "Memory updated" chip, with its undo). It is set before that event is
+        """What the turn's latest ``memory`` event applied, as one undoable batch: what a
+        host's "Memory updated" notice shows, with its undo. It is set before that event is
         passed on, so a host that receives a ``memory`` event from ``chat()`` finds the
         event's batch here; ``undo(last_applied.id)`` takes it back within 30 s. None at the
         start of each turn, and after an event that changed nothing: memory paused,
@@ -183,8 +183,8 @@ class T2VMemory:
     def new_conversation(self, *, incognito: bool = False) -> str:
         """End the conversation in progress and start another, incognito or not; returns its
         id. The new one is switched to and marked in one step, so no turn ever finds it
-        unmarked. The one that ended is queued for extraction (spec §7.4), never waited
-        for."""
+        unmarked. The one that ended is queued for extraction, since a new conversation
+        means it is over, and never waited for."""
         with self._lock:
             previous = self.conversation_id
             self.conversation_id = current = uuid.uuid4().hex
@@ -223,10 +223,11 @@ class T2VMemory:
     # ── each turn ──
 
     def turn_payload(self, latest_user_message: str) -> Optional[Dict[str, Any]]:
-        """The turn's ``memory`` field (spec §8.1): the store's ``turn_payload`` for the
-        current conversation, in ``timezone``. Only ``{"status": "paused"}`` while memory is
-        paused, and only ``{"status": "incognito"}`` in an incognito conversation. None when
-        closed, or when the store can't be read (logged): the turn then goes without it."""
+        """The turn's ``memory`` field, what the agent is shown of the user's memory: the
+        store's ``turn_payload`` for the current conversation, in ``timezone``. Only
+        ``{"status": "paused"}`` while memory is paused, and only ``{"status": "incognito"}``
+        in an incognito conversation. None when closed, or when the store can't be read
+        (logged): the turn then goes without it."""
         with self._lock:
             if self._closed:
                 return None
@@ -248,13 +249,14 @@ class T2VMemory:
         return field
 
     def handle_search(self, args: Dict[str, Any]) -> str:
-        """Answer a ``search_memory`` call (spec §8.4) from the store, as its
-        ``search_result_json``, leaving out the current conversation, which the agent has in
-        context already. A null argument counts as left out (the engine sends null for one
-        the model left out): ``limit`` is 8 by default and kept within 1 to 20, and
-        ``query`` is cut to 200 code points. A malformed argument gets a short
-        ``{"error": ...}`` result that never quotes memory; nothing raises. Paused,
-        incognito or closed, nothing is found (NO_RESULTS)."""
+        """Answer a ``search_memory`` call from the store, as its ``search_result_json``:
+        the engine defines the tool, and the device answers it, as the memory is here. The
+        current conversation is left out, as the agent has it in context already. A null
+        argument counts as left out (the engine sends null for one the model left out):
+        ``limit`` is 8 by default and kept within 1 to 20, and ``query`` is cut to 200 code
+        points. A malformed argument gets a short ``{"error": ...}`` result that never
+        quotes memory; nothing raises. Paused, incognito or closed, nothing is found
+        (NO_RESULTS)."""
         problem, query, from_date, to_date, limit = _search_arguments(args)
         if problem is not None:
             return json.dumps({"error": problem})
@@ -275,11 +277,12 @@ class T2VMemory:
                 return json.dumps({"error": "the memory search failed"})
 
     def on_event(self, event: ChatEvent) -> Optional[AppliedBatch]:
-        """Apply a ``memory`` event's ops (spec §7.3) to the store as one undoable batch, and
-        return it. None for any other event, for an event with no ops (no empty batch),
-        while memory is paused or the conversation incognito, when closed, or when the store
-        fails (logged). A batch whose ops were all dropped is returned too, its ``applied``
-        empty and its ``dropped`` naming the rules; ``last_applied`` never shows one."""
+        """Apply a ``memory`` event's ops to the store as one undoable batch, by the rules
+        every client's store shares (``ops.apply_entry_ops``), and return it. None for any
+        other event, for an event with no ops (no empty batch), while memory is paused or
+        the conversation incognito, when closed, or when the store fails (logged). A batch
+        whose ops were all dropped is returned too, its ``applied`` empty and its
+        ``dropped`` naming the rules; ``last_applied`` never shows one."""
         if event.type != "memory" or not event.memory_ops:
             return None
         with self._lock:
@@ -374,7 +377,7 @@ class T2VMemory:
             except Exception as error:
                 logger.warning("Memory: recording the round failed (%s)", _name(error))
 
-    # ── triggers (spec §7.4) ──
+    # ── triggers: when the device calls the engine ──
 
     def run_due(self, now: Optional[datetime] = None) -> List[str]:
         """Queue what is due, and return its keys: ``"extract:<id>"`` for each conversation to
@@ -518,7 +521,7 @@ class T2VMemory:
     # ── engine calls ──
 
     def extract(self, conversation_id: str, *, mode: str = "conversation") -> bool:
-        """One POST /v1/memory/extract (spec §8.5) for the conversation's rounds extraction
+        """One POST /v1/memory/extract for the conversation's rounds extraction
         hasn't read (``bodies.extract_body``), and its result applied: the facts, the entry
         ops as one batch, with source "inferred" ("imported" in import mode), and the
         summary; then the extracted point moves on. True when applied, or when there was
@@ -620,11 +623,11 @@ class T2VMemory:
         if forgotten:
             # Counts only: the result holds memory text.
             logger.info(
-                "Memory: something was forgotten during the %s, so its result (%d facts, %d entry"
-                " ops) was not applied",
+                "Memory: something was forgotten during the %s, so its result (%s, %s) was not"
+                " applied",
                 "import" if conversation_id is None else "extraction",
-                len(facts),
-                len(ops),
+                _count(len(facts), "fact"),
+                _count(len(ops), "entry op"),
             )
             return False
         logger.debug(
@@ -637,14 +640,14 @@ class T2VMemory:
         return True
 
     def consolidate(self) -> bool:
-        """One POST /v1/memory/consolidate (spec §8.6) built from the store's
-        ``consolidation_snapshot`` (``bodies.consolidate_body``), and its result applied
-        through ``apply_consolidation`` only: all of it, or nothing when memory changed
-        while the call ran, which leaves consolidation due (logged with counts). True when
-        applied. False when the call failed (logged) or is refused (a guest, the partner's
-        memory off, memory paused), when the result wasn't applied, or while another
-        consolidation is queued or running. It goes out during a failed call's cooldown
-        too, and its outcome updates it."""
+        """One POST /v1/memory/consolidate, which tidies the entries and the facts, built
+        from the store's ``consolidation_snapshot`` (``bodies.consolidate_body``), and its
+        result applied through ``apply_consolidation`` only: all of it, or nothing when
+        memory changed while the call ran, which leaves consolidation due (logged with
+        counts). True when applied. False when the call failed (logged) or is refused (a
+        guest, the partner's memory off, memory paused), when the result wasn't applied, or
+        while another consolidation is queued or running. It goes out during a failed call's
+        cooldown too, and its outcome updates it."""
         if not self._worker.claim("consolidate"):
             return False
         try:
@@ -700,15 +703,15 @@ class T2VMemory:
         return True
 
     def import_text(self, text: str) -> bool:
-        """Import memory the user exported from another assistant (spec §9 rule 10): one
-        POST /v1/memory/extract in import mode (``bodies.import_body``), with the text as
-        the user's one message and the store's "Include sensitive topics" switch. Its facts
-        and entry ops are applied with source "imported", tied to no conversation, and a
-        consolidation follows (queued, unless inline). True when applied. False when the
-        call failed (logged) or is refused (a guest, the partner's memory off, memory
-        paused), and for text that is blank or longer than bodies.EXTRACT_CHARS_MAX
-        (200,000) code points. It goes out during a failed call's cooldown too, and its
-        outcome updates it.
+        """Import memory the user exported from another assistant: one POST
+        /v1/memory/extract in import mode (``bodies.import_body``), which takes the text as
+        the user's own words, sent as their one message with the store's "Include sensitive
+        topics" switch. Its facts and entry ops are applied with source "imported", tied to
+        no conversation, and a consolidation follows (queued, unless inline). True when
+        applied. False when the call failed (logged) or is refused (a guest, the partner's
+        memory off, memory paused), and for text that is blank or longer than
+        bodies.EXTRACT_CHARS_MAX (200,000) code points. It goes out during a failed call's
+        cooldown too, and its outcome updates it.
 
         Something forgotten, deleted, undone or reset while the call runs discards the
         import (False, logged with counts): its result could write back what went. The
@@ -851,6 +854,11 @@ def _failure(error: T2VError) -> str:
 def _reasons(dropped: List[str]) -> str:
     """The rules that dropped ops, for the log: rule names only."""
     return " (" + ", ".join(sorted(set(dropped))) + ")" if dropped else ""
+
+
+def _count(number: int, noun: str) -> str:
+    """A count, for the log: "1 fact", "0 facts", "2 facts"."""
+    return "{} {}{}".format(number, noun, "" if number == 1 else "s")
 
 
 __all__ = ["NO_RESULTS", "QUERY_MAX", "SEARCH_LIMIT", "T2VMemory"]

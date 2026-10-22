@@ -1,5 +1,6 @@
 """The on-device memory store: one SQLite file per user, holding the memory entries, the facts
-and the store's own log of each conversation's rounds (spec §7.1).
+and the store's own log of each conversation's rounds, so memory never depends on how the
+host app keeps its chats.
 
 Three backends, chosen when the store opens (``MemoryStore.backend`` says which):
 
@@ -649,7 +650,12 @@ class MemoryStore:
         """Close the file. A scrub that failed and is still due (see ``_write``) runs first:
         SQLite's own checkpoint at close takes the WAL, but not a deleted row's words in an
         FTS5 segment that never merged. If it fails again, that is logged, and the file
-        closes all the same."""
+        closes all the same.
+
+        That scrub runs on whichever thread closes the store, and can take as long as an
+        FTS5 merge. At an account switch that is the auth listener's thread, where
+        ``Talk2View`` closes the previous user's memory. It is rare: only a scrub that
+        failed is left due."""
         with self._lock:
             if self._scrub_due:
                 self._scrub_due = False
@@ -830,11 +836,11 @@ class MemoryStore:
         return self.apply_ops([{"op": "forget", "text": text}])
 
     def delete_entry(self, entry_id: str) -> Optional[str]:
-        """The user's own delete of an entry (spec §10.1), locked or not: it is hidden as a
-        ``remove`` hides one, in a batch ``undo`` can reverse for UNDO_WINDOW_S (30)
-        seconds, and ``purge`` deletes it after that. Returns the batch's id, for ``undo``;
-        None, changing nothing, for an id that is not a visible entry: unknown, or deleted
-        already."""
+        """The user's own delete of an entry, locked or not (a lock keeps only the engine's
+        changes off): it is hidden as a ``remove`` hides one, in a batch ``undo`` can reverse
+        for UNDO_WINDOW_S (30) seconds, and ``purge`` deletes it after that. Returns the
+        batch's id, for ``undo``; None, changing nothing, for an id that is not a visible
+        entry: unknown, or deleted already."""
         now = _timestamp(self._clock())
         with self._write():
             rows = self._db.execute(_SELECT_ENTRY_IMAGE, (entry_id,))
@@ -1408,7 +1414,7 @@ class MemoryStore:
 
         Marking one that has rounds already deletes them, with their index rows, and its
         summary, and starts its log over (``extracted_through`` 0), then scrubs the file of
-        their text: an incognito chat's rounds are never kept (spec §7.1). Its title stays;
+        their text, since the words of an incognito chat are never kept. Its title stays;
         facts and entries drawn from it stay, as they do when the chat is deleted."""
         now = _timestamp(self._clock())
         with self._write():
@@ -1495,8 +1501,9 @@ class MemoryStore:
         exclude_conversation: Optional[str] = None,
         timezone: Optional[str] = None,
     ) -> List[SearchHit]:
-        """Search the facts and the log of the chats for ``query`` (spec §7.2), in one read:
-        at most ``limit`` hits, best first.
+        """Search the facts and the log of the chats for ``query``, in one read, by the
+        algorithm every client's store shares (``search.py``): at most ``limit`` hits, best
+        first.
 
         The query's terms (``search.query_terms``: at most 12 words, stop words and single
         letters left out, and 24 bigrams of CJK or Thai text) are looked up in the facts
@@ -1538,10 +1545,11 @@ class MemoryStore:
         exclude_conversation: Optional[str] = None,
         timezone: Optional[str] = None,
     ) -> str:
-        """The ``search_memory`` tool's result for these arguments (spec §8.4): ``search``,
-        with ``limit`` kept within 1 to RESULT_LIMIT_MAX (20), as ``{"results": [{"date",
-        "conversation", "kind", "text"}]}`` JSON of at most RESULT_CHARS_MAX (8,000) code
-        points, with ``"note": "truncated"`` when results were dropped to fit.
+        """The ``search_memory`` tool's result for these arguments, in the shape and within
+        the limits the engine's definition of the tool gives: ``search``, with ``limit``
+        kept within 1 to RESULT_LIMIT_MAX (20), as ``{"results": [{"date", "conversation",
+        "kind", "text"}]}`` JSON of at most RESULT_CHARS_MAX (8,000) code points, with
+        ``"note": "truncated"`` when results were dropped to fit.
         ``exclude_conversation`` and ``timezone`` go to ``search`` as they are."""
         hits = self.search(
             query,
@@ -1560,7 +1568,7 @@ class MemoryStore:
         exclude_conversation: Optional[str] = None,
         timezone: Optional[str] = None,
     ) -> Dict[str, Any]:
-        """The ``memory`` field for a turn (spec §8.1), read in one read: ``{"status",
+        """The ``memory`` field a turn sends the engine, read in one read: ``{"status",
         "entries", "recent", "recalled"}``, every list within the engine's caps (see
         payload.py). ``exclude_conversation`` is the current conversation. ``timezone`` is
         the user's, as ``search`` takes it: every day in the field is a day there, "today"
@@ -1722,7 +1730,7 @@ class MemoryStore:
 
     @property
     def paused(self) -> bool:
-        """The user's "pause memory" switch (spec §10.1), kept in the file."""
+        """The user's "pause memory" switch, kept in the file so it holds across launches."""
         return self._meta_value("paused") == "1"
 
     @paused.setter
@@ -1731,8 +1739,9 @@ class MemoryStore:
 
     @property
     def include_sensitive(self) -> bool:
-        """The user's "Include sensitive topics" switch for imports (spec §10.1), off by
-        default, kept in the file."""
+        """The user's "Include sensitive topics" switch for imports, off by default, kept
+        in the file: an import keeps sensitive topics (health, religion, politics and the
+        like) only when it is on."""
         return self._meta_value("include_sensitive") == "1"
 
     @include_sensitive.setter
@@ -1777,7 +1786,7 @@ class MemoryStore:
         return "\n".join(lines) + "\n"
 
     def reset(self) -> None:
-        """Forget everything (spec §10.1): delete every entry, fact, conversation record,
+        """Forget everything, the user's reset: delete every entry, fact, conversation record,
         round and batch, and the search index, in one transaction, then scrub the file. The
         user's switches stay, and so do the id counters, so no id is ever used twice; the
         ``revision`` and the ``forget_revision`` rise."""

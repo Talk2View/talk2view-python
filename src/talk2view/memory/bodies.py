@@ -1,8 +1,8 @@
 """The bodies of the engine's memory calls, built from the store: POST /v1/memory/extract
-for a conversation's new rounds or for an import (spec §8.5), and POST
-/v1/memory/consolidate from a consolidation snapshot (spec §8.6). Each keeps within the
-engine's caps, counted in code points as the engine counts them, so the engine never
-refuses one for its size. An optional field with no value is left out, never sent as null.
+for a conversation's new rounds or for an import, and POST /v1/memory/consolidate from a
+consolidation snapshot. Each keeps within the engine's caps, counted in code points as the
+engine counts them, so the engine never refuses one for its size. An optional field with no
+value is left out, never sent as null.
 
 The functions that read the store expect the caller to hold whatever keeps it open.
 """
@@ -93,9 +93,9 @@ def import_body(
     today: str,
     timezone: Optional[str],
 ) -> Dict[str, Any]:
-    """The extract request for an import (spec §9 rule 10): ``text``, the memory the user
-    exported from another assistant, as the one user message of a conversation of its own,
-    with the store's "Include sensitive topics" switch."""
+    """The extract request for an import: ``text``, the memory the user exported from
+    another assistant, as the one user message of a conversation of its own (import mode
+    takes it as the user's own words), with the store's "Include sensitive topics" switch."""
     conversation = {
         "id": conversation_id,
         "started_at": now,
@@ -166,7 +166,7 @@ def _body(
 def _related_facts(
     store: MemoryStore, said: Sequence[str], timezone: Optional[str]
 ) -> List[Dict[str, Any]]:
-    """The facts extraction compares the conversation with (spec §8.5), so it can tell a new
+    """The facts extraction compares the conversation with, so it can tell a new
     fact from one it supersedes: those a search for each line of ``said`` finds, in order,
     each once, at most RELATED_FACTS_MAX. Never a superseded one."""
     lines = [line for text in said for line in text.splitlines() if line.strip()]

@@ -10,6 +10,7 @@ the test's thread; those through ``Talk2View`` get the background worker it buil
 
 from __future__ import annotations
 
+import inspect
 import json
 import logging
 import os
@@ -1610,8 +1611,8 @@ def test_a_forget_during_extraction_drops_its_result(
     assert _logged(caplog) == [
         (
             logging.INFO,
-            "Memory: something was forgotten during the extraction, so its result (1 facts, 1"
-            " entry ops) was not applied",
+            "Memory: something was forgotten during the extraction, so its result (1 fact, 1"
+            " entry op) was not applied",
         )
     ]
     engine.during = None
@@ -1624,14 +1625,19 @@ def test_a_forget_during_extraction_drops_its_result(
 
 
 def test_a_forget_while_the_request_is_built_drops_the_result(
-    engine: MemoryCallsEngine, memory: T2VMemory, monkeypatch: pytest.MonkeyPatch
+    engine: MemoryCallsEngine,
+    memory: T2VMemory,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     """The forget revision is read before anything the request carries: a forget that lands
     after the log was read for the request, and before the request is sent, drops the
-    result too."""
+    result too. The counts in the log line read in the plural for any number but one."""
     store = memory.store
     store.record_round("c1", "I'm allergic to peanuts", "Noted.")
-    engine.replies["extract"].append(PEANUT_ANSWER)
+    engine.replies["extract"].append(
+        dict(PEANUT_ANSWER, facts=PEANUT_ANSWER["facts"] * 2, entry_ops=[])
+    )
     related = bodies._related_facts
     forget = _forget_peanut(store)
 
@@ -1641,11 +1647,19 @@ def test_a_forget_while_the_request_is_built_drops_the_result(
 
     monkeypatch.setattr(bodies, "_related_facts", forget_then_relate)
 
-    assert memory.extract("c1") is False
+    with caplog.at_level(logging.INFO, logger="talk2view"):
+        assert memory.extract("c1") is False
 
     (body,) = engine.bodies_of("extract")
     assert body["conversation"]["messages"][0]["text"] == "I'm allergic to peanuts"
     assert _peanut_free(memory)
+    assert _logged(caplog) == [
+        (
+            logging.INFO,
+            "Memory: something was forgotten during the extraction, so its result (2 facts, 0"
+            " entry ops) was not applied",
+        )
+    ]
 
 
 def test_a_forget_from_another_thread_never_lands_between_the_check_and_the_writes(
@@ -1783,8 +1797,8 @@ def test_a_forget_during_an_import_discards_it(
     assert _logged(caplog) == [
         (
             logging.INFO,
-            "Memory: something was forgotten during the import, so its result (1 facts, 1 entry"
-            " ops) was not applied",
+            "Memory: something was forgotten during the import, so its result (1 fact, 1 entry"
+            " op) was not applied",
         )
     ]
     engine.during = None
@@ -1854,6 +1868,15 @@ def test_a_resend_never_carries_the_previous_users_memory(
         (refused,) = _sent(engine, "/messages", "/resume")  # bob's token, ann's session
         assert [entry["text"] for entry in refused["memory"]["entries"]] == ["Lives in Perth"]
         assert engine.histories_of("user-bob") == []
+
+
+def test_the_resend_check_needs_the_turns_user() -> None:
+    """Who the turn began with is a required keyword of the send: left out, it would read as
+    nobody signed in, and the check would refuse every resend of a signed-in user's turn."""
+    send = inspect.signature(Talk2View._send_with_session_recovery)
+    user_id = send.parameters["user_id"]
+    assert user_id.kind is inspect.Parameter.KEYWORD_ONLY
+    assert user_id.default is inspect.Parameter.empty
 
 
 def test_no_round_after_an_error_or_a_stop(engine: MemoryCallsEngine, tmp_path: Path) -> None:

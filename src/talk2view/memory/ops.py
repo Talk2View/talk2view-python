@@ -1,4 +1,4 @@
-"""The rules for applying memory entry ops (spec §7.3).
+"""The rules for applying memory entry ops.
 
 ``apply_entry_ops`` is pure: it reads no clock, store or other state, so the same entries,
 ops, ``now`` and ids always give the same result. It is the reference every client's store

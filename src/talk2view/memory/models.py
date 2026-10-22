@@ -1,4 +1,4 @@
-"""The memory store's records, topics and caps (spec §7.1).
+"""The memory store's records, topics and caps, which every client's store shares.
 
 Every character cap counts Unicode code points (``code_points``), the unit the engine and
 every other client's store use too.
