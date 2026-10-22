@@ -1362,7 +1362,8 @@ class Talk2View:
         in flight sees the change through ``_deletes``, as it does after a delete. With
         ``memory_path``, the memory starts a new conversation too, as at ``clear_session``:
         the one put aside is queued for extraction, and is no longer the current one that
-        the next turn's memory leaves out."""
+        the next turn's memory leaves out. Like ``clear_session``, it can wait briefly, on
+        the calling thread, for a memory store write in progress."""
         self._current_session = None
         self._deletes += 1
         memory = self._memory

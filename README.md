@@ -941,10 +941,13 @@ rest of the page's life). The page then sends the stopped turn again with
 `reload`. "Default" in the model picker returns to the partner's default
 model.
 
-The page's "new chat" (`newSession`) runs `controller.clear()`, which deletes
-the engine session. The engine keeps one session per account and partner key,
-so that is also the session of any other Talk2View app the user is signed in
-to with the same partner key.
+The page's "new chat" (`threadNew`) keeps the current conversation in the list
+of chats and starts a blank one: the engine session is detached, not deleted.
+With no list (`ChatFeatures(thread_list=False)`, or a controller without
+`exchange_conversation` or `follow_identity`) it sends `newSession` instead,
+which runs `controller.clear()` and deletes the engine session. The engine
+keeps one session per account and partner key, so that is also the session of
+any other Talk2View app the user is signed in to with the same partner key.
 
 **Security.** The server binds `127.0.0.1` on an ephemeral port and admits
 a request only from a loopback peer, with its own `Host`, and with its own
@@ -1233,6 +1236,12 @@ call them directly, see below), and nothing runs on a timer unless you start one
 | `t2v.clear_session()`, `t2v.detach_session()` | A new conversation (`t2v.memory.conversation_id` changes) and extraction of the one that ended. `ChatController.clear()` calls the first; `restore_conversation` and `exchange_conversation`, which the chat page's New chat and its list of chats use, call the second |
 | `t2v.memory.start_background(interval_s=60.0)` | `run_due()` every `interval_s` seconds on a daemon thread, until `t2v.memory.stop_background()` or the memory closes (a sign-out, or another user signing in: start it again for the next user). For a host that can sit idle after the last message, where no `chat()` would extract that conversation |
 
+The chat page's list of chats and the memory's conversations are not linked in this release:
+switching chats starts a new memory conversation, even back to a chat that had one, and
+deleting a chat from the list leaves its rounds in memory
+(`t2v.memory.store.delete_conversation` deletes them; `t2v.memory.store.reset()` deletes
+everything).
+
 Consolidation is due when the entries are over their caps (more than 40, or more than
 6,000 characters), when 10 changes have built up and 7 days have passed since the last
 one (or since the file was created), when the last one could not take every entry, and
@@ -1372,7 +1381,7 @@ them, together with `run_due`, `turn_payload` and `handle_search`.
   Windows the permission calls are skipped, as `FileStorage`'s are: keep `memory_path` in
   a folder only the user can read.
 - **Deleted text is scrubbed** from the file once its undo window has passed (at once for
-  a reset or a deleted chat).
+  a reset or a chat deleted with `store.delete_conversation`).
 - **Search** runs on SQLite's FTS5 where it can, and the store picks a backend when it
   opens: the standard library's `sqlite3` when it was built with FTS5; else `apsw`, which
   bundles a SQLite with FTS5; else `scan`, which needs no FTS5, keeps the index in plain
