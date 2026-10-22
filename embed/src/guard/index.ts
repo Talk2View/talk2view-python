@@ -7,7 +7,7 @@
  * (the driver's host writes them to disk), so they travel the real command path.
  */
 import { resultOf, type PageStore } from '../store';
-import { isAutoRun, launchedFromFragment, runAuto, type AutoReport } from './autorun';
+import { isAutoRun, launchedFromFragment, runAuto, showThread, type AutoReport } from './autorun';
 import { monitors, recordGuardFailure, setStreaming } from './monitors';
 import { runProbes, type Probe } from './probes';
 
@@ -236,7 +236,12 @@ async function deliver(store: PageStore, payload: string): Promise<void> {
   console.error(payload); // already carries RESULTS_MARKER: never prefix it twice
 }
 
+/** Where guard.spec.ts reaches `showThread()` directly, since the scripted run's own 18
+ * steps never leave it anything to recover from (see autorun.ts). Guard build only. */
+const SHOW_THREAD_KEY = '__t2vGuardShowThread';
+
 export function installGuard(store: PageStore): void {
+  (window as unknown as Record<string, unknown>)[SHOW_THREAD_KEY] = showThread;
   store.subscribe(() => {
     const s = store.get().state;
     setStreaming(s.isLoading && s.messages.some((m) => m.isStreaming === true));

@@ -37,10 +37,13 @@ a leaf.
 
 from __future__ import annotations
 
+import concurrent.futures
 import logging
 import queue
 import threading
+import time
 from collections import OrderedDict
+from pathlib import Path
 from typing import (
     TYPE_CHECKING,
     Any,
@@ -55,18 +58,24 @@ from typing import (
 )
 
 from ..controller import ControllerBusyError, ControllerClosedError
-from ..errors import AnonymousUnavailableError, T2VError
+from ..errors import AnonymousUnavailableError, AuthenticationError, T2VError
+from ..metrics import TurnMetrics
+from ..skill_store import InvalidSkillError, SkillExistsError
 from ..skills import SkillValidationError
 from ..types import Attachment, Decision
 from .app_state import AppState, UnknownModelError, _identity
+from .dictation import Dictation
 from .host import HostAdapter
 from .hub import ChatSource
 from .options import _openable
 from .provider_sign_in import ProviderSignIn
+from .threads import ThreadsState
 from .wire import Command, CommandFailure, _echo, failure_result, success_result
 
 if TYPE_CHECKING:
     from .. import Talk2View
+    from ..skill_format import Problem
+    from ..skills import T2VSkills
 
 __all__ = ["CommandRouter", "ControllerLike", "UploadRegistry"]
 
@@ -78,12 +87,20 @@ QUEUE_FULL = "queue_full"
 STOPPED = "stopped"
 _STOP = object()
 Job = Callable[[], None]
+#: How long ``skillImport`` waits for the host's file picker (``_on_host``): a native modal
+#: dialog is legitimately left open for minutes while someone finds the file.
+PICKER_WAIT_S = 600
+#: How long a ``_pending_import`` (a ``skill_exists`` conflict, or a file missing only its
+#: description) stays answerable: past this, ``resolve``/``description`` gets
+#: ``import_unavailable`` and the page must import again.
+PENDING_IMPORT_S = 300
 
 _NEW, _RUNNING, _STOPPED = "new", "running", "stopped"
 _INTERNAL_ERROR = "Something went wrong."
 _ATTACHMENTS_OFF = "Attachments are turned off in this app."
 _GUESTS_OFF = "Guest chat is turned off in this app. Sign in to continue."
 _PROVIDERS_OFF = "Sign-in with Apple or Google is turned off in this app."
+_THREADS_OFF = "The chat list is turned off in this app."
 _PROVIDER_NAMES = {"apple": "Apple", "google": "Google"}
 
 
@@ -103,6 +120,29 @@ class ControllerLike(ChatSource, Protocol):
     def clear(self) -> None: ...
 
     def clear_error(self) -> None: ...
+
+
+def _auth_refusal(err: T2VError) -> bool:
+    """A refusal only a sign-in fixes: a 401, or the SDK's own ``sign_in_required``."""
+    return (
+        isinstance(err, AuthenticationError)
+        or err.status_code == 401
+        or err.type in ("sign_in_required", "authentication_error")
+    )
+
+
+def _only_description(message: str) -> bool:
+    """Whether an ``invalid_skill`` message (``_problems_message``) names only the
+    description: the one problem an import can ask the end-user to fix in place."""
+    lines = [line for line in message.split("\n") if line]
+    return bool(lines) and all(line.startswith("description: ") for line in lines)
+
+
+def _problems_message(problems: Sequence["Problem"]) -> str:
+    """``invalid_skill``'s message: one ``"<field>: <message>"`` line per problem, joined
+    with ``"\\n"`` (``_skill_save``'s locally-validated problems and
+    ``skill_store.InvalidSkillError.problems`` both use this)."""
+    return "\n".join("{}: {}".format(p.field, p.message) for p in problems)
 
 
 def _can_own(identity: Any) -> bool:
@@ -183,6 +223,9 @@ class CommandRouter:
         *,
         max_queued: int = MAX_QUEUED_COMMANDS,
         on_skills_list: Optional[Callable[[], None]] = None,
+        threads: Optional[ThreadsState] = None,
+        dictation: Optional[Dictation] = None,
+        on_pick_skill_import: Optional[Callable[[], Optional[str]]] = None,
     ) -> None:
         self._controller = controller
         self._app = app
@@ -190,6 +233,15 @@ class CommandRouter:
         self._uploads = uploads
         self._max_queued = max_queued
         self._on_skills_list = on_skills_list
+        self._threads = threads
+        self._dictation = dictation
+        self._pick_import = on_pick_skill_import
+        # (path, time.monotonic() it was set, the description already given or None) for an
+        # import waiting on the page: a `skill_exists` conflict waiting on `resolve`, or a
+        # file with no description waiting on `description`; expires after
+        # PENDING_IMPORT_S. Router-wide, not per page/tab: this is a single-user desktop
+        # panel, so one waiting import at a time is accepted.
+        self._pending_import: Optional[Tuple[str, float, Optional[str]]] = None
         self._queue: "queue.Queue[Union[Command, Job, object]]" = queue.Queue()
         self._count_lock = threading.Lock()
         self._queued = 0
@@ -204,6 +256,16 @@ class CommandRouter:
             "edit": self._edit,
             "newSession": lambda args: self._controller.clear(),
             "clearError": lambda args: self._controller.clear_error(),
+            "threadNew": lambda args: self._threads_on().new_thread(),
+            "threadSwitch": lambda args: self._thread_call(
+                lambda t: t.switch(args["threadId"])
+            ),
+            "threadRename": lambda args: self._thread_call(
+                lambda t: t.rename(args["threadId"], args["title"])
+            ),
+            "threadDelete": lambda args: self._thread_call(
+                lambda t: t.delete(args["threadId"])
+            ),
             "selectModel": self._select_model,
             "login": self._login,
             "signup": self._signup,
@@ -214,14 +276,33 @@ class CommandRouter:
             "oauthDismissError": lambda args: self._app.dismiss_oauth_error(),
             "warmUp": lambda args: self._account().warm_up(),
             "setFontSize": self._set_font_size,
+            "selectSttModel": lambda args: self._app.select_stt_model(args["modelId"]),
+            "selectSttLanguage": lambda args: self._app.select_stt_language(args["language"]),
             "copy": self._copy,
             "openLink": self._open_link,
-            "dictationStart": self._dictation,
-            "dictationStop": self._dictation,
+            "dictationStart": lambda args: self._dictation_on().start(),
+            "dictationStop": lambda args: self._dictation_on().stop(),
+            "dictationCancel": lambda args: self._dictation_on().cancel(),
             "skillsList": self._skills_list,
             "skillEnable": lambda args: self._set_skill(args["name"], True),
             "skillDisable": lambda args: self._set_skill(args["name"], False),
+            "skillSave": self._skill_save,
+            "skillDelete": lambda args: self._skill_store_call(
+                lambda s: s.delete_user(args["name"])
+            ),
+            "skillRestore": lambda args: self._skill_store_call(
+                lambda s: s.restore_user(args["name"])
+            ),
+            "skillCustomize": lambda args: {
+                "name": self._skill_store_call(lambda s: s.customize(args["name"]))
+            },
+            "skillImport": self._skill_import,
+            "skillOpenFolder": self._skill_open_folder,
+            "skillRead": self._skill_read,
+            "metrics": self._metrics,
         }
+        #: When the command running now was received (``Command.received``).
+        self._received: Optional[float] = None
 
     # ── Lifecycle ──
 
@@ -325,6 +406,7 @@ class CommandRouter:
         """Run one command on the calling thread and return its result (the worker's step;
         tests call it directly). Never raises an ``Exception``; a ``BaseException`` goes
         through, and the worker then fails the command and stops."""
+        self._received = command.received
         try:
             data = self._handlers[command.type](command.args)
             return success_result(command, data if isinstance(data, dict) else None)
@@ -353,6 +435,19 @@ class CommandRouter:
             )
         return t2v
 
+    def _threads_on(self) -> ThreadsState:
+        if self._threads is None:
+            raise CommandFailure("thread_list_disabled", _THREADS_OFF)
+        return self._threads
+
+    def _thread_call(self, call: Callable[[ThreadsState], None]) -> None:
+        try:
+            call(self._threads_on())
+        except KeyError as exc:
+            raise CommandFailure(
+                "unknown_thread", "No chat with id {}.".format(_echo(str(exc.args[0])))
+            ) from None
+
     def _send(self, args: Dict[str, Any]) -> None:
         if args["attachmentIds"] and not self._app.options.features.attachments:
             raise CommandFailure("attachments_disabled", _ATTACHMENTS_OFF)
@@ -362,7 +457,24 @@ class CommandRouter:
         attachments = self._uploads.resolve(
             list(dict.fromkeys(args["attachmentIds"])), owner=_identity(self._app.t2v)
         )
-        self._controller.send(args["text"], attachments or None)
+        metrics = getattr(self._controller, "metrics", None)
+        if not isinstance(metrics, TurnMetrics):
+            self._controller.send(args["text"], attachments or None)
+            return
+        # The turn this starts is timed from the command's arrival; with `timing`, its
+        # timing then waits (briefly) for the page's own `metrics` report.
+        with metrics.page_send(received=self._received, reports=args["timing"]):
+            self._controller.send(args["text"], attachments or None)
+
+    def _metrics(self, args: Dict[str, Any]) -> None:
+        metrics = getattr(self._controller, "metrics", None)
+        if isinstance(metrics, TurnMetrics):
+            metrics.attach_page(
+                args["messageId"],
+                send_to_post_ms=args["sendToPostMs"],
+                first_op_to_paint_ms=args["firstOpToPaintMs"],
+                first_op_at_ms=args["firstOpAtMs"],
+            )
 
     def _approve(self, args: Dict[str, Any]) -> None:
         decision = Decision(
@@ -404,14 +516,19 @@ class CommandRouter:
             raise CommandFailure("anonymous_not_allowed", _GUESTS_OFF)
         token = args["captchaToken"]  # a Secret, or None
         self._provider_sign_in.cancel()  # the end-user chose to go on as a guest
+        t2v = self._account()
         try:
-            self._account().auth.start_anonymous(
-                captcha_token=token.reveal() if token is not None else None
+            t2v.auth.start_anonymous(
+                captcha_token=token.reveal() if token is not None else None, warm=True
             )
         except AnonymousUnavailableError as exc:
             # Only signing in can help: the page's gate opens with the reason.
             self._app.note_anonymous_unavailable(exc.type)
             raise
+        # The page starts a guest for a send (or an upload) already on its way, and no
+        # keystroke warmed this new identity's key: warm it now, on a thread of its own,
+        # while the turn sets up its session, instead of on the turn's first request.
+        t2v.warm_up()
 
     def _set_font_size(self, args: Dict[str, Any]) -> None:
         self._account().preferences.update(font_size=args["fontSize"])
@@ -445,15 +562,30 @@ class CommandRouter:
         host = self._host
         host.post(lambda: host.open_external(url))
 
-    def _dictation(self, args: Dict[str, Any]) -> None:
-        # HostAdapter.audio() is reserved; getUserMedia never resolves in Slicer.
-        raise CommandFailure("dictation_unavailable", "Dictation is not available in this app yet.")
+    def _dictation_on(self) -> Dictation:
+        if self._dictation is None:
+            raise CommandFailure("dictation_unavailable", "Dictation is not available in this app.")
+        return self._dictation
 
     def _skills_list(self, args: Dict[str, Any]) -> None:
-        t2v = self._account()
+        """Rescan the host's skill folders, then read the app's catalogue. Guests too: the
+        folders are local, so a skill dropped in while signed out is listed. The catalogue
+        needs a session; with none, or when the engine refuses for want of one, there is
+        simply no catalogue this time -- an ok result, never a "Session expired". With no
+        Talk2View at all there are no skills to list: ok, and nothing to say (the page asks
+        on every visit, guests included)."""
+        t2v = self._app.t2v
+        if t2v is None:
+            return
         if self._on_skills_list is not None:
             self._on_skills_list()  # the host rescans its skill folders, on this thread
-        t2v.skills.list_platform()
+        if not t2v.auth.is_authenticated():
+            return
+        try:
+            t2v.skills.list_platform()
+        except T2VError as err:
+            if not _auth_refusal(err):
+                raise
 
     def _set_skill(self, name: str, enabled: bool) -> None:
         try:
@@ -462,3 +594,141 @@ class CommandRouter:
             raise CommandFailure("unknown_skill", "No skill named {!r}.".format(name)) from None
         except SkillValidationError as exc:
             raise CommandFailure("skill_too_large", str(exc)) from None
+
+    # ── Skills: the page's own store (talk2view.skill_store) ──
+
+    def _skills_writable(self) -> "T2VSkills":
+        skills = self._account().skills
+        store = skills.store
+        if store is None or not store.writable:
+            raise CommandFailure("skills_unavailable", "This app keeps no skills of its own.")
+        return skills
+
+    def _skill_store_call(self, fn: Callable[["T2VSkills"], Any]) -> Any:
+        skills = self._skills_writable()
+        try:
+            return fn(skills)
+        except InvalidSkillError as exc:
+            raise CommandFailure("invalid_skill", _problems_message(exc.problems)) from None
+        except SkillExistsError as exc:
+            raise CommandFailure("skill_exists", exc.name) from None
+        except KeyError as exc:
+            raise CommandFailure(
+                "unknown_skill", "No skill named {!r}.".format(exc.args[0])
+            ) from None
+        except OSError as exc:
+            raise CommandFailure(
+                "io_error", "Could not change the skill: {}".format(exc.strerror or exc)
+            ) from None
+
+    def _skill_save(self, args: Dict[str, Any]) -> Dict[str, Any]:
+        from ..skill_format import from_form, parse, validate
+
+        if "markdown" in args and args["markdown"] is not None:
+            doc, problems = parse(args["markdown"])
+        else:
+            name, description = args.get("name") or "", args.get("description") or ""
+            doc, problems = from_form(name, description, args.get("instructions") or ""), []
+        problems = problems + validate(doc)
+        if problems:
+            raise CommandFailure("invalid_skill", _problems_message(problems))
+        name = self._skill_store_call(
+            lambda s: s.save_doc(
+                doc, replaces=args.get("replaces"), overwrite=bool(args.get("overwrite"))
+            )
+        )
+        return {"name": name}
+
+    def _skill_read(self, args: Dict[str, Any]) -> Dict[str, Any]:
+        """A listed user or bundled skill's ``SKILL.md``, verbatim (``T2VSkills.read_markdown``:
+        looked up by name only; the page never names a path)."""
+        try:
+            text = self._skill_store_call(lambda s: s.read_markdown(args["name"]))
+        except CommandFailure as failure:
+            if failure.type == "io_error":
+                raise CommandFailure("io_error", "Could not read the skill.") from None
+            raise
+        return {"markdown": text}
+
+    def _skill_import(self, args: Dict[str, Any]) -> Dict[str, Any]:
+        """Pick a file (a fresh import), or answer the import waiting on the page: ``resolve``
+        a name clash, and/or give the ``description`` a picked file lacked. The
+        page never names a path; an answer always applies to the path this router picked.
+        A clash, or a failure whose only problem is the description, keeps that path
+        waiting (with any description given so far) for the next answer."""
+        self._skills_writable()
+        resolve = args.get("resolve")
+        answered = args.get("description")
+        description: Optional[str] = None
+        if resolve is not None or answered is not None:
+            pending = self._take_pending_import()
+            if pending is None:
+                raise CommandFailure(
+                    "import_unavailable", "There is no import waiting for an answer."
+                )
+            path, description = pending
+            if answered is not None:
+                description = answered
+            on_conflict = {"replace": "replace", "keepBoth": "keep_both"}.get(resolve or "", "ask")
+        else:
+            # A fresh pick supersedes any earlier import still waiting on an answer.
+            self._pending_import = None
+            if self._pick_import is None:
+                raise CommandFailure("import_unavailable", "This app cannot pick files to import.")
+            path = self._on_host(self._pick_import)
+            if path is None:
+                return {"cancelled": True}
+            on_conflict = "ask"
+        try:
+            name = self._skill_store_call(
+                lambda s: s.import_path(path, on_conflict, description=description)
+            )
+        except CommandFailure as failure:
+            if failure.type == "skill_exists" or (
+                failure.type == "invalid_skill" and _only_description(failure.message)
+            ):
+                self._pending_import = (path, time.monotonic(), description)
+            raise
+        return {"name": name}
+
+    def _take_pending_import(self) -> Optional[Tuple[str, Optional[str]]]:
+        """The path (and description given so far) of a still-live waiting import,
+        consuming it (a second answer finds nothing pending), or None when there is none
+        or it has expired (``PENDING_IMPORT_S``)."""
+        pending, self._pending_import = self._pending_import, None
+        if pending is None:
+            return None
+        path, taken_at, description = pending
+        if time.monotonic() - taken_at > PENDING_IMPORT_S:
+            return None
+        return path, description
+
+    def _on_host(self, fn: Callable[[], Any]) -> Any:
+        """Run ``fn`` on the host's main thread and wait for it (a modal file dialog), for
+        at most ``PICKER_WAIT_S``: a host that never runs the posted callable must not hang
+        this router's one worker thread, and every command queued behind it."""
+        done: "concurrent.futures.Future[Any]" = concurrent.futures.Future()
+
+        def call() -> None:
+            try:
+                done.set_result(fn())
+            except BaseException as exc:  # noqa: BLE001 - handed back to the router thread
+                done.set_exception(exc)
+
+        self._host.post(call)
+        try:
+            return done.result(timeout=PICKER_WAIT_S)
+        except concurrent.futures.TimeoutError:
+            raise CommandFailure(
+                "import_unavailable", "The file picker did not answer."
+            ) from None
+
+    def _skill_open_folder(self, args: Dict[str, Any]) -> None:
+        skills = self._skills_writable()
+        folder = skills.store.folder if skills.store is not None else None
+        if not folder:
+            raise CommandFailure("skills_unavailable", "This app keeps no skills folder.")
+        Path(folder).mkdir(parents=True, exist_ok=True)
+        url = Path(folder).resolve().as_uri()
+        host = self._host
+        host.post(lambda: host.open_external(url))

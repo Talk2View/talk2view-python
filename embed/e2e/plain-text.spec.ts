@@ -52,7 +52,10 @@ test.describe('every plain-text surface is escaped (FakeController)', () => {
     await sendMessage(page, '/hostile');
     await expect(page.locator('.t2v-working')).toHaveText('Reading ' + SHOWN); // the status line
     expect(await rawOverrides(page)).toEqual([]);
-    await expect(page.locator('.t2v-tool-activity')).toBeVisible(); // a running tool
+    // The running row's activity text is the trigger's own label span, not a
+    // separate .t2v-tool-activity element (folded into aui-tool-fallback-trigger-label-
+    // wrapper, matching TS's structure).
+    await expect(page.locator('.t2v-tool[data-state="running"] .aui-tool-fallback-trigger-label-wrapper')).toBeVisible(); // a running tool
     expect(await rawOverrides(page)).toEqual([]);
     await expect(page.locator('.t2v-error-text')).toHaveText('Could not open ' + SHOWN); // the error card
     await expect(page.locator('.t2v-tool-note')).toHaveText([
@@ -66,7 +69,7 @@ test.describe('every plain-text surface is escaped (FakeController)', () => {
 
     await page.locator('.t2v-error').getByRole('button', { name: 'Dismiss' }).click();
     await sendMessage(page, '/hostileapprove');
-    await expect(page.locator('.t2v-approval-title')).toHaveText('The assistant wants to run ' + SHOWN);
+    await expect(page.locator('.t2v-approval-title')).toHaveText('Run ' + SHOWN + '?');
     expect(await rawOverrides(page)).toEqual([]);
   });
 
@@ -78,11 +81,14 @@ test.describe('every plain-text surface is escaped (FakeController)', () => {
     };
     await page.goto(backend.url);
     await exactly('.t2v-welcome-heading', 'Ask about ' + HOST_WORD);
-    await exactly('.t2v-suggestion', HOST_WORD);
-    await exactly('.t2v-footnote', 'Check ' + HOST_WORD);
+    await exactly('.t2v-welcome-sub', 'Note: ' + HOST_WORD); // raw, not displayText()
+    // Not '.t2v-suggestion' itself: its decorative '>' mark (aria-hidden) is part of
+    // the button's textContent even though it is excluded from its accessible name.
+    await exactly('.t2v-suggestion-text', HOST_WORD);
+    await exactly('.t2v-caption', 'Check ' + HOST_WORD); // the caption, not the retired chat-footer strip
 
     await sendMessage(page, '/hostile');
-    await exactly('.t2v-tool-activity', 'Loading ' + HOST_WORD); // a running tool's activity
+    await exactly('.t2v-tool[data-state="running"] .aui-tool-fallback-trigger-label-wrapper', 'Loading ' + HOST_WORD); // a running tool's activity
     await page.locator('.t2v-error').getByRole('button', { name: 'Dismiss' }).click();
     await sendMessage(page, '/approve now');
     await exactly('.t2v-approval .t2v-warning', 'Deletes ' + HOST_WORD); // the host's warning
@@ -118,14 +124,37 @@ test.describe('every plain-text surface is escaped (real Talk2View + ChatControl
     expect(await rawOverrides(page)).toEqual([]);
 
     await page.getByRole('button', { name: 'Settings' }).click();
-    await expect(page.getByText('From this app’s publisher')).toBeVisible();
     await expect(page.getByLabel('AI model').locator('option')).toHaveText([
       'Default — Fast ' + SHOWN,
       'Fast ' + SHOWN,
       'm-deep ' + SHOWN,
     ]);
-    await expect(page.getByRole('checkbox', { name: 'skill-' + SHOWN, exact: true })).toBeVisible();
-    await expect(page.locator('.t2v-skill-static')).toContainText('team-brief' + SHOWN);
+    expect(await rawOverrides(page)).toEqual([]);
+
+    // The skills themselves moved to the Skills view. `skill-` + HOSTILE is a
+    // code-origin skill (t2v.skills.add), so it is a read-only row now, no checkbox — the
+    // escaped name is still what must reach the DOM, in both the local and the platform row.
+    await page.getByRole('button', { name: 'Settings' }).click();
+    await page.getByRole('button', { name: 'Skills', exact: true }).click();
+    await expect(page.getByText('skill-' + SHOWN)).toBeVisible();
+    await expect(page.getByText('team-brief' + SHOWN)).toBeVisible();
+    expect(await rawOverrides(page)).toEqual([]);
+  });
+});
+
+test.describe('a hostile bundled skill name', () => {
+  // is_filesystem_safe_name (skills.py) only rejects control/separator/reserved
+  // characters, not a right-to-left override, so backend.py's --bundled-skills can name
+  // the folder (and the SKILL.md frontmatter) with HOSTILE when --hostile is also given —
+  // a real reproduction of the one raw string the Customize button's aria-label
+  // (Skills.tsx) had not been checked against.
+  test.use({ backendArgs: ['--mode', 'account', '--hostile', '--skills-dir', 'auto', '--bundled-skills'] });
+
+  test("the Customize button's aria-label escapes the bundled skill's own name", async ({ page, backend }) => {
+    await page.goto(backend.url);
+    await page.getByRole('button', { name: 'Skills', exact: true }).click();
+    const name = 'ct-window-presets' + SHOWN;
+    await expect(page.getByRole('button', { name: 'Customize ' + name })).toBeVisible();
     expect(await rawOverrides(page)).toEqual([]);
   });
 });

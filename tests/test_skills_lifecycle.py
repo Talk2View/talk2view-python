@@ -112,19 +112,37 @@ def _session_gone() -> T2VError:
 
 
 RECYCLE = ["DELETE /v1/sessions/s1", "POST /v1/sessions", "POST /v1/skills/register"]
+#: A session's setup: the create, then the tools and the skills, sent together.
+SETUP = ("POST /v1/sessions", "POST /v1/tools/register", "POST /v1/skills/register")
+
+
+def settled(calls: List[str]) -> List[str]:
+    """``calls`` with each run of setup requests in ``SETUP`` order: a new session's tools
+    and skills are sent together, so the order they reach the engine in is not fixed."""
+    out: List[str] = []
+    run: List[str] = []
+    for call in calls:
+        if call in SETUP:
+            run.append(call)
+            continue
+        out.extend(sorted(run, key=SETUP.index))
+        run = []
+        out.append(call)
+    out.extend(sorted(run, key=SETUP.index))
+    return out
 
 
 # ── Talk2View lifecycle ────────────────────────────────────────────────────
 
 
 class TestTalk2ViewLifecycle:
-    def test_create_session_re_registers_tools_then_skills(self) -> None:
+    def test_create_session_re_registers_tools_and_skills(self) -> None:
         h = Harness()
         h.t2v.tools.register([ClientToolSchema(name="t", description="d")])
         h.calls.clear()
         h.t2v.skills.add(Skill(name="measure", content="how"))
         h.t2v.create_session()
-        assert h.calls == [
+        assert settled(h.calls) == [
             "POST /v1/sessions",
             "POST /v1/tools/register",
             "POST /v1/skills/register",
@@ -132,10 +150,40 @@ class TestTalk2ViewLifecycle:
         assert h.t2v.skills.state()["registered"] == ["measure"]
         assert h.timer.pending is None  # the pending debounce was folded into the create
 
+    def test_create_session_sends_the_tools_and_skills_together_after_the_create(
+        self,
+    ) -> None:
+        # Each register call answers only once the other has arrived: sent one after the
+        # other, as they once were, neither would. Both follow the create's answer.
+        h = Harness()
+        h.t2v.tools.register([ClientToolSchema(name="t", description="d")])
+        h.t2v.skills.add(Skill(name="measure", content="how"))
+        h.calls.clear()
+        arrived = {
+            "/v1/tools/register": threading.Event(),
+            "/v1/skills/register": threading.Event(),
+        }
+        real = h.client.request.side_effect
+
+        def request(endpoint: str, method: str = "GET", **kwargs: Any) -> Any:
+            if endpoint in arrived:
+                arrived[endpoint].set()
+                for event in arrived.values():
+                    assert event.wait(2.0), "one register call waited for the other"
+            return real(endpoint, method=method, **kwargs)
+
+        h.client.request.side_effect = request
+        session = h.t2v.create_session()
+        assert h.t2v.get_session() is session
+        assert h.calls[0] == "POST /v1/sessions"
+        assert sorted(h.calls[1:]) == ["POST /v1/skills/register", "POST /v1/tools/register"]
+        assert h.t2v.skills.state()["registered"] == ["measure"]
+        assert h.timer.pending is None
+
     def test_create_session_with_no_skills_sends_no_register(self) -> None:
         h = Harness()
         h.t2v.create_session()
-        assert h.calls == ["POST /v1/sessions"]
+        assert settled(h.calls) == ["POST /v1/sessions"]
 
     def test_skills_failure_on_create_is_non_fatal(self) -> None:
         h = Harness()
@@ -159,7 +207,7 @@ class TestTalk2ViewLifecycle:
         h.t2v.skills.add(Skill(name="a", content="1"))
         events = list(h.t2v.chat("hello"))
         assert [e.type for e in events] == ["text", "done"]
-        assert h.calls == [
+        assert settled(h.calls) == [
             "POST /v1/sessions",
             "POST /v1/skills/register",
             "STREAM /v1/sessions/s1/messages",
@@ -177,7 +225,7 @@ class TestTalk2ViewLifecycle:
         h.t2v.skills.remove("b")
         assert h.t2v.skills.needs_session_reset() is False
         list(h.t2v.chat("two"))  # the debounce timer has not fired: chat() flushes first
-        assert h.calls == ["POST /v1/skills/register", "STREAM /v1/sessions/s1/messages"]
+        assert settled(h.calls) == ["POST /v1/skills/register", "STREAM /v1/sessions/s1/messages"]
         assert h.register_bodies[-1] == {
             "skills": [{"name": "a", "description": "", "content": "1"}],
             "replace": True,
@@ -195,7 +243,7 @@ class TestTalk2ViewLifecycle:
         h.t2v.skills.remove("b")
         assert h.t2v.skills.needs_session_reset() is True
         list(h.t2v.chat("two"))
-        assert h.calls == [
+        assert settled(h.calls) == [
             "DELETE /v1/sessions/s1",
             "POST /v1/sessions",
             "POST /v1/skills/register",
@@ -210,7 +258,7 @@ class TestTalk2ViewLifecycle:
         h.calls.clear()
         session = h.t2v.recycle_session()
         assert session.id == "s2"
-        assert h.calls == ["DELETE /v1/sessions/s1", "POST /v1/sessions"]
+        assert settled(h.calls) == ["DELETE /v1/sessions/s1", "POST /v1/sessions"]
 
     def test_skills_are_saved_to_data_storage_not_the_token_store(self) -> None:
         tokens, data = MemoryStorage(), MemoryStorage()
@@ -294,7 +342,7 @@ class TestPossiblyReusedSession:
         t2v = _on(engine)
         t2v.skills.add(Skill(name="a", content="A"))  # the local set after the restart
         list(t2v.chat("hi"))
-        assert engine.calls == [
+        assert settled(engine.calls) == [
             "POST /v1/sessions",
             "POST /v1/skills/register",  # fails: what s1 holds is unknown
             "DELETE /v1/sessions/s1",
@@ -315,7 +363,7 @@ class TestPossiblyReusedSession:
             t2v.data_storage.set(STORAGE_KEY, saved)
         assert t2v.skills.load() == []
         list(t2v.chat("hi"))
-        assert engine.calls == [
+        assert settled(engine.calls) == [
             "POST /v1/sessions",
             "POST /v1/skills/register",
             "STREAM /v1/sessions/s1/messages holding []",
@@ -333,12 +381,12 @@ class TestPossiblyReusedSession:
         h.fail_next_register = T2VError("rate limited", "rate_limit_exceeded", 429)
         h.calls.clear()
         h.t2v.recycle_session()  # DELETE confirmed: s2 is known to be new
-        assert h.calls == RECYCLE
+        assert settled(h.calls) == RECYCLE
         assert h.t2v.skills.needs_session_reset() is False  # s2 holds no user skill at all
         assert h.t2v.skills.state()["registered"] == []
         h.calls.clear()
         h.t2v.skills.flush()  # the edit is still pending
-        assert h.calls == ["POST /v1/skills/register"]
+        assert settled(h.calls) == ["POST /v1/skills/register"]
         assert h.t2v.skills.state()["registered"] == ["a"]
 
     def test_a_recycle_whose_delete_failed_is_not_known_fresh(self) -> None:
@@ -370,7 +418,7 @@ class TestPossiblyReusedSession:
 
         h.client.request.side_effect = failing
         list(h.t2v.chat("hi"))
-        assert h.calls == [
+        assert settled(h.calls) == [
             "POST /v1/sessions",
             "POST /v1/skills/register",
             "DELETE /v1/sessions/s1",
@@ -398,7 +446,7 @@ class TestClose:
         h.t2v.close()
         assert h.timer.pending is None  # cancelled
         tick()
-        assert h.calls == []
+        assert settled(h.calls) == []
         h.client.close.assert_called_once()
         assert [s["name"] for s in h.t2v.skills.state()["local"]] == ["a"]  # reads still work
 
@@ -409,14 +457,14 @@ class TestClose:
         h.calls.clear()
         h.t2v.close()
         h.t2v.skills.flush()
-        assert h.calls == []
+        assert settled(h.calls) == []
 
     def test_re_register_after_close_is_a_no_op(self) -> None:
         h = Harness()
         h.t2v.skills.add(Skill(name="a", content="1"))
         h.t2v.skills.close()
         assert h.t2v.skills.re_register() is None
-        assert h.calls == []
+        assert settled(h.calls) == []
         assert [s.name for s in h.t2v.skills.get_all()] == ["a"]
 
     def test_a_register_call_cut_off_by_close_logs_at_debug(
@@ -546,13 +594,13 @@ class TestControllerSlice:
         assert controller.wait_idle(1.0)
         h.calls.clear()
         h.t2v.skills.remove("b")
-        assert h.calls == []  # idle, and still nothing is recycled
+        assert settled(h.calls) == []  # idle, and still nothing is recycled
         assert controller.snapshot()["skills"]["needsSessionReset"] is False
         assert log.values("isLoading") == [True, False]  # the turn only: no recycle run
         h.timer.fire()  # the debounced replace
         controller.send("two")
         assert controller.wait_idle(1.0)
-        assert h.calls == ["POST /v1/skills/register", "STREAM /v1/sessions/s1/messages"]
+        assert settled(h.calls) == ["POST /v1/skills/register", "STREAM /v1/sessions/s1/messages"]
         assert controller.snapshot()["skills"]["registered"] == ["a"]
         controller.close()
 
@@ -568,7 +616,7 @@ class TestControllerSlice:
         h.fail_next_register = T2VError("rate limited", "rate_limit_exceeded", 429)
         h.timer.fire()
         # Fail closed: the engine may still hold "b", so the idle controller recycles.
-        assert h.calls == ["POST /v1/skills/register", *RECYCLE]
+        assert settled(h.calls) == ["POST /v1/skills/register", *RECYCLE]
         snapshot = controller.snapshot()
         assert snapshot["skills"]["needsSessionReset"] is False
         assert snapshot["skills"]["registered"] == ["a"]
@@ -586,7 +634,7 @@ class TestControllerSlice:
         assert controller.wait_idle(1.0)
         h.calls.clear()
         h.t2v.skills.remove("b")
-        assert h.calls == RECYCLE
+        assert settled(h.calls) == RECYCLE
         snapshot = controller.snapshot()
         assert snapshot["skills"]["needsSessionReset"] is False
         assert snapshot["skills"]["registered"] == ["a"]
@@ -624,7 +672,7 @@ class TestControllerSlice:
         h.calls.clear()
         controller.send("two")  # the next turn recycles before sending
         assert controller.wait_idle(2.0)
-        assert h.calls[:3] == RECYCLE
+        assert settled(h.calls)[:3] == RECYCLE
         assert controller.snapshot()["skills"]["needsSessionReset"] is False
         controller.close()
 
@@ -672,7 +720,7 @@ class TestControllerSlice:
         assert len(raised) == 1
         assert raised[0].exc_info is not None
         assert str(raised[0].exc_info[1]) == "pool is shut down"
-        assert h.calls == []
+        assert settled(h.calls) == []
         assert controller.wait_idle(1.0)
         snapshot = controller.snapshot()
         assert snapshot["isLoading"] is False
@@ -680,7 +728,7 @@ class TestControllerSlice:
         assert snapshot["skills"]["needsSessionReset"] is True  # still pending
         refusing[0] = False
         controller.send("two")  # chat() recycles before the turn
-        assert h.calls[:3] == RECYCLE
+        assert settled(h.calls)[:3] == RECYCLE
         assert controller.snapshot()["skills"]["needsSessionReset"] is False
         controller.close()
 
@@ -699,7 +747,8 @@ class TestControllerSlice:
         assert len(queued) == 2
         for job in queued:
             job()
-        assert h.calls == ["DELETE /v1/sessions/s1"]  # clear()'s only: the recycle never ran
+        # clear()'s only: the recycle never ran.
+        assert settled(h.calls) == ["DELETE /v1/sessions/s1"]
         assert controller.wait_idle(1.0)
         assert controller.snapshot()["isLoading"] is False
         controller.close()
@@ -718,7 +767,7 @@ class TestControllerSlice:
         assert h.t2v.skills.needs_session_reset() is True
         h.calls.clear()
         controller.set_skills_state(h.t2v.skills.state())  # the late delivery
-        assert h.calls == []  # no recycle
+        assert settled(h.calls) == []  # no recycle
         assert controller.snapshot() == before
 
     def test_fake_t2v_without_skills_still_works(self) -> None:
@@ -783,7 +832,8 @@ class TestControllerSlice:
         h.calls.clear()
         h.t2v.skills.remove("b")
         assert recycled == ["s2"]
-        assert h.calls == RECYCLE  # the listener's recycle only; the stale True starts none
+        # The listener's recycle only; the stale True starts none.
+        assert settled(h.calls) == RECYCLE
         snapshot = controller.snapshot()
         assert snapshot["skills"] == h.t2v.skills.state()
         assert snapshot["skills"]["needsSessionReset"] is False

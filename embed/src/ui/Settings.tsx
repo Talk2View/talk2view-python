@@ -1,17 +1,15 @@
 /**
  * The Settings view: the AI model (with the partner's Default, TS chat/views/settings.tsx),
- * the text size, and the skills panel. Every choice is a command; what the page shows is
- * what the server's slices say, so a refused pick simply does not stick. Opening the view
- * asks for the skills list, but only once signed in (and again the moment sign-in
- * happens): a guest with no account at all gets a 401 from the engine for it, which the
- * store's own refusal handling would otherwise surface as a stray "Session expired"
- * notice. Signed out, the model picker and the skills section are hidden
- * outright, not merely disabled — text size is a local preference and stays available.
+ * and the text size. Skills have their own view (Skills.tsx, from the header).
+ * Every choice is a command; what the page shows is what the server's slices say, so a
+ * refused pick simply does not stick. Signed out, the model picker is hidden outright, not
+ * merely disabled — text size is a local preference and stays available.
  */
 import { useEffect, useId, useRef, useState, type ReactNode } from 'react';
-import { defaultModelLabel, modelLabel, modelPick, skillsSection } from '../selectors';
+import { ChevronDown, UserRound } from 'lucide-react';
+import { defaultModelLabel, FALLBACK_STT_MODEL, languageName, languagesFor, modelLabel, modelPick } from '../selectors';
 import { resultOf, WATCH_MS, type PageModel, type PageStore } from '../store';
-import type { FontSize, LocalSkill, PlatformSkill } from '../wire';
+import type { FontSize } from '../wire';
 import { useModel, useStore } from './context';
 import { displayText } from './displayText';
 import { Notice } from './Thread';
@@ -58,13 +56,14 @@ function usePending<T>(model: PageModel, store: PageStore): [Pending<T> | null, 
 }
 
 /**
- * Same as `usePending`, keyed by name: every local skill's own toggle. The `WATCH_MS`
- * clock is kept in a ref, per key, and managed imperatively in `set()` rather than in a
- * reactive effect over the whole map — an effect keyed on `pending` (the map) would
- * restart EVERY key's timer the moment any ONE of them settles (the settle effect below
- * always produces a new map object), extending every sibling's window each time.
+ * Same as `usePending`, keyed by name: every local skill's own toggle (Skills.tsx). The
+ * `WATCH_MS` clock is kept in a ref, per key, and managed imperatively in `set()` rather
+ * than in a reactive effect over the whole map — an effect keyed on `pending` (the map)
+ * would restart EVERY key's timer the moment any ONE of them settles (the settle effect
+ * below always produces a new map object), extending every sibling's window each time.
+ * Exported for `Skills.tsx`, which owns the skill toggles now that Settings only links to it.
  */
-function usePendingMap<T>(
+export function usePendingMap<T>(
   model: PageModel,
   store: PageStore,
 ): [Record<string, Pending<T>>, (key: string, value: T, id: string) => void] {
@@ -96,7 +95,7 @@ function usePendingMap<T>(
     });
   }, [model, pending]);
 
-  // Every ref currently running, cleared when Settings itself unmounts.
+  // Every ref currently running, cleared when the calling view itself unmounts.
   useEffect(() => () => Object.keys(timers.current).forEach(clearTimer), []);
 
   const set = (key: string, value: T, id: string) => {
@@ -125,132 +124,38 @@ function Field({ title, help, children }: { title: string; help: ReactNode; chil
   const id = useId();
   return (
     <div className="t2v-field">
-      <label htmlFor={id} className="t2v-strong">
-        {title}
-      </label>
+      <label htmlFor={id}>{title}</label>
       {children(id)}
       <p className="t2v-hint">{help}</p>
     </div>
   );
 }
 
-/**
- * The prompt/description, clamped to three lines with a toggle when it does not fit
- * (ToolCall.tsx's ApprovalPrompt: `scrollHeight > clientHeight` after paint). Untrusted —
- * a partner's or a host folder's skill text — so every character reaches the DOM only
- * through `displayText`. The "Show more"/"Show less" control sits inside a clickable
- * `<label>` for a local skill, so its own click must never also toggle the checkbox.
- */
-function SkillDescription({ id, text }: { id: string; text: string }) {
-  const ref = useRef<HTMLParagraphElement>(null);
-  const [expanded, setExpanded] = useState(false);
-  const [clamped, setClamped] = useState(false);
-  useEffect(() => {
-    const el = ref.current;
-    if (el) setClamped(el.scrollHeight > el.clientHeight + 1);
-  }, [text]);
+/** A labelled group of fields (Assistant / Appearance / Skills). */
+function Section({ title, children }: { title: string; children: ReactNode }) {
   return (
-    <>
-      <p id={id} ref={ref} className={expanded ? 't2v-skill-desc t2v-skill-desc-expanded' : 't2v-skill-desc'}>
-        {displayText(text)}
-      </p>
-      {clamped || expanded ? (
-        <button
-          type="button"
-          className="t2v-link t2v-small"
-          onClick={(e) => {
-            e.preventDefault();
-            e.stopPropagation();
-            setExpanded((v) => !v);
-          }}
-        >
-          {expanded ? 'Show less' : 'Show more'}
-        </button>
-      ) : null}
-    </>
+    <section className="t2v-section" aria-label={title}>
+      <h2 className="t2v-section-label">{title}</h2>
+      {children}
+    </section>
   );
 }
 
-/**
- * One local skill: a checkbox whose accessible name is the skill's name ALONE (an
- * `aria-label`, not the label's full text content, which would otherwise run the
- * description — up to the SDK's own size cap — into every screen reader announcement);
- * the description is reached instead through `aria-describedby`. `aria-busy` is the
- * optimistic-vs-settled state made observable: true for as long
- * as this box shows a pick the server has not yet confirmed either way, cleared the
- * moment its own command's result — ok or refused — is known.
- */
-function LocalSkillRow({
-  skill,
-  checked,
-  pending,
-  onToggle,
-}: {
-  skill: LocalSkill;
-  checked: boolean;
-  pending: boolean;
-  onToggle: (enabled: boolean) => void;
-}) {
-  const descId = useId();
-  return (
-    <label className="t2v-skill">
-      <input
-        type="checkbox"
-        checked={checked}
-        aria-label={displayText(skill.name)}
-        aria-describedby={descId}
-        aria-busy={pending}
-        onChange={(e) => onToggle(e.target.checked)}
-      />
-      <span className="t2v-skill-text">
-        <span className="t2v-strong">{displayText(skill.name)}</span>
-        <span className="t2v-skill-label">{displayText(skill.label)}</span>
-        <SkillDescription id={descId} text={skill.description} />
-      </span>
-    </label>
-  );
-}
+/* SkillDescription, LocalSkillRow and PlatformSkillRow moved to Skills.tsx:
+ * skills live in their own view, opened from the header; Settings has no skills section. */
 
-/** A platform skill: read-only, so no `cursor: pointer` (`.t2v-skill-static`) and no control to describe. */
-function PlatformSkillRow({ skill }: { skill: PlatformSkill }) {
-  const descId = useId();
-  return (
-    <div className="t2v-skill t2v-skill-static">
-      <span className="t2v-skill-text">
-        <span className="t2v-strong">{displayText(skill.name)}</span>
-        <SkillDescription id={descId} text={skill.description} />
-      </span>
-    </div>
-  );
-}
-
-export function SettingsView() {
+export function SettingsView({ onAccount }: { onAccount: () => void }) {
   const store = useStore();
   const model = useModel();
   const { state } = model;
-  const { auth, preferences, skills } = state;
+  const { auth, preferences, audioModels, config } = state;
   const signedIn = auth.isAuthenticated;
+  const features = state.options.features;
 
   const [pendingModel, setPendingModel] = usePending<string | null>(model, store);
   const [pendingSize, setPendingSize] = usePending<FontSize>(model, store);
-  const [toggled, setToggled] = usePendingMap<boolean>(model, store);
-
-  // Only once signed in: a guest with no account gets a 401 for this, which the store's
-  // own (correct) handling of a failed, non-quiet command would otherwise turn into a
-  // stray "Session expired" notice on the (hidden) thread pane. Re-sent the moment
-  // sign-in completes, in case Settings is still open when it does. Its id is kept: the
-  // section says skills are off only once this listing has answered (`skillsSection`).
-  const [listId, setListId] = useState<string | null>(null);
-  useEffect(() => {
-    if (signedIn) setListId(store.command({ type: 'skillsList' }));
-  }, [store, signedIn]);
-  const listed = resultOf(model, listId)?.ok === true;
-  const { off: skillsOff, awaitingRegister } = skillsSection(skills, listed);
-
-  const toggleSkill = (name: string, enabled: boolean) => {
-    const id = store.command({ type: enabled ? 'skillEnable' : 'skillDisable', name });
-    setToggled(name, enabled, id);
-  };
+  const [pendingVoice, setPendingVoice] = usePending<string | null>(model, store);
+  const [pendingLanguage, setPendingLanguage] = usePending<string | null>(model, store);
 
   const { value: modelValue, orphan, loaded } = modelPick(state);
   const shownModel = pendingModel ? pendingModel.value ?? '' : modelValue;
@@ -264,13 +169,57 @@ export function SettingsView() {
       ? pendingModel.value
       : null;
 
-  return (
-    <div className="t2v-view t2v-settings" role="region" aria-label="Settings">
-      <Notice />
+  // TS settings.tsx's Picker: "loading" / "ready" / "error", not a bare list.length check —
+  // an empty-but-ready catalogue and a failed read must
+  // never both read as "Loading…" forever, the way `list.length > 0` alone would have them.
+  const voiceState = audioModels.state;
+  const voicesLoaded = voiceState === 'ready';
+  const defaultSttId = config?.default_stt_model || FALLBACK_STT_MODEL;
+  const voiceValue = preferences.sttModel ?? '';
+  const shownVoice = pendingVoice ? pendingVoice.value ?? '' : voiceValue;
+  const voiceOrphan = voicesLoaded && shownVoice && !audioModels.list.some((m) => m.id === shownVoice) ? shownVoice : null;
+  const defaultVoice = audioModels.list.find((m) => m.id === config?.default_stt_model);
+  const defaultVoiceLabel = defaultVoice ? 'Default — ' + (defaultVoice.name ?? defaultVoice.id) : 'Default';
+  const activeVoice = audioModels.list.find((m) => m.id === (shownVoice || defaultSttId));
+  const languages = languagesFor(activeVoice);
+  const language = preferences.sttLanguage ?? '';
+  const shownLanguage = pendingLanguage ? pendingLanguage.value ?? '' : language;
+  const languageOrphan = shownLanguage !== '' && !languages.some(([code]) => code === shownLanguage);
+  const voiceName = activeVoice ? activeVoice.name ?? activeVoice.id : 'the voice model';
+  const languageHelp = activeVoice?.supported_languages?.length
+    ? languages.length === 1
+      ? displayText(voiceName) + ' transcribes ' + languages[0]![1] + ' only.'
+      : 'The ' + String(languages.length) + ' languages ' + displayText(voiceName) + ' can transcribe.'
+    : 'A hint for the voice model.';
+  const sizeLabelId = useId();
 
-      {signedIn ? (
-        <Field title="AI model" help="Answers your next message. Switching keeps this conversation.">
-          {(id) => (
+  const textSize = (
+    <div className="t2v-field">
+      <label id={sizeLabelId}>Text size</label>
+      <div className="t2v-seg" role="group" aria-labelledby={sizeLabelId} aria-busy={pendingSize !== null}>
+        {SIZES.map(([size, label]) => (
+          <button
+            key={size}
+            type="button"
+            aria-pressed={shownSize === size}
+            onClick={() => {
+              const cmdId = store.command({ type: 'setFontSize', fontSize: size });
+              setPendingSize(size, cmdId);
+            }}
+          >
+            {label}
+          </button>
+        ))}
+      </div>
+      <p className="t2v-hint">How large the chat’s text is.</p>
+    </div>
+  );
+
+  const assistantSection = signedIn ? (
+    <Section title="Assistant">
+      <Field title="AI model" help="Answers your next message. Switching keeps this conversation.">
+        {(id) => (
+          <div className="t2v-select-wrap">
             <select
               id={id}
               className="t2v-select"
@@ -297,66 +246,111 @@ export function SettingsView() {
                 </option>
               ))}
             </select>
-          )}
-        </Field>
-      ) : null}
-
-      <Field title="Text size" help="How large the chat's text is.">
-        {(id) => (
-          <select
-            id={id}
-            className="t2v-select"
-            value={shownSize}
-            aria-busy={pendingSize !== null}
-            onChange={(e) => {
-              const fontSize = e.target.value as FontSize;
-              const cmdId = store.command({ type: 'setFontSize', fontSize });
-              setPendingSize(fontSize, cmdId);
-            }}
-          >
-            {SIZES.map(([size, label]) => (
-              <option key={size} value={size}>
-                {label}
-              </option>
-            ))}
-          </select>
+            <ChevronDown className="t2v-select-chevron" aria-hidden="true" size={16} />
+          </div>
         )}
       </Field>
 
-      {signedIn ? (
-        <section className="t2v-skills" aria-label="Skills">
-          <h2 className="t2v-view-title">Skills</h2>
-          {skillsOff ? (
-            <p className="t2v-hint">Skills are off for this app.</p>
-          ) : (
-            <>
-              {skills.local.length === 0 && !skills.platform?.length ? <p className="t2v-hint">No skills yet.</p> : null}
-              {skills.local.map((skill) => (
-                <LocalSkillRow
-                  key={skill.name}
-                  skill={skill}
-                  checked={toggled[skill.name]?.value ?? skill.enabled}
-                  pending={toggled[skill.name] !== undefined}
-                  onToggle={(enabled) => toggleSkill(skill.name, enabled)}
-                />
-              ))}
-              {awaitingRegister ? <p className="t2v-hint">These skills reach the assistant with your next message.</p> : null}
-              {skills.platform && skills.platform.length > 0 ? (
-                <>
-                  <h3 className="t2v-subtitle">From this app’s publisher</h3>
-                  {skills.platform.map((skill) => (
-                    <PlatformSkillRow key={skill.name} skill={skill} />
+      {features.dictation ? (
+        <>
+          <Field
+            title="Voice model"
+            help={
+              voiceState === 'error'
+                ? 'Couldn’t load the list — the default will be used.'
+                : 'Transcribes what you say when you use the mic.'
+            }
+          >
+            {(id) => (
+              <div className="t2v-select-wrap">
+                <select
+                  id={id}
+                  className="t2v-select"
+                  value={shownVoice}
+                  disabled={!voicesLoaded}
+                  aria-busy={pendingVoice !== null}
+                  onChange={(e) => {
+                    const modelId = e.target.value || null;
+                    const cmdId = store.command({ type: 'selectSttModel', modelId });
+                    setPendingVoice(modelId, cmdId);
+                    // A language the new model cannot transcribe goes back to auto-detect
+                    // (TS settings.tsx:106-114).
+                    const next = audioModels.list.find((m) => m.id === (modelId || defaultSttId));
+                    if (language && !languagesFor(next).some(([code]) => code === language)) {
+                      setPendingLanguage(null, store.command({ type: 'selectSttLanguage', language: null }));
+                    }
+                  }}
+                >
+                  <option value="">{voiceState === 'loading' ? 'Loading…' : displayText(defaultVoiceLabel)}</option>
+                  {voiceOrphan ? <option value={voiceOrphan}>{displayText(voiceOrphan)} (no longer offered)</option> : null}
+                  {audioModels.list.map((m) => (
+                    <option key={m.id} value={m.id}>
+                      {displayText(m.name ?? m.id)}
+                    </option>
                   ))}
-                </>
-              ) : null}
-              {skills.needsSessionReset ? (
-                <p className="t2v-hint">The assistant forgets a skill you turned off when this chat is next idle.</p>
-              ) : null}
-            </>
-          )}
-        </section>
+                </select>
+                <ChevronDown className="t2v-select-chevron" aria-hidden="true" size={16} />
+              </div>
+            )}
+          </Field>
+          <Field title="Spoken language" help={languageHelp}>
+            {(id) => (
+              <div className="t2v-select-wrap">
+                <select
+                  id={id}
+                  className="t2v-select"
+                  value={shownLanguage}
+                  aria-busy={pendingLanguage !== null}
+                  onChange={(e) => {
+                    const next = e.target.value || null;
+                    setPendingLanguage(next, store.command({ type: 'selectSttLanguage', language: next }));
+                  }}
+                >
+                  <option value="">Detect automatically</option>
+                  {languageOrphan ? (
+                    <option value={shownLanguage}>
+                      {displayText(languageName(shownLanguage))} (not supported by {displayText(voiceName)})
+                    </option>
+                  ) : null}
+                  {languages.map(([code, name]) => (
+                    <option key={code} value={code}>
+                      {displayText(name)}
+                    </option>
+                  ))}
+                </select>
+                <ChevronDown className="t2v-select-chevron" aria-hidden="true" size={16} />
+              </div>
+            )}
+          </Field>
+        </>
+      ) : null}
+    </Section>
+  ) : (
+    <Section title="Assistant">
+      <div className="t2v-guest-card">
+        <p>Sign in to choose a model, pick a voice for dictation and add skills. Your chats are saved to your account.</p>
+        <button type="button" className="t2v-btn t2v-btn-outline" onClick={onAccount}>
+          <UserRound aria-hidden="true" size={14} />
+          Sign in
+        </button>
+      </div>
+    </Section>
+  );
+
+
+  return (
+    <div className="t2v-view t2v-settings" role="region" aria-label="Settings">
+      <Notice />
+      {signedIn ? (
+        <>
+          {assistantSection}
+          <Section title="Appearance">{textSize}</Section>
+        </>
       ) : (
-        <p className="t2v-hint">Sign in to choose a model and skills.</p>
+        <>
+          <Section title="Appearance">{textSize}</Section>
+          {assistantSection}
+        </>
       )}
     </div>
   );

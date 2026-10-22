@@ -3,7 +3,8 @@
 One session per user, get-or-create like the engine's ``POST /v1/sessions``; ``DELETE``
 removes it (204) or answers 404 for any other id; ``/v1/skills/register`` honours
 ``replace``. A message containing ``delete`` pauses on the ``delete_volume`` client tool;
-one containing ``slow`` streams a first chunk and then holds until ``release_slow`` is set.
+one containing ``slow`` streams a first chunk and then holds until ``release_slow`` is set;
+one containing ``engine-error`` streams a ``model_error`` error chunk.
 ``expire(user_id)`` makes that user's access token 401 and their refresh token rejected.
 """
 
@@ -61,6 +62,7 @@ class FakeEngine:
         self.log: List[str] = []
         self.convert_status = 409
         self.release_slow = threading.Event()
+        self.tool_arguments: Dict[str, Any] = {"name": "CT"}  # the delete_volume call's
         self.slow_started = threading.Event()
         self._anonymous = 0
         self._issued = 0
@@ -228,12 +230,15 @@ class FakeEngine:
                     "type": "tool_call",
                     "tool_name": TOOL,
                     "tool_call_id": "tc-{}-{}".format(user_id, len(history)),
-                    "arguments": {"name": "CT"},
+                    "arguments": dict(self.tool_arguments),
                 },
             }
             return self._sse(iter([_data(interrupt)]))
         if "slow" in last:
             return self._sse(self._slow())
+        if "engine-error" in last:
+            error = {"id": "c", "error": {"type": "model_error", "message": "The model failed"}}
+            return self._sse(iter([_data(error)]))
         return self._sse(iter([_data(_text("ok")), _data(_STOP), "data: [DONE]\n\n"]))
 
     def _desktop(self, request: Request) -> Response:

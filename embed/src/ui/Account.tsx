@@ -9,11 +9,13 @@
  * offers them.
  */
 import { useEffect, useId, useRef, useState, type FormEvent } from 'react';
-import { authIdentityKey, failureText, REASON_COPY, TOO_LONG, type GateReason } from '../selectors';
+import { CircleAlert, Lock } from 'lucide-react';
+import { authIdentityKey, failureText, initials, REASON_COPY, SIGN_IN_REQUIRED, TOO_LONG, type GateReason } from '../selectors';
 import { resultOf, WATCH_MS } from '../store';
 import { useModel, useStore } from './context';
 import { displayText } from './displayText';
 import { ProviderSignIn } from './ProviderSignIn';
+import { Lockup } from './Lockup';
 
 type Mode = 'login' | 'signup';
 
@@ -139,6 +141,7 @@ export function AccountView({
       <SignInForm
         guest={auth.isAuthenticated && auth.isAnonymous}
         reason={reason}
+        gated={gated}
         busy={waiting}
         error={
           // A real reason, even a late one, says more than the timeout.
@@ -169,7 +172,7 @@ function CheckYourEmail({ email, gated, onDone }: { email: string; gated: boolea
           ? 'Confirm it, then sign in to continue this chat.'
           : 'You can keep chatting in the meantime — this conversation moves to your account once you confirm.'}
       </p>
-      <button type="button" className="t2v-btn t2v-btn-block" onClick={onDone}>
+      <button type="button" className="t2v-btn t2v-btn-outline t2v-btn-block" onClick={onDone}>
         {gated ? 'Back to sign in' : 'Back to the chat'}
       </button>
     </div>
@@ -196,21 +199,28 @@ function SignedIn({ email }: { email: string }) {
   const error = failed ? failureText(result) : sent?.timedOut && result === null ? TOO_LONG : null;
   return (
     <>
-      <div className="t2v-stack">
-        <p className="t2v-muted t2v-small">Signed in as</p>
-        <p className="t2v-strong t2v-truncate">{displayText(email)}</p>
+      <h2 className="t2v-view-title">Account</h2>
+      <div className="t2v-who">
+        <div className="t2v-avatar" aria-hidden="true">
+          {initials(email)}
+        </div>
+        <div className="t2v-who-text">
+          <p className="t2v-muted t2v-small">Signed in as</p>
+          <p className="t2v-strong t2v-truncate">{displayText(email)}</p>
+        </div>
       </div>
-      <p className="t2v-muted t2v-small">Your conversations are saved to this account, and it works in every Talk2View app.</p>
+      <p className="t2v-hint">Your chats are saved to this account and follow you into every Talk2View app.</p>
       <button
         type="button"
-        className="t2v-btn t2v-btn-block"
+        className="t2v-btn t2v-btn-outline t2v-btn-block"
         disabled={busy}
         onClick={() => setSent({ id: store.command({ type: 'logout' }), timedOut: false })}
       >
         {busy ? 'Signing out…' : 'Sign out'}
       </button>
       {error ? (
-        <p className="t2v-error" role="alert">
+        <p className="t2v-form-error" role="alert">
+          <CircleAlert aria-hidden="true" size={14} />
           {displayText(error)}
         </p>
       ) : null}
@@ -221,6 +231,7 @@ function SignedIn({ email }: { email: string }) {
 function SignInForm({
   guest,
   reason,
+  gated,
   busy,
   error,
   initialMode,
@@ -231,6 +242,9 @@ function SignInForm({
 }: {
   guest: boolean;
   reason: GateReason;
+  /** True when the gate has closed for a reason `REASON_COPY` has no line for (the
+   * generic SIGN_IN_REQUIRED covers that case instead of showing nothing). */
+  gated: boolean;
   busy: boolean;
   error: string | null;
   /** Set only when this mount replaces "Check your email" while still gated. */
@@ -296,8 +310,8 @@ function SignInForm({
   const visibleError = shownError ? error : null;
 
   useEffect(() => {
-    setAnnounced(reason ? REASON_COPY[reason] : '');
-  }, [reason]);
+    setAnnounced(reason ? REASON_COPY[reason] : gated ? SIGN_IN_REQUIRED : '');
+  }, [reason, gated]);
 
   // Fields are `readOnly`, not `disabled`, while busy, so focus is never dropped to
   // <body> by the field itself — but the submit button, which does disable, can hold
@@ -321,14 +335,20 @@ function SignInForm({
   const signup = mode === 'signup';
   return (
     <>
-      {reason ? <p className="t2v-reason">{REASON_COPY[reason]}</p> : null}
+      {reason || gated ? (
+        <p className="t2v-reason">
+          <Lock className="t2v-reason-icon" aria-hidden="true" size={16} />
+          <span>{reason ? REASON_COPY[reason] : SIGN_IN_REQUIRED}</span>
+        </p>
+      ) : null}
       <div className="t2v-sr-only" aria-live="polite" aria-atomic="true">
         {announced}
       </div>
       <div className="t2v-stack">
         {/* tabIndex -1: where focus goes when the provider section it was in goes away. */}
+        <Lockup />
         <h2 className="t2v-view-title" tabIndex={-1}>
-          {signup ? 'Create your account' : 'Sign in'}
+          {signup ? 'Create your account' : 'Welcome to Talk2View'}
         </h2>
         <p className="t2v-muted t2v-small">
           {!guest
@@ -385,12 +405,13 @@ function SignInForm({
                 aria-describedby={visibleError ? errorId : undefined}
               />
               {signup ? <p className="t2v-hint">At least 8 characters.</p> : null}
+              {visibleError ? (
+                <p id={errorId} role="alert" className="t2v-form-error">
+                  <CircleAlert aria-hidden="true" size={14} />
+                  {displayText(visibleError)}
+                </p>
+              ) : null}
             </div>
-            {visibleError ? (
-              <p id={errorId} role="alert" className="t2v-form-error">
-                {displayText(visibleError)}
-              </p>
-            ) : null}
             <button type="submit" className="t2v-btn t2v-btn-primary t2v-btn-block" disabled={busy}>
               {busy ? (signup ? 'Creating account…' : 'Signing in…') : signup ? 'Create account' : 'Sign in'}
             </button>

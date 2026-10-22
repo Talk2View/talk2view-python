@@ -39,6 +39,7 @@ from types import TracebackType
 from typing import TYPE_CHECKING, Any, Callable, Dict, Iterator, List, Optional, Tuple, Type, Union
 from urllib.parse import quote
 
+from .audio import DEFAULT_DICTATION_MODEL, AudioCapture, CaptureError
 from .auth import T2VAuth
 from .cancel import Cancelled, CancelToken
 from .client import DEFAULT_TIMEOUT, DEFAULT_UPLOAD_TIMEOUT, SDK_VERSION, T2VClient
@@ -54,7 +55,9 @@ from .controller import (
     ChatController,
     ControllerBusyError,
     ControllerClosedError,
+    IdentityChange,
 )
+from .conversations import Conversation, ConversationStore
 from .dispatch import (
     Dispatcher,
     InlineDispatcher,
@@ -78,12 +81,22 @@ from .errors import (
     error_for_type,
     is_session_gone,
 )
+from .metrics import (
+    EngineToolTiming,
+    RequestTiming,
+    ToolTiming,
+    TurnMetrics,
+    TurnTiming,
+    UiTiming,
+)
 from .preferences import T2VPreferences, UserPreferences
 from .sessions import T2VSession
 from .skills import PlatformSkill, Skill, SkillValidationError, T2VSkills
 from .state import (
     ChatSnapshot,
+    ConversationSnapshot,
     DisplayMessage,
+    HistoryEntry,
     Op,
     OpBatch,
     OpError,
@@ -259,6 +272,7 @@ class Talk2View:
         if storage is None:
             storage = MemoryStorage()
         self._storage = storage
+        self._partner_key = partner_key
         self._data_storage = data_storage if data_storage is not None else storage
 
         self._client = T2VClient(
@@ -287,6 +301,12 @@ class Talk2View:
         # respond_to_approval still answers on it. No lock: only these int fields are written.
         self._defaults_version = 0
         self._session_version = 0
+        # +1 on every session delete (clear_session, a recycle, a fresh-session reset). The
+        # recovery in chat() reads it around its create_session(): a clear that landed at any
+        # time during the create, including while its register calls were out, means nobody
+        # wants the turn resent. No lock: two racing deletes may count as one, which still
+        # moves it.
+        self._deletes = 0
         # The in-flight chat()/respond_to_approval() stream, for stop().
         self._active_cancel: Optional[CancelToken] = None
         self._session_recovered_listeners: List[SessionRecoveredCallback] = []
@@ -323,6 +343,8 @@ class Talk2View:
         self.voice = T2VVoice(self._client, require_session=self._require_session)
         self.skills = T2VSkills(self._client, self._data_storage)
         self.preferences = T2VPreferences(self._data_storage)
+        #: Turn timings of this client's ``ChatController`` (``talk2view.metrics``).
+        self.metrics = TurnMetrics()
         self._auth_user_id: Optional[str] = None
         try:
             self._auth_user_id = self._current_user_id()
@@ -389,6 +411,11 @@ class Talk2View:
         (``voice.transcribe``, ``voice.list_models``) or warm-up starts an anonymous demo
         session (the constructor's ``anonymous_auto_start``; read-only)."""
         return self._anonymous_auto_start
+
+    @property
+    def partner_key(self) -> str:
+        """The partner key this client was built with (read-only)."""
+        return self._partner_key
 
     @property
     def data_storage(self) -> TokenStorage:
@@ -478,7 +505,11 @@ class Talk2View:
 
         Tools and skills are session-scoped on the engine, so the registered
         tool schemas and the enabled skills are re-sent to the new session
-        (non-fatal if that fails).
+        (non-fatal if that fails) once the create has answered, both at once, on
+        threads of their own; this returns once both have answered. The skills'
+        ``on_change`` listeners (a ``ChatController``'s included) and an auth
+        listener told of a rejected refresh may therefore run on the
+        ``t2v-register-skills`` or ``t2v-register-tools`` thread.
 
         Args:
             model: Model id override for this session. It is a later choice than a
@@ -529,28 +560,57 @@ class Talk2View:
         )
         self._session_version = version
         self._current_session = session
+        # After the create, never before or beside it: the registers would otherwise land on
+        # whatever session the engine held then, and one it dropped before the create
+        # arrived (an eviction, another client's DELETE) would leave the new session with
+        # no tools or skills and nothing to say so. The two registers go out together.
         self._after_session_created(known_fresh=known_fresh)
         return session
 
     def _after_session_created(self, *, known_fresh: bool = False) -> None:
-        """Re-establish session-scoped engine state on a new session.
+        """Re-establish session-scoped engine state on a new session, and wait for it.
 
-        Runs after every create_session(): the first chat, after
-        clear_session(), and during recovery from a lost session. Every step is
-        non-fatal — the session stays usable if one fails. Tools first, then the
-        enabled skills. ``known_fresh``: the session followed this client's own
-        confirmed DELETE; any other may be one the engine kept (``POST
-        /v1/sessions`` is get-or-create), which ``skills.re_register`` treats
-        differently when it fails.
+        Runs after every create_session(): the first chat, after clear_session(), and
+        during recovery from a lost session. Every step is non-fatal — the session stays
+        usable if one fails. The tools and the enabled skills are sent at the same time
+        (``_start_re_register``). ``known_fresh``: the session followed this client's own
+        confirmed DELETE; any other may be one the engine kept (``POST /v1/sessions`` is
+        get-or-create), which ``skills.re_register`` treats differently when it fails.
         """
-        try:
-            self.tools.re_register()
-        except Exception as exc:
-            logger.warning("Failed to re-register tools on the new session: %s", exc)
-        try:
-            self.skills.re_register(known_fresh=known_fresh)
-        except Exception as exc:
-            logger.warning("Failed to re-register skills on the new session: %s", exc)
+        self._start_re_register(known_fresh=known_fresh)()
+
+    def _start_re_register(self, *, known_fresh: bool = False) -> Callable[[], None]:
+        """Send the registered tool schemas and the enabled skills again, each on a thread
+        of its own, and return the function that waits for both (at most a request timeout
+        each; a skills call may first wait out one already in flight). Both are
+        non-fatal: a failure is logged. The two are independent of each other; both
+        belong after the create (see ``_create_session``). The skills' ``on_change``
+        listeners run on ``t2v-register-skills``."""
+
+        def tools() -> None:
+            try:
+                self.tools.re_register()
+            except Exception as exc:
+                logger.warning("Failed to re-register tools on the new session: %s", exc)
+
+        def skills() -> None:
+            try:
+                self.skills.re_register(known_fresh=known_fresh)
+            except Exception as exc:
+                logger.warning("Failed to re-register skills on the new session: %s", exc)
+
+        threads = [
+            threading.Thread(target=tools, name="t2v-register-tools", daemon=True),
+            threading.Thread(target=skills, name="t2v-register-skills", daemon=True),
+        ]
+        for thread in threads:
+            thread.start()
+
+        def wait() -> None:
+            for thread in threads:
+                thread.join()
+
+        return wait
 
     def recycle_session(self) -> T2VSession:
         """Delete the engine session and create a fresh one (tools and skills re-sent).
@@ -615,9 +675,11 @@ class Talk2View:
         flight = self._shared_anonymous_start()
         return flight is None or flight.result
 
-    def _shared_anonymous_start(self) -> Optional[_Flight]:
+    def _shared_anonymous_start(self, warm: bool = False) -> Optional[_Flight]:
         """The settled anonymous start this caller shares, or None when someone is
-        signed in already. Starts one when none is in flight."""
+        signed in already. Starts one when none is in flight; ``warm``: for a message
+        already on its way (see ``T2VAuth.start_anonymous``). A caller that joins a start
+        in flight shares it as it was sent: warm or not, it is one guest."""
         if self.auth.is_authenticated():
             return None
         with self._anonymous_lock:
@@ -631,7 +693,7 @@ class Talk2View:
             flight.done.wait()
             return flight
         try:
-            user = self._start_anonymous_once(flight)
+            user = self._start_anonymous_once(flight, warm)
             flight.result = user is not None
             flight.done.set()  # settled before any listener runs
             if user is not None:
@@ -654,11 +716,13 @@ class Talk2View:
             if self._anonymous_flight is flight:  # never a newer start's registration
                 self._anonymous_flight = None
 
-    def _start_anonymous_once(self, flight: _Flight) -> Optional[User]:
+    def _start_anonymous_once(self, flight: _Flight, warm: bool = False) -> Optional[User]:
         """Request the anonymous session and store it; no listener runs here. A
         failure is recorded on ``flight``, for every caller that shares it."""
         try:
-            return self.auth._start_anonymous_session(store=self._store_unless_closed)
+            return self.auth._start_anonymous_session(
+                store=self._store_unless_closed, warm=warm
+            )
         except Exception as exc:
             if not isinstance(exc, AnonymousUnavailableError) and not self._closed:
                 logger.warning("Anonymous auto-start failed: %s", exc)
@@ -801,7 +865,7 @@ class Talk2View:
             body["max_tokens"] = max_tokens
         if temperature is not None:
             body["temperature"] = temperature
-        self._require_session()
+        self._require_session(warm=True)
         result = self._client.request(
             "/v1/completions", method="POST", body=body, timeout=timeout
         )
@@ -862,7 +926,9 @@ class Talk2View:
             if not signed_in:
                 # Shared with every other caller. Holds no lock of ours, so the auth
                 # listeners it may run here (this SDK's own hook included) never wait on it.
-                if not self.ensure_session():
+                # A keystroke or a mic tap: a message is on its way, so a warm start.
+                flight = self._shared_anonymous_start(warm=True)
+                if flight is not None and not flight.result:
                     return  # the signed-out claim stays until the auth state changes
                 if not self._claim_warm_up(self._warm_identity()):
                     return  # a warm_up() for the new identity got there first
@@ -872,9 +938,10 @@ class Talk2View:
         except Exception as exc:
             logger.debug("warm_up skipped: %s", exc)
 
-    def _require_session(self) -> None:
+    def _require_session(self, warm: bool = False) -> None:
         """With ``anonymous_auto_start``, start the demo session before an
-        authenticated call.
+        authenticated call. ``warm`` for a call that is itself the end-user's message
+        (``chat()``, ``completions()``): the engine then mints the guest's key at once.
 
         Raises ``AuthenticationError`` (``type="sign_in_required"``, caused by the
         ``AnonymousUnavailableError``) only for a refusal only signing in can fix.
@@ -884,7 +951,7 @@ class Talk2View:
         """
         if not self._anonymous_auto_start:
             return
-        flight = self._shared_anonymous_start()
+        flight = self._shared_anonymous_start(warm)
         if flight is None or flight.result:
             return
         if isinstance(flight.error, AnonymousUnavailableError):
@@ -972,7 +1039,7 @@ class Talk2View:
         try:
             if token.cancelled:
                 return  # nothing to send — don't create a session for it
-            self._require_session()
+            self._require_session(warm=True)
             if token.cancelled:
                 return  # stop() landed during the anonymous start
             user_id = self._auth_user_id  # whose turn it is, a guest just started included
@@ -1080,11 +1147,13 @@ class Talk2View:
                 raise
 
         self._current_session = None
+        deletes = self._deletes
         new_session = self.create_session()
-        # create_session() re-registers tools before returning; clear_session()
-        # may have run on another thread in that window. Only resend if this
-        # recovery's session is still the one in play.
-        if not self._is_current_session(new_session):
+        # clear_session() may have run on another thread while create_session() was out,
+        # during the create itself or while its tools and skills were re-registered. Only
+        # resend if nothing cleared the session meanwhile and this recovery's session is
+        # still the one in play.
+        if self._deletes != deletes or not self._is_current_session(new_session):
             return
         if self._auth_user_id != user_id:
             # Someone else signed in during the turn: the session just created is theirs,
@@ -1274,6 +1343,7 @@ class Talk2View:
             except Exception:  # noqa: S110 — fire-and-forget session cleanup
                 pass
         self._current_session = None
+        self._deletes += 1
         if deleted:
             # A pending DEFAULT_MODEL reset is done: the next create starts a new engine
             # session. A reset set meanwhile loses its flag here only after it has cleared
@@ -1282,6 +1352,16 @@ class Talk2View:
             self._fresh_session = False
             self._named_session_model = None  # the engine holds no session for us now
         return deleted
+
+    def detach_session(self) -> None:
+        """Forget the engine session without deleting it, so the next ``chat()`` opens a
+        fresh one (TS ``detachSession``). Unlike ``clear_session`` no ``DELETE`` goes out:
+        the conversation this session belongs to may be one the end-user switches back
+        to, and its turn may still be finishing. The transcript is replayed with every
+        message, so a new session costs a round trip and nothing else. A session recovery
+        in flight sees the change through ``_deletes``, as it does after a delete."""
+        self._current_session = None
+        self._deletes += 1
 
     def close(self) -> None:
         """Close the underlying HTTP client and release pooled connections.
@@ -1300,6 +1380,7 @@ class Talk2View:
             self._closed = True  # an anonymous start still in flight now stores nothing
         self._retire_memory()
         self.skills.close()
+        self.metrics.close()  # a turn still waiting for its page report goes out without it
         self._client.close()
 
     def __enter__(self) -> "Talk2View":
@@ -1322,8 +1403,13 @@ __all__ = [
     "ChatController",
     "ControllerBusyError",
     "ControllerClosedError",
+    "IdentityChange",
     "ChatSnapshot",
+    "Conversation",
+    "ConversationSnapshot",
+    "ConversationStore",
     "DisplayMessage",
+    "HistoryEntry",
     "Op",
     "OpBatch",
     "OpError",
@@ -1343,8 +1429,19 @@ __all__ = [
     "T2VSkills",
     "T2VTools",
     "T2VVoice",
+    # Audio (dictation)
+    "AudioCapture",
+    "CaptureError",
+    "DEFAULT_DICTATION_MODEL",
     # Preferences
     "UserPreferences",
+    # Turn timings
+    "TurnMetrics",
+    "TurnTiming",
+    "RequestTiming",
+    "ToolTiming",
+    "EngineToolTiming",
+    "UiTiming",
     # Skills
     "Skill",
     "PlatformSkill",

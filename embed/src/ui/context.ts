@@ -14,3 +14,10 @@ export function useModel(): PageModel {
   const store = useStore();
   return useSyncExternalStore(store.subscribe, store.get);
 }
+
+/**
+ * Opens the Skills view (App.tsx's own view switch), for a part deep inside the thread
+ * that has no props path to it: the save_skill card's settled line. Null
+ * outside App (a test mounting the thread alone), where the link is simply not drawn.
+ */
+export const OpenSkillsContext = createContext<(() => void) | null>(null);

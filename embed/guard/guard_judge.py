@@ -34,7 +34,7 @@ REQUIRED_PROBES = (
     "font",
     "css:custom-properties",
     "css:flex-margins",
-    "css:sticky",
+    "css:shimmer",
     "css:composer-row",
     "css:focus-ring",
     "policy:always-allow",
@@ -48,6 +48,7 @@ MIN_API_PROBES = 12  # distinct api: ids
 REQUIRED_AUTO_STEPS = (
     "auto:connected",
     "auto:send",
+    "auto:sticky",
     "auto:stream",
     "auto:markdown-dom",
     "auto:link",

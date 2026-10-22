@@ -22,7 +22,7 @@ from talk2view.ui.wire import (
 )
 
 VALID: Dict[str, Dict[str, Any]] = {
-    "send": {"text": "hi", "attachmentIds": ["a1"]},
+    "send": {"text": "hi", "attachmentIds": ["a1"], "timing": True},
     "cancel": {},
     "approve": {"toolCallId": "tc-1", "action": "always", "feedback": "ok",
                 "updatedInput": {"name": "MRHead"}},
@@ -30,6 +30,10 @@ VALID: Dict[str, Dict[str, Any]] = {
     "edit": {"messageId": "m-1", "text": "again"},
     "newSession": {},
     "clearError": {},
+    "threadNew": {},
+    "threadSwitch": {"threadId": "c_1"},
+    "threadRename": {"threadId": "c_1", "title": "My scan"},
+    "threadDelete": {"threadId": "c_1"},
     "selectModel": {"modelId": "m-fast"},
     "login": {"email": "a@b.c", "password": "pw"},
     "signup": {"email": "a@b.c", "password": "pw"},
@@ -44,20 +48,36 @@ VALID: Dict[str, Dict[str, Any]] = {
     "openLink": {"url": "https://example.com"},
     "dictationStart": {},
     "dictationStop": {},
+    "dictationCancel": {},
+    "selectSttModel": {"modelId": "scribe_v2"},
+    "selectSttLanguage": {"language": "vi"},
     "skillsList": {},
     "skillEnable": {"name": "measure"},
     "skillDisable": {"name": "measure"},
+    "skillSave": {"name": "measure", "description": "d. Use it.", "instructions": "i"},
+    "skillDelete": {"name": "measure"},
+    "skillRestore": {"name": "measure"},
+    "skillCustomize": {"name": "measure"},
+    "skillImport": {"resolve": "replace", "description": "d. Use it."},
+    "skillOpenFolder": {},
+    "skillRead": {"name": "measure"},
+    "metrics": {"messageId": "msg_1_2", "sendToPostMs": 3.5, "firstOpToPaintMs": None,
+                "firstOpAtMs": 1790000000000},
 }
 
 
-def test_the_command_set_is_the_spec_list_plus_five() -> None:
+def test_the_command_set_is_the_spec_list_plus_twenty() -> None:
     spec = {
         "send", "cancel", "approve", "reload", "edit", "newSession", "clearError",
         "selectModel", "login", "signup", "logout", "startAnonymous", "oauthStart", "copy",
         "dictationStart", "dictationStop", "skillsList", "skillEnable", "skillDisable",
     }
     assert set(COMMANDS) == spec | {
-        "openLink", "setFontSize", "warmUp", "oauthCancel", "oauthDismissError",
+        "openLink", "setFontSize", "warmUp", "oauthCancel", "oauthDismissError", "metrics",
+        "threadNew", "threadSwitch", "threadRename", "threadDelete",
+        "dictationCancel", "selectSttModel", "selectSttLanguage",
+        "skillSave", "skillDelete", "skillRestore", "skillCustomize", "skillImport",
+        "skillOpenFolder", "skillRead",
     }
     assert set(VALID) == set(COMMANDS)
 
@@ -70,7 +90,12 @@ def test_every_command_parses_with_its_fields(kind: str) -> None:
 
 
 def test_optional_fields_default_to_none_or_empty() -> None:
-    assert parse_command({"type": "send", "text": "hi"}).args == {"text": "hi", "attachmentIds": []}
+    assert parse_command({"type": "send", "text": "hi"}).args == {
+        "text": "hi", "attachmentIds": [], "timing": False,
+    }
+    assert parse_command({"type": "metrics", "messageId": "m"}).args == {
+        "messageId": "m", "sendToPostMs": None, "firstOpToPaintMs": None, "firstOpAtMs": None,
+    }
     assert parse_command({"type": "approve", "toolCallId": "t", "action": "deny"}).args == {
         "toolCallId": "t", "action": "deny", "feedback": None, "updatedInput": None,
     }
@@ -109,6 +134,16 @@ def test_optional_fields_default_to_none_or_empty() -> None:
         {"type": "setFontSize"},
         {"type": "skillEnable", "name": "x" * 256},
         {"type": "openLink", "url": ""},
+        {"type": "send", "text": "hi", "timing": "yes"},
+        {"type": "send", "text": "hi", "timing": 1},
+        {"type": "metrics"},
+        {"type": "metrics", "messageId": ""},
+        {"type": "metrics", "messageId": "m", "sendToPostMs": -1},
+        {"type": "metrics", "messageId": "m", "sendToPostMs": "5"},
+        {"type": "metrics", "messageId": "m", "sendToPostMs": True},
+        {"type": "metrics", "messageId": "m", "firstOpToPaintMs": 1e12},
+        {"type": "metrics", "messageId": "m", "firstOpAtMs": float("nan")},
+        {"type": "metrics", "messageId": "m", "text": "no text in a report"},
     ],
 )
 def test_anything_else_is_a_bad_command(body: Any) -> None:
@@ -259,3 +294,33 @@ def test_result_and_error_shapes() -> None:
         "ok": False, "error": {"type": "bad_command", "message": "no"},
     }
     assert "busy" in ERROR_TYPES and "internal_error" in ERROR_TYPES
+
+
+def test_thread_commands_parse_and_refuse_bad_fields() -> None:
+    assert parse_command({"type": "threadNew"}).args == {}
+    switch = parse_command({"type": "threadSwitch", "threadId": "c_1"})
+    assert switch.args == {"threadId": "c_1"}
+    rename = parse_command({"type": "threadRename", "threadId": "c_1", "title": "My scan \ud83d"})
+    assert rename.args["title"] == "My scan �"  # user text: a lone surrogate becomes U+FFFD
+    assert parse_command({"type": "threadDelete", "threadId": "c_1"}).args == {"threadId": "c_1"}
+    with pytest.raises(CommandError):
+        parse_command({"type": "threadSwitch"})
+    with pytest.raises(CommandError):
+        parse_command({"type": "threadRename", "threadId": "c_1", "title": "x" * 201})
+    with pytest.raises(CommandError):
+        parse_command({"type": "threadNew", "threadId": "c_1"})
+    assert {"thread_list_disabled", "unknown_thread"} <= ERROR_TYPES
+
+
+def test_stt_and_dictation_commands_parse() -> None:
+    assert parse_command({"type": "selectSttModel", "modelId": None}).args == {"modelId": None}
+    assert parse_command({"type": "selectSttModel", "modelId": "scribe_v2"}).args == {
+        "modelId": "scribe_v2",
+    }
+    assert parse_command({"type": "selectSttLanguage", "language": "vi"}).args == {"language": "vi"}
+    assert parse_command({"type": "selectSttLanguage", "language": None}).args == {"language": None}
+    assert parse_command({"type": "dictationCancel"}).args == {}
+    with pytest.raises(CommandError):
+        parse_command({"type": "selectSttLanguage", "language": "x" * 17})
+    with pytest.raises(CommandError):
+        parse_command({"type": "selectSttModel"})

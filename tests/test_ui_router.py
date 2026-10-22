@@ -11,12 +11,14 @@ from typing import Any, Callable, Dict, Iterator, List, Optional, Set
 import pytest
 
 from talk2view import Attachment, Decision, Skill, Talk2View
+from talk2view.errors import AuthenticationError, T2VError
 from talk2view.skills import MAX_REGISTER_BODY_BYTES
 from talk2view.ui import GenericHost
 from talk2view.ui.app_state import _SIGNED_OUT, _UNREADABLE, AppState, _identity
 from talk2view.ui.hub import EventHub
 from talk2view.ui.router import CommandRouter, UploadRegistry
 from talk2view.ui.testing import FakeController
+from talk2view.ui.threads import ThreadsState
 from talk2view.ui.wire import CommandFailure, parse_command
 
 from .ui_engine import AccountEngine
@@ -43,16 +45,33 @@ class RecordingHost(GenericHost):
 
 
 class Rig:
-    def __init__(self, t2v: Optional[Talk2View], host: Optional[GenericHost] = None) -> None:
-        self.controller = FakeController(executor=inline, reply="ok")
+    def __init__(
+        self,
+        t2v: Optional[Talk2View],
+        host: Optional[GenericHost] = None,
+        threads: Optional[ThreadsState] = None,
+    ) -> None:
+        # A Rig built with `threads` shares the controller and the hub `threads` is
+        # already attached to, rather than creating its own of each, so the commands this
+        # Rig runs (send, threadSwitch, ...) land on the same controller and threads slice
+        # the caller set up.
+        self.controller = (
+            threads._controller if threads is not None  # noqa: SLF001
+            else FakeController(executor=inline, reply="ok")
+        )
         self.host = host or RecordingHost()
-        self.hub = EventHub()
+        self.hub = threads._hub if threads is not None else EventHub()  # noqa: SLF001
         self.app = AppState(t2v, self.host)
         self.app.attach(self.hub)
         self.uploads = UploadRegistry()
         self.skills_listed = 0
         self.router = CommandRouter(
-            self.controller, self.app, self.host, self.uploads, on_skills_list=self._listed
+            self.controller,
+            self.app,
+            self.host,
+            self.uploads,
+            on_skills_list=self._listed,
+            threads=threads,
         )
 
     def _listed(self) -> None:
@@ -259,8 +278,9 @@ def test_start_anonymous_sends_the_captcha_and_passes_a_refusal_through(
     assert not t2v.auth.is_authenticated()
     account_engine.anonymous_refusal = None
     assert ok(rig.run(type="startAnonymous", captchaToken="turnstile-xyz"))
+    # The page starts a guest only for a send or an upload on its way: a warm start.
     assert auth_bodies(account_engine, "/v1/auth/anonymous") == [
-        {}, {"captcha_token": "turnstile-xyz"},
+        {"warm": True}, {"captcha_token": "turnstile-xyz", "warm": True},
     ]
 
 
@@ -297,6 +317,18 @@ def test_select_model_and_font_size(rig: Rig, t2v: Talk2View) -> None:
     assert t2v.preferences.get().font_size is None
 
 
+def test_select_stt_model_and_language_write_the_preferences(rig: Rig, t2v: Talk2View) -> None:
+    assert ok(rig.run(type="login", email="ana@example.com", password="pw"))
+    assert ok(rig.run(type="selectSttModel", modelId="scribe_v2"))
+    assert ok(rig.run(type="selectSttLanguage", language="vi"))
+    assert (t2v.preferences.get().stt_model, t2v.preferences.get().stt_language) == (
+        "scribe_v2", "vi",
+    )
+    assert ok(rig.run(type="selectSttModel", modelId=None))
+    assert t2v.preferences.get().stt_model is None
+    assert error_type(Rig(None).run(type="selectSttModel", modelId="x")) == "account_unavailable"
+
+
 def test_oauth_and_dictation_are_unavailable(rig: Rig) -> None:
     assert error_type(rig.run(type="oauthStart", provider="google")) == "oauth_unavailable"
     assert error_type(rig.run(type="dictationStart")) == "dictation_unavailable"
@@ -310,10 +342,12 @@ def test_account_commands_without_a_talk2view(bare: Rig) -> None:
         {"type": "startAnonymous"},
         {"type": "warmUp"},
         {"type": "setFontSize", "fontSize": "small"},
-        {"type": "skillsList"},
         {"type": "skillEnable", "name": "x"},
     ):
         assert error_type(bare.run(**body)) == "account_unavailable", body
+    # The Skills view lists on every visit, guests included:
+    # with no account there is nothing to list, and nothing worth a notice.
+    assert ok(bare.run(type="skillsList"))
     assert error_type(bare.run(type="selectModel", modelId="m")) == "unknown_model"
 
 
@@ -435,6 +469,52 @@ def test_copy_needs_a_host_with_a_clipboard(t2v: Talk2View) -> None:
 def test_skills_list_rescans_then_reads_the_catalogue(rig: Rig, t2v: Talk2View) -> None:
     rig.run(type="login", email="ana@example.com", password="pw")
     assert ok(rig.run(type="skillsList"))  # the fake engine has no GET /v1/skills: None
+    assert rig.skills_listed == 1
+
+
+def test_skills_list_for_a_guest_rescans_and_asks_no_catalogue(
+    rig: Rig, t2v: Talk2View, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A guest's Skills view picks up skills dropped into the
+    folder (the rescan runs), and the catalogue -- which needs a session -- is not even
+    asked for, so there is no 401 and no "Session expired"."""
+    asked: List[int] = []
+    monkeypatch.setattr(t2v.skills, "list_platform", lambda: asked.append(1))
+    assert ok(rig.run(type="skillsList"))
+    assert rig.skills_listed == 1 and asked == []
+
+
+@pytest.mark.parametrize(
+    "refusal",
+    [
+        AuthenticationError("Session expired. Please log in again."),
+        T2VError("Sign in to continue.", "sign_in_required", None),
+        T2VError("Unauthorized", "unauthorized", 401),
+    ],
+)
+def test_skills_list_treats_an_auth_refusal_as_no_catalogue(
+    rig: Rig, t2v: Talk2View, monkeypatch: pytest.MonkeyPatch, refusal: T2VError
+) -> None:
+    rig.run(type="login", email="ana@example.com", password="pw")
+
+    def refuse() -> None:
+        raise refusal
+
+    monkeypatch.setattr(t2v.skills, "list_platform", refuse)
+    assert ok(rig.run(type="skillsList"))
+    assert rig.skills_listed == 1
+
+
+def test_skills_list_other_catalogue_errors_still_fail(
+    rig: Rig, t2v: Talk2View, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    rig.run(type="login", email="ana@example.com", password="pw")
+
+    def fail() -> None:
+        raise T2VError("boom", "server_error", 500)
+
+    monkeypatch.setattr(t2v.skills, "list_platform", fail)
+    assert error_type(rig.run(type="skillsList")) == "server_error"
     assert rig.skills_listed == 1
 
 
@@ -647,3 +727,57 @@ def test_upload_registry_gives_each_attachment_to_its_owner_only() -> None:
     for nobody in (_UNREADABLE, _SIGNED_OUT, (True, None), (True, "")):
         registry.add(mine, owner=nobody)
         assert refusal(registry, ["a1"], nobody).type == "unknown_attachment", nobody
+
+
+def test_thread_commands_reach_the_list_and_are_refused_without_one(bare: Rig) -> None:
+    assert error_type(bare.run(type="threadNew")) == "thread_list_disabled"
+    threads = ThreadsState(bare.controller, None)
+    threads.attach(bare.hub)
+    try:
+        rig = Rig(None, threads=threads)
+        try:
+            first = rig.hub.snapshot()["state"]["threads"]["currentId"]
+            assert ok(rig.run(type="send", text="hello"))
+            assert wait_for(
+                lambda: rig.hub.snapshot()["state"]["threads"]["items"][0]["messageCount"] == 2
+            )
+            assert ok(rig.run(type="threadNew"))
+            second = rig.hub.snapshot()["state"]["threads"]["currentId"]
+            assert second != first
+            assert ok(rig.run(type="threadSwitch", threadId=first))
+            assert error_type(rig.run(type="threadSwitch", threadId="nope")) == "unknown_thread"
+            assert ok(rig.run(type="threadRename", threadId=first, title="Renamed"))
+            rename_failure = rig.run(type="threadRename", threadId="nope", title="x")
+            assert error_type(rename_failure) == "unknown_thread"
+            assert ok(rig.run(type="threadDelete", threadId=first))
+            assert error_type(rig.run(type="threadDelete", threadId=first)) == "unknown_thread"
+            assert ("clear", ()) not in rig.controller.calls
+        finally:
+            rig.close()
+    finally:
+        threads.close()
+
+
+def test_a_thread_command_the_list_cannot_answer_in_time_is_an_internal_error(
+    bare: Rig,
+) -> None:
+    threads = ThreadsState(bare.controller, None, timeout=0.2)
+    threads.attach(bare.hub)
+    release = threading.Event()
+    real = bare.controller.exchange_conversation
+
+    def stuck(*args: Any, **kwargs: Any) -> Any:
+        assert release.wait(5.0)
+        return real(*args, **kwargs)
+
+    try:
+        rig = Rig(None, threads=threads)
+        try:
+            assert ok(rig.run(type="send", text="hello"))
+            bare.controller.exchange_conversation = stuck  # type: ignore[method-assign]
+            assert error_type(rig.run(type="threadNew")) == "internal_error"  # not ok
+        finally:
+            release.set()
+            rig.close()
+    finally:
+        threads.close()

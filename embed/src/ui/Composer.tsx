@@ -9,7 +9,8 @@ import { useEffect, useRef, useState, type FC } from 'react';
 import { ArrowUp, Paperclip, Square, X } from 'lucide-react';
 import { AttachmentPrimitive, AuiIf, ComposerPrimitive, useAui, useAuiEvent, useAuiState } from '@assistant-ui/react';
 import { MAX_ATTACHMENTS } from '../runtime';
-import { authIdentityKey, chipBlocksSend, gate, uploadFailureText } from '../selectors';
+import { authIdentityKey, chipBlocksSend, dictationFailureText, gate, uploadFailureText } from '../selectors';
+import { ComposerDictation } from './Dictation';
 import { displayText } from './displayText';
 import { useModel, useStore } from './context';
 
@@ -40,9 +41,9 @@ const ComposerChip: FC = () => {
 /**
  * What a screen reader hears about an upload starting and finishing: a chip's own status
  * change, not the thread's turn status (Thread.tsx's `LiveRegion`), and not a second
- * `role="status"` competing with the reconnect banner's (App.tsx) — an earlier review
- * flagged exactly that collision, fixed there by a plain `aria-live` region that starts
- * empty; this is the same pattern, scoped to the composer instead. Only the most recent
+ * `role="status"` competing with the reconnect banner's (App.tsx), which avoids that
+ * collision with a plain `aria-live` region that starts empty; this is the same
+ * pattern, scoped to the composer instead. Only the most recent
  * transition is kept: a multi-file pick announces its last file's state, which is a
  * reasonable simplification, not silence.
  *
@@ -97,6 +98,36 @@ export const Composer: FC = () => {
   // event was not already prevented, `composeEventHandlers` in `ComposerRoot.tsx`).
   const notReady = attachments.some((a) => chipBlocksSend(a.status.type));
   const announcement = useAttachmentAnnouncement();
+
+  // A transcript is appended once, by its seq (the slice keeps the last one until the
+  // next dictation): TS's composer appends the adapter's final onSpeech the same way,
+  // space-separated after whatever is already there.
+  const transcript = model.state.dictation?.transcript ?? null;
+  // Seeded from whatever the FIRST snapshot already holds: the
+  // slice keeps the last dictation's transcript until the next start(), so a page that
+  // mounts after a reload — or a Slicer host re-opening the panel — must not treat a
+  // transcript that was already there as new. App.tsx never renders Composer before the
+  // first real snapshot lands ("Nothing shows until the first snapshot"), so this ref's
+  // initial value is always the true starting point, never EMPTY_STATE's.
+  const seenTranscript = useRef<number | null>(transcript?.seq ?? null);
+  useEffect(() => {
+    if (!transcript || transcript.seq === seenTranscript.current) return;
+    seenTranscript.current = transcript.seq;
+    const current = aui.composer().getState().text;
+    void aui.composer().setText((current ? current.replace(/\s+$/, '') + ' ' : '') + transcript.text);
+    // A clip auto-stopped at ten minutes still transcribes, so this is not a
+    // failure (dictationFailureText never sees it) — a brief heads-up instead. TS has no
+    // such cap, so there is nothing there to match; Python-only.
+    if (transcript.reason === 'max_duration') store.showNotice('Stopped at 10 minutes.');
+  }, [transcript, aui, store]);
+
+  const dictationError = model.state.dictation?.error ?? null;
+  const shownDictationError = useRef<typeof dictationError>(null);
+  useEffect(() => {
+    if (!dictationError || dictationError === shownDictationError.current) return;
+    shownDictationError.current = dictationError;
+    store.showNotice(dictationFailureText(dictationError.type, dictationError.message));
+  }, [dictationError, store]);
 
   // Refusals that land apart — a second pick while the first one's notice is still up —
   // add up instead of the later one replacing the earlier: within REFUSAL_WINDOW_MS,
@@ -216,50 +247,68 @@ export const Composer: FC = () => {
   const attachDisabled = gated || atCap;
   const attachTitle = gated ? 'Attach a file' : atCap ? 'You can attach up to ' + String(MAX_ATTACHMENTS) + ' files.' : 'Attach a file';
 
+  const [focused, setFocused] = useState(false);
   return (
-    <ComposerPrimitive.Root className="t2v-composer" onSubmit={(e) => (notReady ? e.preventDefault() : undefined)}>
+    <ComposerPrimitive.Root className="t2v-composer aui-composer-root" onSubmit={(e) => (notReady ? e.preventDefault() : undefined)}>
       <div className="t2v-sr-only" aria-live="polite" aria-atomic="true">
         {announcement}
       </div>
-      {attachmentsOn ? (
-        <div className="t2v-chips">
-          <ComposerPrimitive.Attachments components={{ Attachment: ComposerChip }} />
-        </div>
-      ) : null}
-      <div className="t2v-composer-row">
+      <div
+        data-slot="aui_composer-shell"
+        className={'t2v-composer-shell' + (focused ? ' t2v-composer-focused' : '')}
+        onFocus={() => setFocused(true)}
+        onBlur={(e) => {
+          if (!e.currentTarget.contains(e.relatedTarget as Node | null)) setFocused(false);
+        }}
+      >
         {attachmentsOn ? (
-          <ComposerPrimitive.AddAttachment
-            className="t2v-icon-btn t2v-attach"
-            aria-label="Attach a file"
-            title={attachTitle}
-            disabled={attachDisabled}
-          >
-            <Paperclip aria-hidden="true" size={16} />
-          </ComposerPrimitive.AddAttachment>
+          <div className="t2v-chips">
+            <ComposerPrimitive.Attachments components={{ Attachment: ComposerChip }} />
+          </div>
         ) : null}
         <ComposerPrimitive.Input
-          className="t2v-input"
-          placeholder="Message (Enter sends, Shift+Enter adds a line)"
+          className="t2v-input aui-composer-input"
+          placeholder="Send a message..."
           aria-label="Message"
+          title="Enter sends, Shift+Enter adds a line"
           minRows={1}
-          maxRows={6}
+          maxRows={7}
           autoFocus
         />
-        <AuiIf condition={(s) => !s.thread.isRunning}>
-          <ComposerPrimitive.Send
-            className="t2v-send"
-            aria-label="Send"
-            title={notReady ? 'Wait for every attachment to finish uploading.' : 'Send'}
-            disabled={notReady}
-          >
-            <ArrowUp aria-hidden="true" size={16} />
-          </ComposerPrimitive.Send>
-        </AuiIf>
-        <AuiIf condition={(s) => s.thread.isRunning}>
-          <ComposerPrimitive.Cancel className="t2v-send t2v-stop" aria-label="Stop" title="Stop">
-            <Square aria-hidden="true" size={14} />
-          </ComposerPrimitive.Cancel>
-        </AuiIf>
+        <div className="t2v-composer-actions aui-composer-action-wrapper">
+          {attachmentsOn ? (
+            <ComposerPrimitive.AddAttachment
+              className="t2v-icon-btn t2v-attach aui-composer-add-attachment"
+              aria-label="Attach a file"
+              title={attachTitle}
+              disabled={attachDisabled}
+            >
+              {/* A paperclip, not TS's own PlusIcon (attachment.
+                  aui.tsx:270) — the "+" reads as "new" next to New chat's own plus. */}
+              <Paperclip aria-hidden="true" size={16} />
+            </ComposerPrimitive.AddAttachment>
+          ) : (
+            <span />
+          )}
+          <div className="t2v-composer-end">
+            <ComposerDictation />
+            <AuiIf condition={(s) => !s.thread.isRunning}>
+              <ComposerPrimitive.Send
+                className="t2v-send aui-composer-send"
+                aria-label="Send"
+                title={notReady ? 'Wait for every attachment to finish uploading.' : 'Send'}
+                disabled={notReady}
+              >
+                <ArrowUp aria-hidden="true" size={16} />
+              </ComposerPrimitive.Send>
+            </AuiIf>
+            <AuiIf condition={(s) => s.thread.isRunning}>
+              <ComposerPrimitive.Cancel className="t2v-send t2v-stop aui-composer-cancel" aria-label="Stop" title="Stop">
+                <Square aria-hidden="true" size={14} fill="currentColor" />
+              </ComposerPrimitive.Cancel>
+            </AuiIf>
+          </div>
+        </div>
       </div>
     </ComposerPrimitive.Root>
   );

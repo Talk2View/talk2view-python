@@ -1,5 +1,5 @@
 // vendored-from: Talk2View/talk2view-typescript src/types.ts
-// vendored-commit: b042b005611c59e8bc6fbd304ea1f028d11fb88b
+// vendored-commit: 12d09ce551ab1fb048bfdb65651c1e9aa6826e06
 // local-delta: types.ts.delta.diff
 //
 // A copy of the public TS SDK's types, plus one local delta, declared in full in
@@ -24,7 +24,12 @@ export interface T2VConfig {
   requestTimeout?: number;
   /** Enable debug logging to console. Logs streaming events, tool calls, history, and state changes. */
   debug?: boolean;
-  /** Auto-start an anonymous demo session on first chat() if not authenticated. Defaults to true. */
+  /**
+   * When nobody is signed in, try to start a guest (anonymous) session the
+   * first time a call needs one. It succeeds only where the partner key allows
+   * guests; a refusal emits `anonymousUnavailable`, and the call that needed
+   * the session is not sent. Defaults to true.
+   */
   anonymousAutoStart?: boolean;
 }
 
@@ -176,6 +181,8 @@ export interface ChunkError {
   type: string;
   message: string;
   detail?: string;
+  /** The engine's id for the request this chunk belongs to. */
+  request_id?: string;
 }
 
 /**
@@ -254,6 +261,8 @@ export type ChatEvent =
        */
       errorType?: string;
       detail?: string;
+      /** The engine's id for the failed turn. Quote it when you contact support. */
+      requestId?: string;
     }
   | { type: 'status'; status: string; message: string };
 
@@ -468,6 +477,8 @@ export interface PartnerConfig {
   default_stt_model: string | null;
   default_image_model: string | null;
   system_prompt: string | null;
+  /** Realtime voice agent enabled for this partner (`<VoiceButton>` shows only when true). */
+  voice_agent_enabled?: boolean;
 }
 
 // ── User Preferences ──
@@ -570,4 +581,91 @@ export interface Talk2ViewTheme {
   surfaceHover?: string;
   /** Box-shadow used for elevated surfaces (composer, dropdowns, cards). */
   shadow?: string;
+}
+
+// ── Voice ──
+
+export interface VoiceIceServer {
+  urls: string[];
+  username?: string | null;
+  credential?: string | null;
+}
+
+/** Engine response to `POST /v1/voice/sessions`. The ticket is single-use and short-lived. */
+export interface VoiceSessionResponse {
+  ticket: string;
+  voice_url: string;
+  session_id: string;
+  ice_servers: VoiceIceServer[];
+  expires_in: number;
+  model: string;
+}
+
+export type VoiceState = 'idle' | 'connecting' | 'listening' | 'ended' | 'error';
+
+/** Options for `t2v.voice.start()`. */
+export interface VoiceStartOptions {
+  /**
+   * The integrator's instructions for the page the call starts on: what the
+   * chat sends as its `systemPrompt` each turn. The agent gets it with every
+   * voice turn too, ranked below the platform and partner prompts. The chat's
+   * voice button passes the chat's own `systemPrompt`.
+   */
+  systemPrompt?: string;
+}
+
+export type VoiceEndReason =
+  | 'stopped'
+  | 'disconnected'
+  | 'session_cap'
+  | 'idle'
+  | 'budget_exhausted'
+  | 'auth_expired'
+  | 'error';
+
+export interface VoiceError {
+  /**
+   * Why voice failed.
+   * - Minting the call (engine): `voice_disabled`, `account_required`,
+   *   `no_api_key`, `insufficient_credit`, `credit_check_unavailable`,
+   *   `service_unavailable`, `upstream_error`.
+   * - Connecting (voice service): `voice_at_capacity`, `voice_ticket_invalid`,
+   *   `voice_offer_invalid`, `service_unavailable`, `upstream_error`.
+   * - The SDK and the browser: `auth_expired` (the sign-in expired, before or
+   *   during a call), `mic_unavailable` (no microphone access, or none found),
+   *   `transport_error` (the WebRTC connection failed), `insufficient_credit`
+   *   (credit ran out mid-call), and `voice_error`, the catch-all.
+   *
+   * A type added later is not listed here: fall back to `message`.
+   */
+  type: string;
+  message: string;
+}
+
+export interface VoiceTranscript {
+  role: 'user' | 'bot';
+  text: string;
+  final: boolean;
+}
+
+export interface VoiceToolCall {
+  toolCallId: string;
+  toolName: string;
+  arguments: Record<string, unknown>;
+}
+
+/** A client tool waiting for the end-user (permission: true). `decide` answers it once. */
+export interface VoicePendingApproval extends PendingApproval {
+  decide: (decision: HumanDecision) => void;
+}
+
+export interface VoiceEventMap {
+  [key: string]: unknown[];
+  stateChange: [VoiceState];
+  transcript: [VoiceTranscript];
+  toolCall: [VoiceToolCall];
+  agentState: ['working' | 'idle'];
+  approvalChange: [VoicePendingApproval | null];
+  error: [VoiceError];
+  ended: [VoiceEndReason];
 }

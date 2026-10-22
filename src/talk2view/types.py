@@ -266,7 +266,10 @@ class ChatEvent:
     description: Optional[str] = None
     details: Optional[List[Dict[str, str]]] = None
 
-    # approval_result event: "once" | "always" | "deny"
+    # approval_result event: "once" | "always" | "deny". Its ``content`` is the tool's
+    # result string, set only for a builtin installed with ``result_on_step=True``
+    # (``save_skill``) once an approved call has run (capped at STEP_RESULT_MAX); None
+    # otherwise, so a host tool's result is never exposed here.
     decision: Optional[str] = None
 
     # tool_event event (platform tool lifecycle; needs Capabilities.tool_events)

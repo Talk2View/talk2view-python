@@ -257,7 +257,7 @@ test.describe('a picked-but-unsent attachment does not survive a fresh identity'
     await expect(page.locator('.t2v-composer .t2v-chip')).toHaveCount(1);
     await page.getByRole('button', { name: 'Account' }).click();
     await page.getByRole('button', { name: 'Sign out' }).click();
-    await expect(page.getByRole('heading', { name: 'Sign in' })).toBeVisible();
+    await expect(page.getByRole('heading', { name: 'Welcome to Talk2View' })).toBeVisible();
     await expect(page.locator('.t2v-composer .t2v-chip')).toHaveCount(0);
   });
 });
@@ -374,7 +374,7 @@ test.describe('a draft and a picked file never cross identities', () => {
     await page.getByRole('textbox', { name: 'Message' }).fill('secret draft');
     await page.getByRole('button', { name: 'Account' }).click();
     await page.getByRole('button', { name: 'Sign out' }).click();
-    await expect(page.getByRole('heading', { name: 'Sign in' })).toBeVisible();
+    await expect(page.getByRole('heading', { name: 'Welcome to Talk2View' })).toBeVisible();
     // Already on the Account view (sign-out lands there, not gated): fill the form
     // directly, rather than signIn()'s own first click on the header's Account toggle,
     // which would now match TWO buttons (it, and "Create an account") and toggle away.
@@ -609,7 +609,7 @@ test.describe('reset() must not wipe a draft the end-user is typing', () => {
     await page.getByRole('textbox', { name: 'Message' }).fill('secret draft');
     await page.getByRole('button', { name: 'Account' }).click();
     await page.getByRole('button', { name: 'Sign out' }).click();
-    await expect(page.getByRole('heading', { name: 'Sign in' })).toBeVisible();
+    await expect(page.getByRole('heading', { name: 'Welcome to Talk2View' })).toBeVisible();
     await page.getByLabel('Email').fill('bob@example.com');
     await page.getByLabel('Password').fill('pw');
     await page.getByRole('button', { name: 'Sign in', exact: true }).click();

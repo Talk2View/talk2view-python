@@ -1,5 +1,7 @@
 """``FakeEngine`` plus the account routes the UI server reads: ``GET /v1/config``,
-``GET /v1/models`` with display names, and ``POST /v1/attachments``.
+``GET /v1/models`` with display names, ``POST /v1/attachments``, ``GET /v1/audio/models``
+and ``POST /v1/audio/transcriptions`` (kept in ``transcriptions``; ``transcription_answer``
+set to ``(status, error type, message)`` makes it refuse instead).
 
 ``config_gate``, when set to an unset ``Event``, holds every ``/v1/config`` request until
 the test sets it (to race a refresh against an auth change).
@@ -43,7 +45,15 @@ class AccountEngine(FakeEngine):
         super().__init__(server)
         self.config: Dict[str, Any] = dict(CONFIG)
         self.models: List[Dict[str, Any]] = [dict(m) for m in MODELS]
+        self.audio_models: List[Dict[str, Any]] = [
+            {"id": "scribe_v2", "object": "model", "created": 1, "owned_by": "t2v",
+             "name": "Scribe v2", "supported_languages": ["en", "vi"], "description": "Fast"},
+            {"id": "faster-whisper-base", "object": "model", "created": 2, "owned_by": "t2v"},
+        ]
         self.uploads: List[Dict[str, Any]] = []
+        self.transcriptions: List[Dict[str, Any]] = []
+        self.transcription_answer: Optional[Tuple[int, str, str]] = None
+        self.transcription_text = "hello from the mic"
         self.config_gate: Optional[threading.Event] = None
         self.config_requests = 0
         self.auth_bodies: List[Tuple[str, Dict[str, Any]]] = []
@@ -63,7 +73,10 @@ class AccountEngine(FakeEngine):
             if refusal is not None:
                 return _error(refusal[0], refusal[1], "Refused by the test")
             return super()._handle(request)
-        if request.path not in ("/v1/config", "/v1/models", "/v1/attachments"):
+        if request.path not in (
+            "/v1/config", "/v1/models", "/v1/attachments", "/v1/audio/models",
+            "/v1/audio/transcriptions",
+        ):
             return super()._handle(request)
         auth = request.headers.get("Authorization", "")
         with self.lock:
@@ -80,6 +93,23 @@ class AccountEngine(FakeEngine):
             return _json(self.config)
         if request.path == "/v1/models":
             return _json({"object": "list", "data": self.models})
+        if request.path == "/v1/audio/models":
+            return _json({"object": "list", "data": self.audio_models})
+        if request.path == "/v1/audio/transcriptions":
+            upload = request.files["file"]
+            data = upload.read()
+            record = {
+                "model": request.form.get("model"), "filename": upload.filename,
+                "content_type": upload.mimetype, "size": len(data), "user": user_id,
+            }
+            if request.form.get("language"):
+                record["language"] = request.form["language"]
+            with self.lock:
+                self.transcriptions.append(record)
+                answer = self.transcription_answer
+            if answer is not None:
+                return _error(answer[0], answer[1], answer[2])
+            return _json({"text": self.transcription_text})
         upload = request.files["file"]
         data = upload.read()
         record = {

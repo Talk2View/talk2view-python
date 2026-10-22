@@ -1,28 +1,49 @@
 import { describe, expect, it } from 'vitest';
 import {
+  activeVoiceModel,
   authIdentityKey,
   canShowArguments,
   chipBlocksSend,
   deepEqual,
   defaultModelLabel,
+  dictationFailureText,
   failureText,
   findResult,
   gate,
   hasUnsafeInteger,
+  initials,
   isRunning,
+  languagesFor,
   lastUserId,
+  listedThreads,
   mayAlwaysAllow,
   modelPick,
   needsGuestStart,
   parseArguments,
   providerButtons,
   skillsSection,
+  threadGroups,
   threadMessages,
+  threadTitle,
   toDisplayMessage,
   toPendingApproval,
+  UNTITLED_THREAD,
   uploadFailureText,
+  whenLabel,
 } from '../src/selectors';
-import { EMPTY_STATE, type PageState, type ToolPresentation, type WireMessage } from '../src/wire';
+import { EMPTY_STATE, type PageState, type PartnerConfig, type ToolPresentation, type WireMessage } from '../src/wire';
+
+const EMPTY_CONFIG: PartnerConfig = {
+  default_llm_model: null,
+  default_stt_model: null,
+  default_image_model: null,
+  system_prompt: null,
+  allowed_llm_models: null,
+  allowed_stt_models: null,
+  gated_llm_models: null,
+  gated_stt_models: null,
+  web_search_enabled: false,
+};
 
 const s = (over: Partial<PageState> = {}): PageState => ({ ...EMPTY_STATE, ...over });
 const signedIn = { user: { id: 'u1', email: 'a@b.c' }, isAuthenticated: true, isAnonymous: false };
@@ -117,6 +138,23 @@ describe('results and copy', () => {
     expect(failureText({ type: 'login', error: { type: 'authentication_error', message: 'Invalid email or password' } }))
       .toBe('Invalid email or password');
     expect(failureText({ type: 'x' })).toBe('Something went wrong.');
+  });
+
+  it('an Undo whose name was taken again says so', () => {
+    expect(failureText({ type: 'skillRestore', error: { type: 'skill_exists', message: 'a-b' } }))
+      .toBe("A skill named a-b exists again, so Undo can't bring the deleted one back.");
+  });
+
+  it('a dictationStart busy is never the send-queue copy', () => {
+    expect(failureText({ type: 'dictationStart', error: { type: 'busy', message: 'A dictation is already in progress.' } }))
+      .toBe('A dictation is already in progress.');
+  });
+
+  it('names the two thread errors', () => {
+    expect(failureText({ type: 'threadSwitch', error: { type: 'unknown_thread', message: 'No chat with id x.' } }))
+      .toBe('That chat is gone. Open Chats to pick another.');
+    expect(failureText({ type: 'threadNew', error: { type: 'thread_list_disabled', message: 'no' } }))
+      .toBe('This app keeps no chat history.');
   });
 
   it('names the partner default when it is listed', () => {
@@ -393,5 +431,75 @@ describe('providerButtons', () => {
     delete (old.options.features as Partial<typeof old.options.features>).providerSignIn;
     delete (old.capabilities as Partial<typeof old.capabilities>).oauthProviders;
     expect(providerButtons(old)).toEqual([]);
+  });
+});
+
+describe('threads', () => {
+  const day = 86_400_000;
+  const now = new Date(2026, 8, 24, 15, 0, 0).getTime(); // local 15:00
+  const startOfToday = new Date(2026, 8, 24).getTime();
+  const items = [
+    { id: 'a', title: 'Liver volume', updatedAt: startOfToday + 3_600_000, messageCount: 4 },
+    { id: 'b', title: null, updatedAt: startOfToday - 1000, messageCount: 2 },
+    { id: 'c', title: 'Old', updatedAt: startOfToday - 2 * day, messageCount: 1 },
+    { id: 'd', title: null, updatedAt: now, messageCount: 0 },
+  ];
+
+  it('threadTitle is the current item title, else "New chat"', () => {
+    expect(threadTitle(s({ threads: { currentId: 'a', items } }))).toBe('Liver volume');
+    expect(threadTitle(s({ threads: { currentId: 'b', items } }))).toBe(UNTITLED_THREAD);
+    expect(threadTitle(s({ threads: { currentId: null, items: [] } }))).toBe(UNTITLED_THREAD);
+  });
+
+  it('listedThreads leaves out empty conversations and keeps the order', () => {
+    expect(listedThreads(s({ threads: { currentId: 'd', items } })).map((i) => i.id)).toEqual(['a', 'b', 'c']);
+  });
+
+  it('threadGroups buckets by day, filters by title, newest first', () => {
+    const listed = items.filter((i) => i.messageCount > 0);
+    expect(threadGroups(listed, now, '').map((g) => [g.label, g.items.map((i) => i.id)])).toEqual([
+      ['Today', ['a']], ['Yesterday', ['b']], ['Earlier', ['c']],
+    ]);
+    expect(threadGroups(listed, now, 'LIVER').map((g) => g.items.map((i) => i.id))).toEqual([['a']]);
+    expect(threadGroups(listed, now, 'new chat').map((g) => g.items.map((i) => i.id))).toEqual([['b']]);
+    expect(threadGroups(listed, now, 'zzz')).toEqual([]);
+  });
+});
+
+describe('whenLabel', () => {
+  const now = new Date(2026, 8, 27, 14, 30).getTime();
+  it('same day: the time', () => expect(whenLabel(new Date(2026, 8, 27, 9, 5).getTime(), now)).toMatch(/9:05/));
+  it('this week: the weekday', () => expect(whenLabel(new Date(2026, 8, 25).getTime(), now)).toBe(new Date(2026, 8, 25).toLocaleDateString([], { weekday: 'short' })));
+  it('older: day and month', () => expect(whenLabel(new Date(2026, 7, 3).getTime(), now)).toBe(new Date(2026, 7, 3).toLocaleDateString([], { day: 'numeric', month: 'short' })));
+});
+
+describe('initials', () => {
+  it('two parts', () => expect(initials('ana.huynh@example.com')).toBe('AH'));
+  it('one part', () => expect(initials('ana@example.com')).toBe('A'));
+  it('empty', () => expect(initials('')).toBe(''));
+});
+
+describe('voice settings', () => {
+  const scribe = { id: 'scribe_v2', name: 'Scribe v2', supported_languages: ['vi', 'en'], description: null };
+  const whisper = { id: 'faster-whisper-base', name: null, supported_languages: null, description: null };
+
+  it('languagesFor offers the model languages A–Z by name, else the eight common ones', () => {
+    expect(languagesFor(scribe)).toEqual([['en', 'English'], ['vi', 'Vietnamese']]);
+    expect(languagesFor(whisper).map(([code]) => code)).toEqual(['zh', 'en', 'fr', 'de', 'ja', 'ko', 'es', 'vi']);
+    expect(languagesFor(undefined).length).toBe(8);
+  });
+
+  it('activeVoiceModel is the preference, else the partner default, else faster-whisper-base', () => {
+    const list = [scribe, whisper];
+    expect(activeVoiceModel(s({ audioModels: { list, state: 'ready' }, preferences: { sttModel: 'scribe_v2' } }))?.id).toBe('scribe_v2');
+    expect(activeVoiceModel(s({ audioModels: { list, state: 'ready' }, config: { ...EMPTY_CONFIG, default_stt_model: 'scribe_v2' } }))?.id).toBe('scribe_v2');
+    expect(activeVoiceModel(s({ audioModels: { list, state: 'ready' } }))?.id).toBe('faster-whisper-base');
+    expect(activeVoiceModel(s({ audioModels: { list: [], state: 'ready' } }))).toBeUndefined();
+  });
+
+  it('dictationFailureText', () => {
+    expect(dictationFailureText('no_microphone', '')).toBe('No microphone was found.');
+    expect(dictationFailureText('model_not_allowed', 'Model x is not enabled for this partner')).toBe('Model x is not enabled for this partner');
+    expect(dictationFailureText('weird', '')).toBe('The recording could not be transcribed.');
   });
 });

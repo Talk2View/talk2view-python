@@ -13,14 +13,16 @@
  * - a command that fails (its result, or an HTTP refusal) becomes the `notice` line,
  *   unless a view shows that command's outcome itself;
  * - an identity change clears the notice: it was about the identity before (not signed
- *   out to guest, which is the same visitor carrying on).
+ *   out to guest, which is the same visitor carrying on);
+ * - a turn it sent is timed (`TurnProbe`): Send to the command's POST, and the first text
+ *   op to it painted, reported with one `metrics` command once the turn is over.
  * The page never blocks on a result: results only report.
  */
 // A command id is built with crypto.randomUUID, which Chromium 83 has not: the store
 // installs the polyfill itself rather than trusting whoever imported it to have done so.
 import './polyfills';
 import { applyOps, OpError } from './ops';
-import { authIdentityKey, failureText, findResult, needsGuestStart } from './selectors';
+import { authIdentityKey, failureText, findResult, lastUserId, needsGuestStart } from './selectors';
 import {
   browserEnv,
   connectEvents,
@@ -41,6 +43,15 @@ import {
   type SnapshotEvent,
 } from './wire';
 
+/** One button in the notice line (the Skills view's Undo). */
+export interface NoticeAction {
+  label: string;
+  onClick: () => void;
+}
+
+/** How long a notice with an action (Undo) stays up ("Undo for 6 s"). */
+export const NOTICE_ACTION_MS = 6000;
+
 export interface PageModel {
   state: PageState;
   /** The seq `state` is at; null before the first snapshot. */
@@ -48,6 +59,8 @@ export interface PageModel {
   conn: ConnStatus;
   /** The last command that failed, for the notice line; null when there is none. */
   notice: string | null;
+  /** The notice's one button, if it has one; null otherwise (and always with no notice). */
+  noticeAction: NoticeAction | null;
   /** Commands the server refused over HTTP (never queued, so no result will come), newest last. */
   refusals: CommandResult[];
   stats: { snapshots: number; batches: number; gaps: number; resyncs: number };
@@ -58,6 +71,7 @@ export const INITIAL_MODEL: PageModel = {
   seq: null,
   conn: INITIAL_CONN,
   notice: null,
+  noticeAction: null,
   refusals: [],
   stats: { snapshots: 0, batches: 0, gaps: 0, resyncs: 0 },
 };
@@ -78,7 +92,16 @@ const QUIET = new Set<Command['type']>([
   'oauthStart',
   'oauthCancel',
   'oauthDismissError',
+  'metrics',
+  // The Skills view shows these outcomes itself (a form's field errors, an import's
+  // Replace / Keep both), and turns any other failure into the notice on its own.
+  'skillSave',
+  'skillImport',
+  'skillRead',
 ]);
+/** How long a finished turn waits for its first text to be painted before it is reported
+ * without it (a hidden web view runs no animation frames). */
+export const PAINT_WAIT_MS = 1000;
 /** How long the store watches for a command's result before forgetting it. */
 export const WATCH_MS = 60000;
 const SAW_LIMIT_KEY = 't2v_saw_limit';
@@ -89,6 +112,26 @@ export interface StoreOptions {
   schedule?: (flush: () => void) => void;
   now?: () => number;
   newId?: () => string;
+  /** A monotonic clock for turn timings; defaults to `performance.now()`. */
+  perf?: () => number;
+  /** Runs `fn` on the next animation frame; defaults to `requestAnimationFrame`. */
+  frame?: (fn: () => void) => void;
+}
+
+/**
+ * One turn the page sent, being timed (talk2view.metrics). Nothing the end-user typed or
+ * the model said is kept: marks, and the turn's user message id to name it by.
+ */
+interface TurnProbe {
+  sentAt: number;
+  postAt: number | null;
+  /** The last user message id when Send was pressed: the next new one is this turn's. */
+  before: string | null;
+  userId: string | null;
+  firstOpAt: number | null;
+  firstOpWall: number | null;
+  paintMs: number | null;
+  ended: boolean;
 }
 
 function defaultSchedule(flush: () => void): void {
@@ -120,6 +163,9 @@ export class PageStore {
   private readonly schedule: (flush: () => void) => void;
   private readonly now: () => number;
   private readonly newId: () => string;
+  private readonly perf: () => number;
+  private readonly frame: (fn: () => void) => void;
+  private probe: TurnProbe | null = null;
   private pending: PageModel = INITIAL_MODEL;
   private published: PageModel = INITIAL_MODEL;
   private scheduled = false;
@@ -137,6 +183,8 @@ export class PageStore {
   private identity: string | null = null;
   /** The user id of that identity: null when it was signed out (or before the first). */
   private identityUser: string | null = null;
+  /** The timer that ends a notice's action (`showNotice`), while one is up. */
+  private noticeTimer: ReturnType<typeof setTimeout> | null = null;
 
   constructor(token: string, options: StoreOptions = {}) {
     this.token = token;
@@ -144,6 +192,13 @@ export class PageStore {
     this.schedule = options.schedule ?? defaultSchedule;
     this.now = options.now ?? (() => Date.now());
     this.newId = options.newId ?? (() => crypto.randomUUID());
+    this.perf = options.perf ?? (() => performance.now());
+    this.frame =
+      options.frame ??
+      ((fn) => {
+        if (typeof requestAnimationFrame === 'function') requestAnimationFrame(fn);
+        else setTimeout(fn, 16);
+      });
     this.sawLimit = readSawLimit();
   }
 
@@ -206,6 +261,7 @@ export class PageStore {
       return 'broken';
     }
     this.update({ ...model, state, seq: event.seq, stats: { ...model.stats, batches: model.stats.batches + 1 } });
+    this.follow(state);
     return 'applied';
   }
 
@@ -216,7 +272,7 @@ export class PageStore {
    * Commands are posted one after another: the router runs them in the order they were
    * queued, so a guest start queued first is the guest the next send uses.
    */
-  command(command: Command): string {
+  command(command: Command, onPost?: () => void): string {
     const id = this.newId();
     if (this.pending.conn.phase === 'over') {
       // The chat is over. The server would answer 503 `stopped`, and that refusal would
@@ -225,7 +281,10 @@ export class PageStore {
       return id;
     }
     if (!QUIET.has(command.type)) this.watched.set(id, { type: command.type, at: this.now() });
-    const posted = this.posting.then(() => postCommand(this.token, id, command, this.env));
+    const posted = this.posting.then(() => {
+      if (onPost) onPost();
+      return postCommand(this.token, id, command, this.env);
+    });
     this.posting = posted.then(
       () => undefined,
       () => undefined,
@@ -274,7 +333,70 @@ export class PageStore {
     if (this.pending.seq !== null && needsGuestStart(this.pending.state) && !this.startingGuest()) {
       this.guestStarting = { id: this.command({ type: 'startAnonymous' }), at: this.now() };
     }
-    return this.command({ type: 'send', text, attachmentIds });
+    if (this.pending.seq === null || this.pending.conn.phase === 'over') {
+      return this.command({ type: 'send', text, attachmentIds });
+    }
+    // A probe not reported yet (its send was refused, say) is simply replaced.
+    const probe: TurnProbe = {
+      sentAt: this.perf(),
+      postAt: null,
+      before: lastUserId(this.pending.state),
+      userId: null,
+      firstOpAt: null,
+      firstOpWall: null,
+      paintMs: null,
+      ended: false,
+    };
+    this.probe = probe;
+    return this.command({ type: 'send', text, attachmentIds, timing: true }, () => {
+      probe.postAt = this.perf();
+    });
+  }
+
+  /** Follow the timed turn through a new state: its user message, its first text, its end. */
+  private follow(state: PageState): void {
+    const probe = this.probe;
+    if (!probe || probe.ended) return;
+    if (probe.userId === null) {
+      const id = lastUserId(state);
+      if (id === null || id === probe.before) return;
+      probe.userId = id;
+    }
+    if (probe.firstOpAt === null) {
+      const at = state.messages.findIndex((m) => m.id === probe.userId);
+      if (at >= 0 && state.messages.slice(at + 1).some((m) => m.role === 'assistant' && m.content)) {
+        probe.firstOpAt = this.perf();
+        probe.firstOpWall = this.now();
+        // This frame publishes the state and React renders it; the next one runs after
+        // that render was painted.
+        this.frame(() =>
+          this.frame(() => {
+            if (probe.firstOpAt !== null) probe.paintMs = this.perf() - probe.firstOpAt;
+            this.report(probe, false);
+          }),
+        );
+      }
+    }
+    if (!state.isLoading && state.pendingApproval === null) {
+      probe.ended = true;
+      this.report(probe, false);
+      if (this.probe === probe) this.env.setTimeout(() => this.report(probe, true), PAINT_WAIT_MS);
+    }
+  }
+
+  /** One `metrics` command per timed turn, once it is over and its first text painted. */
+  private report(probe: TurnProbe, force: boolean): void {
+    if (this.probe !== probe || !probe.ended || probe.userId === null) return;
+    if (!force && probe.firstOpAt !== null && probe.paintMs === null) return;
+    this.probe = null;
+    const round = (ms: number | null) => (ms === null ? null : Math.max(0, Math.round(ms * 10) / 10));
+    this.command({
+      type: 'metrics',
+      messageId: probe.userId,
+      sendToPostMs: round(probe.postAt === null ? null : probe.postAt - probe.sentAt),
+      firstOpToPaintMs: round(probe.paintMs),
+      firstOpAtMs: probe.firstOpWall,
+    });
   }
 
   /**
@@ -360,17 +482,33 @@ export class PageStore {
     });
   }
 
-  /** Put a line in the notice (a refused upload, a failed command). */
-  showNotice(notice: string): void {
-    this.setNotice(notice);
+  /**
+   * Put a line in the notice (a refused upload, a failed command). With `action`, the
+   * notice carries that one button (Undo) and goes by itself after NOTICE_ACTION_MS —
+   * unless another notice replaced it first, which that timer then leaves alone.
+   */
+  showNotice(notice: string, action?: NoticeAction): void {
+    this.setNotice(notice, action ?? null);
+    if (this.noticeTimer !== null) {
+      clearTimeout(this.noticeTimer);
+      this.noticeTimer = null;
+    }
+    if (action) {
+      this.noticeTimer = setTimeout(() => {
+        this.noticeTimer = null;
+        if (this.pending.noticeAction === action) this.setNotice(null);
+      }, NOTICE_ACTION_MS);
+    }
   }
 
   dismissNotice(): void {
     this.setNotice(null);
   }
 
-  private setNotice(notice: string | null): void {
-    if (this.pending.notice !== notice) this.update({ ...this.pending, notice });
+  private setNotice(notice: string | null, noticeAction: NoticeAction | null = null): void {
+    if (this.pending.notice !== notice || this.pending.noticeAction !== noticeAction) {
+      this.update({ ...this.pending, notice, noticeAction });
+    }
   }
 
   // ── Publishing ──
@@ -402,7 +540,7 @@ export class PageStore {
     const identity = authIdentityKey(state.auth);
     if (identity !== this.identity) {
       const previousHadUser = this.identityUser !== null;
-      if (previousHadUser && this.pending.notice !== null) this.pending = { ...this.pending, notice: null };
+      if (previousHadUser && this.pending.notice !== null) this.pending = { ...this.pending, notice: null, noticeAction: null };
       this.identity = identity;
       this.identityUser = state.auth.user?.id ?? null;
     }
@@ -436,7 +574,13 @@ export class PageStore {
       const result = findResult(state, id);
       if (result) {
         this.watched.delete(id);
-        if (!result.ok) this.pending = { ...this.pending, notice: failureText(result) };
+        // A row the list still showed for a few ms after the identity or the
+        // list itself moved on (store.ts's own module doc, "the threads slice ... can
+        // arrive after other slices") is a staleness artefact, not a real failure — the
+        // next threads slice (already on its way) drops the row on its own, so a click that
+        // lands on one refreshes quietly instead of alarming over something already fixed.
+        const stale = result.type === 'threadSwitch' && result.error?.type === 'unknown_thread';
+        if (!result.ok && !stale) this.pending = { ...this.pending, notice: failureText(result), noticeAction: null };
       } else if (now - watch.at > WATCH_MS) {
         this.watched.delete(id);
       }

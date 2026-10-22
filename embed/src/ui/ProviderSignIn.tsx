@@ -123,7 +123,10 @@ export function ProviderSignIn({ busy }: { busy: boolean }) {
         <button
           key={p}
           type="button"
-          className={'t2v-btn t2v-btn-block t2v-provider t2v-provider-' + p}
+          // Apple keeps its own black/white override (Apple's guideline, both themes);
+          // Google has none, so it needs the outline variant explicitly — TS draws every
+          // provider button on secondaryClass (outlined) except Apple's own override.
+          className={'t2v-btn t2v-btn-block t2v-provider t2v-provider-' + p + (p === 'google' ? ' t2v-btn-outline' : '')}
           disabled={busy || start.waiting}
           aria-busy={start.waiting}
           onClick={() => {
@@ -174,7 +177,7 @@ function Pending({ provider, containerRef }: { provider: string; containerRef: R
   // named at once (the live line inside it is still empty at that moment), inert to Enter.
   return (
     <div ref={containerRef} className="t2v-stack t2v-oauth-pending" role="group" aria-label={text} tabIndex={-1}>
-      <p className="t2v-strong t2v-oauth-line">
+      <p className="t2v-strong t2v-oauth-line t2v-oauth-title">
         {/* Animated under Reduce Motion too: a frozen loader reads as a hang. */}
         <LoaderCircle className="t2v-spin" aria-hidden="true" size={16} />
         <span role="status" aria-live="polite" aria-atomic="true">
@@ -189,7 +192,7 @@ function Pending({ provider, containerRef }: { provider: string; containerRef: R
       </p>
       <button
         type="button"
-        className="t2v-btn t2v-btn-block"
+        className="t2v-btn t2v-btn-outline t2v-btn-block"
         disabled={cancel.waiting}
         aria-busy={cancel.waiting}
         onClick={() => cancel.send({ type: 'oauthCancel' })}

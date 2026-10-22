@@ -65,10 +65,25 @@ export interface LocalSkill {
   name: string;
   description: string;
   enabled: boolean;
-  origin: 'code' | 'dir';
+  origin: 'code' | 'dir' | 'bundled' | 'user';
   label: string;
   path?: string;
   overridesPlatform?: boolean;
+  /** Absent from an older server. */
+  editable?: boolean;
+  hasExtraFiles?: boolean;
+  problems?: { field: string; message: string }[];
+  /**
+   * A `user`/`bundled` skill's on-disk entry (its folder's name, or a flat file's stem):
+   * what `skillSave.replaces`, `skillDelete`, `skillRestore`, `skillCustomize` and
+   * `skillRead` send as their `name`. Usually equal to `name`; differs for a hand-made
+   * skill whose frontmatter name is not its folder's. Absent from an older server (send
+   * `name` then).
+   */
+  key?: string;
+  /** A bundled skill the end-user's own skill of the same name replaces: listed only
+   * ("Replaced by yours"), never toggled or customized. Absent from an older server. */
+  overridden?: boolean;
 }
 
 export interface PlatformSkill {
@@ -83,6 +98,8 @@ export interface SkillsState {
   registered: string[];
   available: boolean;
   needsSessionReset: boolean;
+  /** Absent from an older server. */
+  store?: { writable: boolean; canOpenFolder: boolean };
 }
 
 // ── App keys (AppState) ──
@@ -131,6 +148,8 @@ export interface Capabilities {
   /** Display order, Apple first. Absent from an older server. */
   oauthProviders?: string[];
   clipboard: boolean;
+  /** Whether the host can show a file picker for `skillImport`. Absent from an older server. */
+  skillImport?: boolean;
 }
 
 export interface ThemeSlice {
@@ -156,7 +175,7 @@ export interface CommandResult {
 }
 
 export interface ChatOptions {
-  welcome: { heading: string | null; suggestions: string[] };
+  welcome: { heading: string | null; subheading?: string | null; suggestions: string[] };
   features: {
     dictation: boolean;
     attachments: boolean;
@@ -165,10 +184,15 @@ export interface ChatOptions {
     threadList: boolean;
     /** "Continue with Apple / Google" (`ChatFeatures.provider_sign_in`). Absent from an older server. */
     providerSignIn?: boolean;
+    /** The Skills view, and the assistant's `save_skill` tool. Absent from an older server. */
+    skills?: boolean;
   };
   allowAnonymous: boolean;
   resetPasswordUrl: string | null;
   footer: string | null;
+  /** The app's name (`ChatOptions.app_name`): the Skills view heads the app's own skills
+   * "From <name>", else "App skills". Absent from an older server. */
+  appName?: string | null;
 }
 
 export interface ToolPresentation {
@@ -180,6 +204,49 @@ export interface ToolPresentation {
 export interface Limits {
   demoLimitReached: boolean;
   anonymousUnavailable: { type: string } | null;
+}
+
+export interface ThreadItem {
+  id: string;
+  /** From the first user message, or the end-user's rename; null until there is one. */
+  title: string | null;
+  /** Epoch ms of the last change: orders the list and the Today/Yesterday/Earlier groups. */
+  updatedAt: number;
+  messageCount: number;
+}
+
+/** `threads`: the conversation list (talk2view.ui.threads). Absent from an older server, and
+ * when `features.threadList` is off. */
+export interface ThreadsSlice {
+  currentId: string | null;
+  items: ThreadItem[];
+}
+
+export interface WireAudioModel {
+  id: string;
+  name: string | null;
+  supported_languages: string[] | null;
+  description: string | null;
+}
+
+/** `audioModels`: `t2v.voice.list_models()`, mirrored (app_state.py `_audio_model`). Always
+ * present; `list` is empty signed out, still loading, or after a failed read. `state`
+ * tells those apart: "loading" until the first read answers,
+ * "ready" once it has (even with nothing in it — a partner's real empty catalogue), or
+ * "error" when the read itself failed; reset to "loading" on every auth change. */
+export interface AudioModelsSlice {
+  list: WireAudioModel[];
+  state: 'loading' | 'ready' | 'error';
+}
+
+/** `dictation`: `talk2view.ui.dictation.Dictation`'s own slice. Absent when the host has no
+ * microphone (`capabilities.audio` false) — there is then no `Dictation` to publish one. */
+export interface DictationSlice {
+  phase: 'idle' | 'listening' | 'transcribing';
+  /** The last clip's text, once, by `seq`; `reason` is `"max_duration"` for the ten-minute
+   * auto-stop (Python only: TS has no cap), else `null` for a manual stop. */
+  transcript: { seq: number; text: string; reason: 'max_duration' | null } | null;
+  error: { type: string; message: string } | null;
 }
 
 /** `snapshot.state`: one flat object; ops address it from the root. */
@@ -203,6 +270,11 @@ export interface PageState {
   options: ChatOptions;
   tools: Record<string, ToolPresentation>;
   limits: Limits;
+  /** Absent from an older server, or when `features.threadList` is off (app_state.py). */
+  threads?: ThreadsSlice;
+  audioModels: AudioModelsSlice;
+  /** Absent from an older server, or when the host has no microphone. */
+  dictation?: DictationSlice;
 }
 
 /** What the page shows before the first snapshot, and fills in for a key a snapshot lacks. */
@@ -232,18 +304,21 @@ export const EMPTY_STATE: PageState = {
       account: true,
       threadList: true,
       providerSignIn: true,
+      skills: true,
     },
     allowAnonymous: true,
     resetPasswordUrl: null,
     footer: null,
+    appName: null,
   },
   tools: {},
   limits: { demoLimitReached: false, anonymousUnavailable: null },
+  audioModels: { list: [], state: 'loading' },
 };
 
 /** The commands the page sends (`POST /command`); `id` is added by the transport. */
 export type Command =
-  | { type: 'send'; text: string; attachmentIds: string[] }
+  | { type: 'send'; text: string; attachmentIds: string[]; timing?: boolean }
   | { type: 'cancel' }
   | {
       type: 'approve';
@@ -267,8 +342,43 @@ export type Command =
   | { type: 'skillsList' }
   | { type: 'skillEnable'; name: string }
   | { type: 'skillDisable'; name: string }
+  | {
+      type: 'skillSave';
+      name?: string;
+      description?: string;
+      instructions?: string;
+      markdown?: string;
+      replaces?: string;
+      overwrite?: boolean;
+    }
+  // `replaces` above and `name` in the four below are the skill's on-disk `key`
+  // (LocalSkill.key), never a path: the SDK refuses anything that is not one of its
+  // listed skills' keys (`unknown_skill`).
+  | { type: 'skillDelete'; name: string }
+  | { type: 'skillRestore'; name: string }
+  | { type: 'skillCustomize'; name: string }
+  | { type: 'skillImport'; resolve?: 'replace' | 'keepBoth'; description?: string }
+  | { type: 'skillOpenFolder' }
+  | { type: 'skillRead'; name: string }
+  | { type: 'threadNew' }
+  | { type: 'threadSwitch'; threadId: string }
+  | { type: 'threadRename'; threadId: string; title: string }
+  | { type: 'threadDelete'; threadId: string }
+  | { type: 'selectSttModel'; modelId: string | null }
+  | { type: 'selectSttLanguage'; language: string | null }
+  | { type: 'dictationStart' }
+  | { type: 'dictationStop' }
+  | { type: 'dictationCancel' }
   | { type: 'oauthStart'; provider: OAuthProvider }
   | { type: 'oauthCancel' }
-  | { type: 'oauthDismissError' };
+  | { type: 'oauthDismissError' }
+  | {
+      /** The page's part of a turn it sent with `timing` (talk2view.metrics). */
+      type: 'metrics';
+      messageId: string;
+      sendToPostMs: number | null;
+      firstOpToPaintMs: number | null;
+      firstOpAtMs: number | null;
+    };
 
 export type { Attachment };

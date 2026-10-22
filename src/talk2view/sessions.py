@@ -6,7 +6,8 @@ from typing import Any, Dict, Iterator, List, Optional
 
 from .cancel import CancelToken
 from .client import T2VClient
-from .tools import T2VTools
+from .metrics import current_turn
+from .tools import STEP_RESULT_MAX, T2VTools
 from .types import (
     Attachment,
     Capabilities,
@@ -186,6 +187,7 @@ class T2VSession:
             self._resume_endpoint(),
             self._result_body(tool_call_id, result, is_error),
             cancel,
+            resume=True,
         )
 
     def respond_to_approval(
@@ -218,7 +220,11 @@ class T2VSession:
         # classify the same decision differently.
         approved = decision.approved
         reported_decision = decision.action if approved else "deny"
+        turn = current_turn()
+        if turn is not None:
+            turn.approval_answered(reported_decision)
 
+        shown_result: Optional[str] = None
         if approval.kind == "engine":
             body = self._approved_body(tool_call_id, approved)
         elif not approved:
@@ -232,14 +238,21 @@ class T2VSession:
             )
             result, is_error = self._tools.execute_tool_call(tool_name, exec_args, cancel)
             body = self._result_body(tool_call_id, result, is_error)
+            # `is True`: only an explicit opt-in records anything (fail closed on any
+            # other answer, a test double's included).
+            if self._tools.records_result(tool_name) is True:
+                # A builtin whose outcome the page shows (save_skill): its short sentence
+                # rides the approval_result event onto the step. Capped defensively.
+                shown_result = str(result)[:STEP_RESULT_MAX]
 
         yield ChatEvent(
             type="approval_result",
             tool_name=tool_name,
             tool_call_id=tool_call_id,
             decision=reported_decision,
+            content=shown_result,
         )
-        yield from self._process_stream(self._resume_endpoint(), body, cancel)
+        yield from self._process_stream(self._resume_endpoint(), body, cancel, resume=True)
 
     def _passive_events(self, chunk: ChatCompletionChunk) -> Iterator[ChatEvent]:
         """Events that never end or pause the stream."""
@@ -291,17 +304,23 @@ class T2VSession:
         endpoint: str,
         body: Dict[str, Any],
         cancel: Optional[CancelToken] = None,
+        resume: bool = False,
     ) -> Iterator[ChatEvent]:
         """Process an SSE stream with automatic tool call handling.
 
         Uses an iterative loop (not recursion) so multi-tool-call
         workflows don't grow the stack or hold open nested connections.
+        ``resume``: the first request is already a ``/resume`` (for the turn's timing).
         """
         current_endpoint = endpoint
         current_body = body
+        turn = current_turn()
 
         while True:
             resume_body: Dict[str, Any] = {}
+            if turn is not None and resume:
+                turn.begin_resume()
+            resume = True  # every later request is a resume
 
             for chunk in self._client.stream_request(
                 current_endpoint, current_body, cancel=cancel
@@ -312,6 +331,9 @@ class T2VSession:
                 # The stream ends here without [DONE]; the caller answers
                 # through respond_to_approval().
                 if chunk.approval:
+                    if turn is not None:
+                        turn.tool_interrupt(chunk.approval.tool_name, "engine")
+                        turn.approval_asked()
                     yield ChatEvent(
                         type="approval_required",
                         kind="engine",
@@ -331,11 +353,15 @@ class T2VSession:
                     tool_name = chunk.interrupt.tool_name
                     tool_call_id = chunk.interrupt.tool_call_id
                     args = chunk.interrupt.arguments
+                    if turn is not None:
+                        turn.tool_interrupt(tool_name)
 
                     check = self._tools.check_permission(tool_name, args, cancel)
 
                     if check.action == "require_approval":
                         # Pause for a human decision (approval card).
+                        if turn is not None:
+                            turn.approval_asked()
                         yield ChatEvent(
                             type="approval_required",
                             kind="client",
@@ -350,6 +376,8 @@ class T2VSession:
                         # Programmatic denial — tell the model, run nothing.
                         # Allow-listed like respond_to_approval(): only "allow"
                         # executes, so an unrecognised action denies.
+                        if turn is not None:
+                            turn.tool_outcome("denied")
                         resume_body = self._result_body(
                             tool_call_id,
                             "Permission denied: {}".format(

@@ -1,5 +1,5 @@
 // The page's vendored TS SDK files (src/vendor/sdk/) against their source of truth, the
-// public github.com/Talk2View/talk2view-typescript repository. Run in CI (the sdk-embed
+// public github.com/Talk2View/talk2view-typescript repository. Run in CI (the embed
 // job); it needs no token, because the repository is public:
 //
 //   node scripts/check-vendored-sdk.mjs

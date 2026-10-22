@@ -14,6 +14,7 @@ import type {
   CompleteAttachment,
   ExternalStoreAdapter,
   PendingAttachment,
+  ThreadMessageLike,
 } from '@assistant-ui/react';
 import { toThreadMessage } from '@sdk/assistant-ui/convert';
 import { ATTACHMENT_ACCEPT } from '@sdk/constants';
@@ -145,8 +146,41 @@ export function useEmbedRuntime(store: PageStore, model: PageModel): AssistantRu
   const attachments = useAttachmentAdapter(store, attachmentsOn);
 
   const convertMessage = useCallback(
-    (m: WireMessage, index: number) =>
-      toThreadMessage(toDisplayMessage(m), { isLast: index === messages.length - 1, pendingApproval, error }),
+    (m: WireMessage, index: number): ThreadMessageLike => {
+      try {
+        const display = toDisplayMessage(m);
+        return toThreadMessage(display, { isLast: index === messages.length - 1, pendingApproval, error });
+      } catch (err) {
+        // convert.ts (vendored, never
+        // edited locally — see its own header) reads every stored step's `status` and
+        // `name` unguarded. The SDK now rejects a malformed one before it reaches a
+        // stored snapshot (`talk2view.state.valid_tool_step_dict`, wired into
+        // `conversations.py` and `controller.py`), but a LIVE turn's steps have no such
+        // validator in front of them, and `useExternalStoreRuntime` calls this from
+        // `useEmbedRuntime`, above `<Shell>` in `ui/App.tsx` — no boundary around
+        // `<Thread>` alone ever sees this throw (React error boundaries only catch a
+        // DESCENDANT's render, never an ancestor's). Caught here, one message at a
+        // time, so one bad message shows its own row instead of taking the whole
+        // runtime — and so the whole page — down with it.
+        //
+        // `toDisplayMessage(m)` is inside this try too, not just
+        // `toThreadMessage` — its own `m.steps.map(toStep)` (selectors.ts) throws just as
+        // hard on a live `steps` that is truthy but not a list at all (only a buggy
+        // foreign server would ever send one; this SDK's own reducer only builds lists
+        // and the store rejects a non-list on read). Since `toDisplayMessage` may be what
+        // threw, the fallback below is built from the raw wire message `m`, never from
+        // its (possibly never-produced) `DisplayMessage`.
+        console.error('[t2v] a message could not be shown:', err);
+        const createdAt = new Date(m.timestamp);
+        return {
+          id: m.id,
+          role: m.role,
+          createdAt: Number.isNaN(createdAt.getTime()) ? new Date(0) : createdAt,
+          content: [{ type: 'text', text: 'This message could not be shown.' }],
+          ...(m.role === 'assistant' ? { status: { type: 'complete', reason: 'stop' } as const } : {}),
+        };
+      }
+    },
     [messages.length, pendingApproval, error],
   );
 

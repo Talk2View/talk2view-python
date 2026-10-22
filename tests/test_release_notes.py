@@ -22,7 +22,7 @@ def test_readme_documents_the_parity_refresh() -> None:
         "get_valid_access_token",
         "DEFAULT_MODEL",
         "supported_languages",
-        "One process per token file",
+        "Re-reads when the file changes underneath it",
         "match on `err.type`",
         "ChatOptions",
         "ToolPresentation",

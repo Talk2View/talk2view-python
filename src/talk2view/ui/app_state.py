@@ -12,10 +12,20 @@ collide with these). Shapes reuse the TypeScript SDK's types where one exists:
   id | null}``; ``selected`` is the end-user's own choice when it is listed, else null
   (the host's or the partner's default applies). Every auth change empties it until the
   refresh lists the new identity's models;
+- ``audioModels``: ``{"list": [TS AudioModel: id, name, supported_languages,
+  description], "state": "loading" | "ready" | "error"}``, the speech-to-text models
+  Settings offers ("Voice model"); read alongside ``models`` (signed in only, emptied and
+  put back to "loading" on every auth change), independent of ``capabilities.audio`` (a
+  host with no microphone still shows the field, for a stored pick or a future host).
+  ``state`` is "ready" once the list has actually been read, even when it comes back
+  empty (a real answer with nothing in it, distinct from "loading"), and "error" when the
+  read itself failed;
 - ``config``: the engine's partner config, TS ``PartnerConfig`` keys (snake_case, the nine
   fields), or null while signed out or when it could not be read;
-- ``capabilities``: ``{"audio": false, "oauth": bool, "oauthProviders": [str],
-  "clipboard": bool}``, with ``oauth`` true when ``features.provider_sign_in`` is on and
+- ``capabilities``: ``{"audio": bool, "oauth": bool, "oauthProviders": [str],
+  "clipboard": bool}``, ``audio`` exactly "the host's ``audio()`` returned a capture"
+  (``AppState(..., audio=...)``, read once, never changes after), with ``oauth`` true
+  when ``features.provider_sign_in`` is on and
   the engine offers at least one provider (``T2VAuth.desktop_sign_in_providers``, read on
   every refresh, signed in or not; a failed read keeps the last answer, which starts as
   none, and is tried again ``PROBE_RETRY_S`` later, at most ``PROBE_RETRIES`` times in a
@@ -79,10 +89,11 @@ from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple
 from ..controller import DEMO_LIMIT_REACHED
 from ..errors import T2VError
 from ..preferences import UserPreferences
-from ..types import DEFAULT_MODEL, Model, User
+from ..types import DEFAULT_MODEL, AudioModel, Model, User
 from .host import HostAdapter, Theme
 from .hub import EventHub
 from .options import ChatOptions
+from .wire import CommandFailure
 
 if TYPE_CHECKING:
     from .. import Talk2View
@@ -92,8 +103,8 @@ __all__ = ["APP_KEYS", "MAX_RESULTS", "AppState", "UnknownModelError"]
 logger = logging.getLogger("talk2view.ui")
 
 APP_KEYS = (
-    "auth", "models", "config", "capabilities", "theme", "preferences", "results", "options",
-    "tools", "limits",
+    "auth", "models", "audioModels", "config", "capabilities", "theme", "preferences",
+    "results", "options", "tools", "limits", "threads", "dictation",
 )
 MAX_RESULTS = 20
 #: A failed providers probe is tried again this long after (at most PROBE_RETRIES times
@@ -169,6 +180,16 @@ def _model(model: Model) -> Dict[str, Any]:
     }
 
 
+def _audio_model(model: AudioModel) -> Dict[str, Any]:
+    languages = model.supported_languages
+    return {
+        "id": model.id,
+        "name": model.name,
+        "supported_languages": list(languages) if languages is not None else None,
+        "description": model.description,
+    }
+
+
 class AppState:
     """The app slices of one ``UIServer``. Single use: once ``detach()`` has run (the
     server stopped, or its start failed), ``attach()`` raises ``RuntimeError``, so a
@@ -185,6 +206,8 @@ class AppState:
         host: HostAdapter,
         *,
         options: Optional[ChatOptions] = None,
+        audio: bool = False,
+        skill_import: bool = False,
     ) -> None:
         if options is None:
             options = ChatOptions()
@@ -198,10 +221,18 @@ class AppState:
         self._options = options
         self._t2v = t2v
         self._host = host
+        self._audio = audio
+        self._skill_import = skill_import
         self._lock = threading.Lock()
         self._hub: Optional[EventHub] = None
         self._results: List[Dict[str, Any]] = []
         self._models: List[Dict[str, Any]] = []
+        self._audio_models: List[Dict[str, Any]] = []
+        #: "loading" until the first refresh answers, then "ready" (the list, maybe empty)
+        #: or "error" (the call failed); reset to "loading" on every auth change, the same
+        #: as the list itself (the page must not read an empty or failed catalogue
+        #: as "still loading" forever).
+        self._audio_models_state = "loading"
         self._selected: Optional[str] = None
         self._applied: Optional[str] = None  # the model this object last handed to Talk2View
         self._generation = 0  # +1 per auth change: a refresh from before it is dropped
@@ -284,6 +315,7 @@ class AppState:
                 hub.set_slice("tools", tools)
                 self._record_limits_locked()
                 self._record_models_locked()
+                self._record_audio_models_locked()
                 self._record_auth_locked()
                 self._record_preferences_locked()
         except BaseException:
@@ -384,6 +416,27 @@ class AppState:
             self._selected = None
             self._record_models_locked()
 
+    def select_stt_model(self, model_id: Optional[str]) -> None:
+        """The end-user's voice model (None: the partner's default). Not checked against
+        the list: the engine refuses a model it does not offer at transcription time
+        (``model_not_allowed``), and a stored pick outside the list is shown as an orphan
+        by the page (TS settings.tsx). Router thread only (it notifies listeners)."""
+        t2v = self._t2v
+        if t2v is None:
+            raise CommandFailure(
+                "account_unavailable", "This chat is not connected to a Talk2View account."
+            )
+        t2v.preferences.update(stt_model=model_id)
+
+    def select_stt_language(self, language: Optional[str]) -> None:
+        """The spoken-language hint (None: detect automatically). Router thread only."""
+        t2v = self._t2v
+        if t2v is None:
+            raise CommandFailure(
+                "account_unavailable", "This chat is not connected to a Talk2View account."
+            )
+        t2v.preferences.update(stt_language=language)
+
     def note_anonymous_unavailable(self, error_type: str) -> None:
         """The engine refused a guest session (``type`` is its reason): the ``limits``
         slice says so. A refusal that a real account's sign-in overtook is moot and
@@ -452,6 +505,9 @@ class AppState:
                 # one stays on show, or selectable, until the refresh lists the new one's.
                 self._models, self._selected = [], None
                 self._record_models_locked()
+                self._audio_models = []
+                self._audio_models_state = "loading"
+                self._record_audio_models_locked()
                 if self._hub is not None:
                     self._hub.set_slice("config", None)
                 shown = self._shown
@@ -536,10 +592,11 @@ class AppState:
         offered = self._offered_locked()
         if self._hub is not None:
             self._hub.set_slice("capabilities", {
-                "audio": False,  # reserved: HostAdapter.audio() is not wired yet
+                "audio": self._audio,
                 "oauth": bool(offered),
                 "oauthProviders": offered,
                 "clipboard": self._clipboard,
+                "skillImport": self._skill_import,
             })
 
     def _record_limits_locked(self) -> None:
@@ -561,6 +618,13 @@ class AppState:
     def _record_models_locked(self) -> None:
         if self._hub is not None:
             self._hub.set_slice("models", {"list": list(self._models), "selected": self._selected})
+
+    def _record_audio_models_locked(self) -> None:
+        if self._hub is not None:
+            self._hub.set_slice(
+                "audioModels",
+                {"list": list(self._audio_models), "state": self._audio_models_state},
+            )
 
     def _record_preferences_locked(self) -> None:
         wire: Dict[str, str] = {}
@@ -608,10 +672,15 @@ class AppState:
         identity = _identity(t2v)  # whom these requests are for
         config: Optional[Dict[str, Any]] = None
         models: List[Dict[str, Any]] = []
+        audio_models: List[Dict[str, Any]] = []
         listed = False  # the list was read: what it lacks is known to be gone
+        audio_listed = False  # ditto, for audioModels.state
+        signed_in_now = False  # set inside the same narrowed `if` as `t2v`'s real uses,
+        # so mypy keeps narrowing `t2v` there instead of losing it behind this flag
         if t2v is not None and self._options.features.provider_sign_in and not self._probe_absent:
             self._probe_providers(t2v)
         if t2v is not None and self._signed_in(t2v):
+            signed_in_now = True
             try:
                 config = dataclasses.asdict(t2v.get_config())  # never starts a guest session
             except Exception as exc:
@@ -628,6 +697,11 @@ class AppState:
                 listed = True
             except Exception as exc:
                 logger.warning("could not list the models: %s", exc)
+            try:
+                audio_models = [_audio_model(m) for m in t2v.voice.list_models()]
+                audio_listed = True
+            except Exception as exc:
+                logger.warning("could not list the voice models: %s", exc)
         with self._lock:
             if self._stopping or generation != self._generation:
                 return  # an auth change overtook this refresh; its own refresh follows
@@ -636,6 +710,10 @@ class AppState:
                 # ours is still running): their delivery brings a refresh of its own.
                 return
             self._models = models
+            self._audio_models = audio_models
+            if signed_in_now:
+                self._audio_models_state = "ready" if audio_listed else "error"
+            self._record_audio_models_locked()
             preferred = self._preferred_model_locked()
             self._selected = preferred if self._listed_locked(preferred) else None
             if t2v is not None and self._selected is not None and self._selected != self._applied:

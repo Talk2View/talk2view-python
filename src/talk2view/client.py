@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import codecs
 import contextlib
 import json
 import logging
 import math
 import socket
 import threading
+import urllib.request
 from functools import partial
 from types import TracebackType
 from typing import (
@@ -15,11 +17,13 @@ from typing import (
     Callable,
     Dict,
     Iterator,
+    List,
     Literal,
     Optional,
     Tuple,
     Type,
     TypedDict,
+    cast,
 )
 
 import httpx
@@ -32,8 +36,9 @@ from .errors import (
     error_for_type,
     parse_retry_after,
 )
+from .metrics import _TurnRecorder, current_turn
 from .storage import TokenStorage
-from .streaming import parse_sse_stream
+from .streaming import parse_sse_text
 from .types import ChatCompletionChunk
 
 # Silence httpx/httpcore request logging (noisy at INFO/DEBUG level)
@@ -49,7 +54,7 @@ _NO_REFRESH = object()
 
 DEFAULT_BASE_URL = "https://engine.talk2view.com"
 #: Keep in step with ``[project].version`` in pyproject.toml (test_release_surface checks).
-SDK_VERSION = "0.3.0"
+SDK_VERSION = "0.4.0"
 # Sent as X-T2V-Client so the engine can tell which SDK release a request came from.
 CLIENT_HEADER = "talk2view-python/" + SDK_VERSION
 #: Seconds for a request, and to connect a stream (TS ``requestTimeout``, 30 s).
@@ -63,6 +68,24 @@ STREAM_TIMEOUT = 300.0
 #: The most ``request_bytes`` downloads: above the engine's 20 MB attachment cap
 #: (``max_attachment_size_mb``), so any real attachment fits.
 MAX_DOWNLOAD_BYTES = 25 * 1024 * 1024
+#: Seconds an idle pooled connection is kept for the next request. httpx's default, 5 s,
+#: is shorter than a user's think time between messages, so the first request of nearly
+#: every turn paid a new TCP + TLS handshake. The engine's ALB would keep one for 900 s
+#: (``idle_timeout`` in packages/server/deploy/aws/alb.tf), but a NAT or firewall on the
+#: way may forget an idle connection sooner without telling either end, and a request sent
+#: on it then waits out its whole timeout (300 s for a stream). So: 300 s, under most such
+#: timers, with TCP keepalives (``_TCP_KEEPALIVE``) refreshing them and exposing a dead
+#: peer, which makes the pool discard the connection before reusing it.
+KEEPALIVE_EXPIRY = 300.0
+#: TCP keepalive on every connection: the first probe after 60 s idle, then every 10 s,
+#: and the peer is dead after 3 unanswered ones.
+_TCP_KEEPALIVE = (60, 10, 3)
+#: How long, and how many bytes, the rest of a stream the reader stopped early is read for
+#: (see ``_drain``). What follows the event a reader stops at is normally just the end of
+#: the body, already on its way; anything longer is not worth waiting for, since a new
+#: connection costs well under a second.
+_DRAIN_SECONDS = 1.0
+_DRAIN_MAX_BYTES = 64 * 1024
 
 # Set by this client alone: a caller's ``headers=`` may not replace them (any case).
 _PROTECTED_HEADERS = frozenset({"authorization", "x-t2v-partner-key"})
@@ -170,6 +193,102 @@ def _abort_response(response: httpx.Response) -> None:
         sock.shutdown(socket.SHUT_RDWR)
 
 
+def _drain(response: httpx.Response, raw: Iterator[bytes]) -> None:
+    """Read what is left of a stream the reader has stopped taking events from, so that
+    closing it returns the connection to the pool.
+
+    The engine's streams are chunked: after ``[DONE]`` comes the zero-length chunk that
+    ends the body, and a paused stream ends just after the interrupt the session stops at
+    to run the tool. httpcore only pools a connection whose response was read to its end;
+    one closed earlier is dropped, and the next request of the turn opened a new one.
+
+    ``raw`` iterates ``response.stream``, which, unlike httpx's ``iter_*``, does not close
+    the response when the body runs out. So nothing here returns the connection to the
+    pool: that happens only when ``_do_stream`` leaves its ``with`` block and closes the
+    response, after this function has unregistered its deadline and ``_do_stream`` the
+    stream's cancel closer. ``unregister()`` is final, so neither can shut down a socket
+    the pool has since handed to another request.
+
+    Bounded by ``_DRAIN_SECONDS`` (a timer shuts the socket down, as a cancel does) and
+    ``_DRAIN_MAX_BYTES``. A drain that stops short or fails leaves the response unfinished,
+    so closing it drops the connection instead of pooling it half-read.
+    """
+    deadline = CancelToken()
+    unregister = deadline.on_cancel(partial(_abort_response, response))
+    timer = threading.Timer(_DRAIN_SECONDS, deadline.cancel)
+    timer.daemon = True
+    try:
+        timer.start()
+        left = _DRAIN_MAX_BYTES
+        for data in raw:
+            left -= len(data)
+            if left <= 0:
+                break
+    except Exception:  # noqa: S110 — aborted or broken: closing drops the connection
+        pass
+    finally:
+        timer.cancel()
+        unregister()
+
+
+def _decoded(raw: Iterator[bytes]) -> Iterator[str]:
+    """``raw`` as text. SSE is always UTF-8; a character split across two reads is
+    reassembled rather than corrupted."""
+    decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
+    for data in raw:
+        text = decoder.decode(data)
+        if text:
+            yield text
+    tail = decoder.decode(b"", final=True)
+    if tail:
+        yield tail
+
+
+def _httpx_would_proxy() -> bool:
+    """Whether httpx would set up a proxy for a client left to read the proxy settings.
+
+    The same reading as httpx's ``get_environment_proxies``: ``urllib.request.getproxies()``
+    (the ``*_proxy`` environment variables, or, when none is set, the macOS or Windows
+    system settings), of which only an ``http``, ``https`` or ``all`` proxy counts, and
+    none at all under ``NO_PROXY=*``. ``NO_PROXY`` alone names no proxy."""
+    proxies = urllib.request.getproxies()
+    if any(host.strip() == "*" for host in proxies.get("no", "").split(",")):
+        return False
+    return any(proxies.get(scheme) for scheme in ("http", "https", "all"))
+
+
+def _tcp_keepalive_options() -> List[Tuple[int, int, int]]:
+    """The TCP keepalive socket options this platform accepts (``_TCP_KEEPALIVE``).
+
+    The names differ (``TCP_KEEPALIVE`` is macOS's idle time) and some are missing, or
+    refused, on older systems; httpcore applies every option to every new socket and a
+    refused one would fail the connection, so each is tried on a scratch socket first."""
+    idle_s, interval_s, count = _TCP_KEEPALIVE
+    wanted = [(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)]
+    idle = getattr(socket, "TCP_KEEPIDLE", None)
+    if idle is None:
+        idle = getattr(socket, "TCP_KEEPALIVE", None)
+    if idle is not None:
+        wanted.append((socket.IPPROTO_TCP, idle, idle_s))
+    if hasattr(socket, "TCP_KEEPINTVL"):
+        wanted.append((socket.IPPROTO_TCP, socket.TCP_KEEPINTVL, interval_s))
+    if hasattr(socket, "TCP_KEEPCNT"):
+        wanted.append((socket.IPPROTO_TCP, socket.TCP_KEEPCNT, count))
+    usable: List[Tuple[int, int, int]] = []
+    try:
+        probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    except OSError:
+        return usable
+    with probe:
+        for option in wanted:
+            try:
+                probe.setsockopt(*option)
+            except OSError:
+                continue
+            usable.append(option)
+    return usable
+
+
 class T2VClient:
     """Low-level HTTP client handling auth headers, token refresh, and SSE streaming."""
 
@@ -201,9 +320,28 @@ class T2VClient:
         # hops paid a fresh TCP + TLS handshake (~100-300ms on a WAN link).
         # httpx.Client keeps connections alive between requests and is safe to
         # share across threads for request dispatch.
-        self._http = httpx.Client(
-            base_url=self._base_url, timeout=self._request_timeout
+        # A stream is drained to its end once read (`_drain`), or its connection could
+        # not be pooled; an idle connection is kept for `KEEPALIVE_EXPIRY`, with TCP
+        # keepalives. Those need a transport of our own, but httpx ignores the proxy
+        # settings for a client given one: behind a proxy the client keeps httpx's own
+        # transports, which honour them, and only the expiry applies.
+        limits = httpx.Limits(
+            max_connections=100,
+            max_keepalive_connections=20,
+            keepalive_expiry=KEEPALIVE_EXPIRY,
         )
+        if _httpx_would_proxy():
+            self._http = httpx.Client(
+                base_url=self._base_url, timeout=self._request_timeout, limits=limits
+            )
+        else:
+            self._http = httpx.Client(
+                base_url=self._base_url,
+                timeout=self._request_timeout,
+                transport=httpx.HTTPTransport(
+                    limits=limits, socket_options=_tcp_keepalive_options()
+                ),
+            )
         # Called when a rejected refresh has just cleared the stored session (T2VAuth
         # installs it, to tell its listeners). Per thread: a depth of held blocks, and
         # whether one of them has a sign-out waiting for it to end.
@@ -511,6 +649,9 @@ class T2VClient:
         headers = self._headers(
             requires_auth=True, accept="text/event-stream"
         )
+        # Uncompressed: `_read_stream` decodes the wire bytes itself, which is what lets
+        # the connection be pooled only after the stream's closers are gone.
+        headers["Accept-Encoding"] = "identity"
         content = json.dumps(body)
         timeout = httpx.Timeout(self._request_timeout, read=STREAM_TIMEOUT)
 
@@ -537,13 +678,18 @@ class T2VClient:
         """
         if cancel is not None and cancel.cancelled:
             raise Cancelled()
+        turn = current_turn()  # the controller turn this stream belongs to, if any
 
         while True:
             unauthorized: Optional[httpx.Response] = None
+            if turn is not None:
+                turn.request_sent()
             try:
                 with self._http.stream(
                     "POST", endpoint, headers=headers, content=content, timeout=timeout,
                 ) as response:
+                    if turn is not None:
+                        turn.response_headers(response.headers)
                     # Bind THIS response into the closer: the retry rebinds
                     # `response`, and a closer must only ever abort the
                     # response it was registered for.
@@ -559,7 +705,7 @@ class T2VClient:
                             response.read()
                             unauthorized = response
                         else:
-                            yield from self._read_stream(response)
+                            yield from self._read_stream(response, turn, cancel)
                     finally:
                         if unregister is not None:
                             unregister()
@@ -606,9 +752,17 @@ class T2VClient:
             raise Cancelled()
 
     def _read_stream(
-        self, response: httpx.Response
+        self,
+        response: httpx.Response,
+        turn: Optional[_TurnRecorder] = None,
+        cancel: Optional[CancelToken] = None,
     ) -> Iterator[ChatCompletionChunk]:
-        """Yield the chunks of a streamed response, or raise for its status."""
+        """Yield the chunks of a streamed response, or raise for its status. Each chunk is
+        noted on ``turn`` (its timing) first.
+
+        Once the events end (``[DONE]``, or the caller closing this generator), the rest of
+        the body is drained so the connection goes back to the pool. Not after a cancel or
+        a read error: that connection must be dropped, never pooled half-read."""
         if not response.is_success:
             response.read()
             error = self._parse_error(response)
@@ -622,7 +776,32 @@ class T2VClient:
                 retry_after=error["retry_after"],
             )
 
-        yield from parse_sse_stream(response)
+        encoding = response.headers.get("content-encoding", "identity").strip().lower()
+        if encoding not in ("", "identity"):
+            # A guard only: `stream_request` asks for `identity`, and the engine never
+            # compresses a stream. A server that did anyway can only be read through
+            # httpx's decoder: not drained, so the connection is dropped when the reader
+            # stops early, and on a body read to its end `iter_text()` pools it before
+            # this stream's cancel closer is unregistered (the race `_drain` avoids).
+            for chunk in parse_sse_text(response.iter_text()):
+                if turn is not None:
+                    turn.chunk(chunk)
+                yield chunk
+            return
+
+        # See `_drain`: unlike `iter_text()`, this never closes the response itself.
+        raw = iter(cast(httpx.SyncByteStream, response.stream))
+        try:
+            for chunk in parse_sse_text(_decoded(raw)):
+                if turn is not None:
+                    turn.chunk(chunk)
+                yield chunk
+        except GeneratorExit:
+            if cancel is None or not cancel.cancelled:
+                _drain(response, raw)
+            raise
+        if cancel is None or not cancel.cancelled:
+            _drain(response, raw)
 
     def _try_refresh_token(
         self, failed_access_token: Optional[str]

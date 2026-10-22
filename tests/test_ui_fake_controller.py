@@ -18,7 +18,14 @@ from talk2view import (
 )
 from talk2view.state import OpBatch, initial_snapshot
 from talk2view.ui.hub import EventHub
-from talk2view.ui.testing import _REFLUSH_LIMIT, DEFAULT_REPLY, FakeController, words
+from talk2view.ui.testing import (
+    _REFLUSH_LIMIT,
+    DEFAULT_REPLY,
+    DEMO_PLAN,
+    DEMO_PLAN_NOTES,
+    FakeController,
+    words,
+)
 
 from .controller_fakes import BatchLog
 
@@ -138,6 +145,23 @@ def test_fail_prefix_ends_in_an_error_and_clear_error_clears_it() -> None:
     assert controller.snapshot()["error"] is None
 
 
+@pytest.mark.parametrize("text, plan", [("/plan", DEMO_PLAN), ("/plan-notes", DEMO_PLAN_NOTES)])
+def test_plan_prefix_gives_the_reply_a_plan_and_finishes(text: str, plan: str) -> None:
+    controller = fake()
+    controller.send(text)
+    snap = controller.snapshot()
+    reply = snap["messages"][-1]
+    assert reply["plan"] == plan
+    assert reply["content"] == "Hello there world"
+    assert reply["isStreaming"] is False and snap["isLoading"] is False
+
+
+def test_an_ordinary_turn_has_no_plan() -> None:
+    controller = fake()
+    controller.send("hi")
+    assert "plan" not in controller.snapshot()["messages"][-1]
+
+
 def test_retry_edit_and_clear() -> None:
     controller = fake()
     controller.send("first")
@@ -161,6 +185,25 @@ def test_retry_edit_and_clear() -> None:
     snap = controller.snapshot()
     expected = dict(initial_snapshot(), seq=snap["seq"], threadId=None)
     assert snap == expected
+
+
+def test_conversation_replaced_fires_for_restore_and_a_snapshot_carrying_exchange() -> None:
+    """FakeController mirrors the real ChatController's contract
+    exactly (this module's own docstring), so a host built and tested against the fake
+    (the runtime guard, the 3D Slicer extension's own e2e backend) sees the same notice."""
+    controller = fake()
+    seen: List[str] = []
+    controller.on("conversationReplaced", lambda: seen.append("replaced"))
+    empty = {"messages": [], "history": [], "threadId": None}
+
+    controller.restore_conversation(empty)  # type: ignore[arg-type]
+    assert seen == ["replaced"]
+
+    controller.exchange_conversation(empty, epoch=0)  # type: ignore[arg-type]
+    assert seen == ["replaced", "replaced"]
+
+    controller.exchange_conversation(None, epoch=0)  # export-only: nothing replaced
+    assert seen == ["replaced", "replaced"]
 
 
 def test_clear_is_allowed_while_busy_and_abandons_the_run() -> None:

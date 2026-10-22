@@ -6,11 +6,12 @@ import inspect
 import json
 import logging
 import re
-from typing import Any, Callable, Dict, List, Optional, Tuple, Union
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple, Union
 
 from .cancel import Cancelled, CancelToken
 from .client import T2VClient
 from .dispatch import Dispatcher, InlineDispatcher, run_on_main
+from .metrics import current_turn
 from .types import (
     ClientToolSchema,
     PermissionCheck,
@@ -460,6 +461,10 @@ def tool(
 # ── T2VTools class ──
 
 
+#: The most of a ``result_on_step`` builtin's result recorded on its step (its handler's
+#: short sentence; the cap is defensive).
+STEP_RESULT_MAX = 500
+
 class T2VTools:
     """Tool management — handler registry, schema registration with the server."""
 
@@ -468,7 +473,21 @@ class T2VTools:
         self._dispatcher: Dispatcher = dispatcher if dispatcher is not None else InlineDispatcher()
         self._handlers: Dict[str, ToolHandler] = {}
         self._schemas: List[ClientToolSchema] = []
+        # The SDK's own tools (``save_skill``): never sent by ``register()`` -- there is
+        # no host list to put them in -- but ridden along by every register/re-register
+        # call, after the host's own schemas (see `_all_schemas`).
+        self._builtins: List[ClientToolSchema] = []
         self._permissions: Dict[str, ToolPermission] = {}
+        # Builtins added with ``allow_always=False`` (``save_skill``: no "always
+        # allow" -- every save is the end-user's own click). Checked by ``allows_always``;
+        # a host tool (``handle()``/``register_from_functions()``) is never in here, so it
+        # keeps today's "always" behaviour.
+        self._no_always: Set[str] = set()
+        # Builtins added with ``result_on_step=True`` (``save_skill``): the handler's
+        # result string is also recorded on the call's step in the chat state, so the page
+        # can say what happened ("Saved skill 'x'" / "Not saved ..."). Checked by
+        # ``records_result``; a host tool is never in here, so its step keeps no result.
+        self._result_on_step: Set[str] = set()
 
     @property
     def dispatcher(self) -> Dispatcher:
@@ -498,6 +517,70 @@ class T2VTools:
         """
         self._set_permission(tool_name, permission)
         self._handlers[tool_name] = handler
+
+    def add_builtin(
+        self,
+        schema: ClientToolSchema,
+        handler: ToolHandler,
+        permission: ToolPermission,
+        *,
+        allow_always: bool = True,
+        result_on_step: bool = False,
+    ) -> None:
+        """A tool the SDK itself provides (``save_skill``). Its schema rides with every
+        ``register()``/``re_register()`` call, after the host's own schemas
+        (``_all_schemas()``); a host tool of the same name wins there. Its HANDLER and
+        PERMISSION are only installed when the host has not already claimed that name
+        (``handle()``, ``register_from_functions()``, or an earlier ``add_builtin``): a
+        host that registers "save_skill" itself, in either order relative to this call,
+        keeps its own handler and permission -- never silently swapped for the SDK's.
+        Calling this again for a builtin's own name (re-installing it) still updates it.
+
+        Unlike ``handle()``, ``permission`` has no default: the caller states it
+        explicitly every time (``save_skill`` is always installed with ``True``).
+
+        ``allow_always=False`` (``save_skill``: there is no "always allow" —
+        every save is the end-user's own click) means an "always" decision for this tool
+        is never remembered in ``alwaysAllowedTools`` — see ``allows_always()``. It only
+        takes effect together with the handler/permission install above: a host that has
+        already claimed the name governs its own "always" behaviour too.
+
+        ``result_on_step=True`` (``save_skill``) records the handler's result string on
+        the call's step once an approved call has run (see ``records_result()``), under
+        the same rule: a host that owns the name keeps today's behaviour (no result).
+        """
+        already_builtin = any(s.name == schema.name for s in self._builtins)
+        host_owns = schema.name in self._handlers and not already_builtin
+        if not host_owns:
+            self._set_permission(schema.name, permission)
+            self._handlers[schema.name] = handler
+            if allow_always:
+                self._no_always.discard(schema.name)
+            else:
+                self._no_always.add(schema.name)
+            if result_on_step:
+                self._result_on_step.add(schema.name)
+            else:
+                self._result_on_step.discard(schema.name)
+        self._builtins = [s for s in self._builtins if s.name != schema.name] + [schema]
+
+    def allows_always(self, tool_name: str) -> bool:
+        """Whether an "always" decision for ``tool_name`` may be remembered
+        (``alwaysAllowedTools``), so a later call skips the approval card. False only for
+        a builtin installed with ``add_builtin(..., allow_always=False)`` (``save_skill``):
+        every host tool -- ``handle()``, ``register_from_functions()``, or a
+        name it reclaimed from a builtin (see ``add_builtin``) -- allows it, matching the
+        behaviour from before builtins existed.
+        """
+        return tool_name not in self._no_always
+
+    def records_result(self, tool_name: str) -> bool:
+        """Whether an approved call's result string is recorded on its step (the chat
+        state's ``steps[].result``). True only for a builtin installed with
+        ``add_builtin(..., result_on_step=True)`` (``save_skill``); a host tool's result
+        stays between the SDK and the engine, as before builtins existed.
+        """
+        return tool_name in self._result_on_step
 
     def _set_permission(self, tool_name: str, permission: Optional[ToolPermission]) -> None:
         if permission is not None and not isinstance(permission, bool) and not callable(
@@ -529,11 +612,18 @@ class T2VTools:
             for t in tools
         ]
 
-    def _post_schemas(self, tools: List[ClientToolSchema]) -> RegisterToolsResponse:
+    def _all_schemas(self) -> List[ClientToolSchema]:
+        """The host's own registered schemas, plus any builtin (``add_builtin``) not
+        shadowed by a host schema of the same name -- what every register/re-register
+        call actually sends, and what ``validate_args`` checks calls against."""
+        names = {s.name for s in self._schemas}
+        return list(self._schemas) + [s for s in self._builtins if s.name not in names]
+
+    def _post_schemas(self) -> RegisterToolsResponse:
         data = self._client.request(
             "/v1/tools/register",
             method="POST",
-            body={"tools": self._payload(tools)},
+            body={"tools": self._payload(self._all_schemas())},
         )
         return RegisterToolsResponse(
             registered=data.get("registered", []),
@@ -544,21 +634,21 @@ class T2VTools:
         """Register tool schemas with the server.
 
         Does NOT register handlers — use handle() or register_from_functions()
-        for that.
+        for that. Any builtin (``add_builtin``) rides along, after these.
         """
         self._schemas = list(tools)
-        return self._post_schemas(self._schemas)
+        return self._post_schemas()
 
     def re_register(self) -> Optional[RegisterToolsResponse]:
-        """Re-send the already-registered schemas to the server.
+        """Re-send the already-registered schemas (plus any builtin) to the server.
 
         Tools are session-scoped on the engine, so a new session (first chat,
         clear, or recovery after the engine lost the old one) needs them again.
-        Returns None when nothing has been registered.
+        Returns None when nothing has been registered -- no host schema and no builtin.
         """
-        if not self._schemas:
+        if not self._all_schemas():
             return None
-        return self._post_schemas(self._schemas)
+        return self._post_schemas()
 
     def register_from_functions(
         self,
@@ -594,9 +684,10 @@ class T2VTools:
         registered schema). String enum values are matched case-insensitively
         and NORMALISED IN PLACE to the schema's casing, so a model echoing the
         UI label "Center" for the enum value "center" does not cost a
-        reject-and-retry round trip.
+        reject-and-retry round trip. Checked against ``_all_schemas()``, so a builtin
+        (``add_builtin``) is validated too, not just the host's own schemas.
         """
-        schema = next((s for s in self._schemas if s.name == tool_name), None)
+        schema = next((s for s in self._all_schemas() if s.name == tool_name), None)
         if schema is None:
             return None
 
@@ -661,17 +752,28 @@ class T2VTools:
             return (json.dumps({"error": "Tool arguments must be an object"}), True)
 
         clean_args = strip_null_args(args)
+        turn = current_turn()
 
         validation_error = self.validate_args(tool_name, clean_args)
         if validation_error:
+            if turn is not None:
+                turn.tool_outcome("invalid")
             return (json.dumps({"error": validation_error}), True)
 
+        def call() -> Any:
+            return handler(**clean_args)
+
+        if turn is not None:
+            call = turn.wrap_handler(call)  # marks its start and end on the main thread
+            turn.tool_dispatched()
         try:
-            result = run_on_main(self._dispatcher, lambda: handler(**clean_args), cancel)
+            result = run_on_main(self._dispatcher, call, cancel)
             if not isinstance(result, str):
                 result = json.dumps(result)
             return (result, False)
         except Cancelled:
+            if turn is not None:
+                turn.tool_outcome("cancelled")
             raise  # a stop is not a tool failure — never report it to the model
         except Exception as exc:
             return (json.dumps({"error": str(exc)}), True)
@@ -725,10 +827,12 @@ class T2VTools:
         return tool_name in self._handlers
 
     def get_description(self, tool_name: str) -> str:
-        """Description of a registered tool ('' when unknown)."""
-        schema = next((s for s in self._schemas if s.name == tool_name), None)
+        """Description of a registered tool, host or builtin ('' when unknown). Read from
+        ``_all_schemas()`` so a builtin's approval card (``sessions.py``'s
+        ``approval_required``) carries its real description instead of an empty one."""
+        schema = next((s for s in self._all_schemas() if s.name == tool_name), None)
         return schema.description if schema is not None else ""
 
     def get_registered(self) -> List[ClientToolSchema]:
-        """Get all registered tool schemas."""
-        return list(self._schemas)
+        """Get all registered tool schemas, host and builtin."""
+        return self._all_schemas()
