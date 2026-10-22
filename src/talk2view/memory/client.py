@@ -689,9 +689,9 @@ class T2VMemory:
                 self._settled_revision = self.store.revision()
         if not applied:
             logger.info(
-                "Memory: memory changed during consolidation, so its result (%d entries) was"
-                " not applied; consolidation stays due",
-                len(entries),
+                "Memory: memory changed during consolidation, so its result (%s) was not"
+                " applied; consolidation stays due",
+                _count(len(entries), "entry", "entries"),
             )
             return False
         logger.debug(
@@ -856,9 +856,10 @@ def _reasons(dropped: List[str]) -> str:
     return " (" + ", ".join(sorted(set(dropped))) + ")" if dropped else ""
 
 
-def _count(number: int, noun: str) -> str:
-    """A count, for the log: "1 fact", "0 facts", "2 facts"."""
-    return "{} {}{}".format(number, noun, "" if number == 1 else "s")
+def _count(number: int, noun: str, plural: Optional[str] = None) -> str:
+    """A count, for the log: "1 fact", "0 facts", "2 facts"; ``plural`` when adding an "s"
+    won't do ("1 entry", "2 entries")."""
+    return "{} {}".format(number, noun if number == 1 else plural or noun + "s")
 
 
 __all__ = ["NO_RESULTS", "QUERY_MAX", "SEARCH_LIMIT", "T2VMemory"]

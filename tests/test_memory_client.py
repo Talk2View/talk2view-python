@@ -1467,8 +1467,8 @@ def test_consolidate_applies_entries_merges_and_expiries(
 def test_consolidation_is_dropped_when_memory_changed_meanwhile(
     engine: MemoryCallsEngine, memory: T2VMemory, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """R55: an entry added while the call ran would be deleted by a result that never saw
-    it, so nothing of the result is applied, one count-only line says so, and the next
+    """An entry added while the call ran would be deleted by a result that never saw it, so
+    nothing of the result is applied, one count-only line says so, and the next
     consolidation goes ahead."""
     memory.store.apply_ops([add("Likes tea")], source="said")
 
@@ -1476,8 +1476,9 @@ def test_consolidation_is_dropped_when_memory_changed_meanwhile(
         memory.store.apply_ops([add("Works at Canva", "work")], source="said")
 
     engine.during = meanwhile
+    kept = {"id": "e1", "topic": "preferences", "text": "Likes tea", "locked": False}
     engine.replies["consolidate"].append(
-        {"entries": [], "merge_facts": [], "expire_facts": [], "model": "m"}
+        {"entries": [kept], "merge_facts": [], "expire_facts": [], "model": "m"}
     )
     with caplog.at_level(logging.INFO, logger="talk2view"):
         assert memory.consolidate() is False
@@ -1486,13 +1487,20 @@ def test_consolidation_is_dropped_when_memory_changed_meanwhile(
     assert _logged(caplog) == [
         (
             logging.INFO,
-            "Memory: memory changed during consolidation, so its result (0 entries) was not"
+            "Memory: memory changed during consolidation, so its result (1 entry) was not"
             " applied; consolidation stays due",
         )
     ]
     engine.during = None
     assert memory.consolidate() is True
     assert _texts(memory) == ["Likes tea", "Works at Canva"]
+
+
+def test_log_counts_take_the_singular_for_one() -> None:
+    count = memory_client._count
+    entries = [count(n, "entry", "entries") for n in (0, 1, 2)]
+    assert entries == ["0 entries", "1 entry", "2 entries"]
+    assert [count(n, "fact") for n in (0, 1, 2)] == ["0 facts", "1 fact", "2 facts"]
 
 
 def test_a_call_keeps_the_zone_it_began_with(
