@@ -38,6 +38,12 @@ based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   with FTS5, on Python 3.11 and newer, for a host whose `sqlite3` lacks FTS5. Without
   either, the store keeps its search index in plain tables (`store.backend == "scan"`).
 
+### Security
+
+- The chat page bundles `dompurify` 3.4.17 and `zod` 4.6.6, past DOMPurify's
+  GHSA-cg2g-xh64-v4q7, GHSA-mrv2-3pqr-j5jr and GHSA-c6gr-qvv4-5v3f, and Zod's
+  GHSA-mrhx-c7xc-m3w5.
+
 ## [0.4.0] - 2026-10-22
 
 ### Added
