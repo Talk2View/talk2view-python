@@ -5,6 +5,12 @@ based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## Unreleased
 
+### Security
+
+- The chat page bundles `dompurify` 3.4.17 and `zod` 4.6.6, past DOMPurify's
+  GHSA-cg2g-xh64-v4q7, GHSA-mrv2-3pqr-j5jr and GHSA-c6gr-qvv4-5v3f, and Zod's
+  GHSA-mrhx-c7xc-m3w5.
+
 ## [0.4.0] - 2026-10-22
 
 ### Added

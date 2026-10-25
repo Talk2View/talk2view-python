@@ -103,7 +103,9 @@ jobs:
 
   embed:
     name: Chat page — lint, test & end to end
-    runs-on: ubuntu-latest
+    # Pinned: ubuntu-latest is Ubuntu 26.04, where Playwright 1.60 can't install Chromium.
+    # Move it back once the pinned Playwright supports the newer image.
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     defaults:
       run:
