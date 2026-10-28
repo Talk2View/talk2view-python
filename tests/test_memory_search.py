@@ -797,7 +797,9 @@ def test_an_excerpt_never_passes_recalled_text_max() -> None:
     rng = random.Random(20261028)  # noqa: S311 - test data, not cryptography
     vocabulary = ["kayak", "glacier", "crampons", "boots", "x" * 30, "y"] + _words(40)
     terms = query_terms("kayak glacier crampons boots")
-    longest = 0
+    # The longest one window can be: two ellipses, the longer label and its width.
+    one_window = 2 * len(ELLIPSIS) + len(" Assistant: ") + EXCERPT_WIDTH
+    longest = widened = 0
     for _ in range(300):
         sides = [
             " ".join(rng.choice(vocabulary) for _ in range(rng.randint(0, 400)))
@@ -807,10 +809,13 @@ def test_an_excerpt_never_passes_recalled_text_max() -> None:
             continue
         text = round_hit("r:c1:1", 0.0, sides[0], sides[1], "2026-10-21", "", terms).text
         longest = max(longest, len(text))
+        widened += len(text) > one_window
     # Three ellipses, two labels, the gap's space and the two widths: 988.
     bound = 3 * len(ELLIPSIS) + 2 * len(" Assistant: ") + 1 + EXCERPT_WIDTH + REPLY_EXCERPT_WIDTH
     assert longest <= bound == 988
     assert longest <= RECALLED_TEXT_MAX
+    # Many rounds got the reply's window too, so the bound was put to the test.
+    assert one_window == 614 and widened > 100, widened
 
 
 # ── the search_memory result (§8.4) ──
@@ -858,6 +863,7 @@ def test_search_result_json_limits_and_shape(store: MemoryStore) -> None:
     }
     assert counts == {None: 12, 0: 8, 1: 8, 8: 8, 9: 9, 20: 20, 100: 20}
     assert [result_limit(limit) for limit in (None, -5, 3, 15, 21)] == [12, 8, 8, 15, 20]
+    assert result_limit(9.5) == 9 and isinstance(result_limit(9.5), int)  # type: ignore[arg-type]
     assert store.search("kayak", limit=0) == []
     assert json.loads(store.search_result_json("the of")) == {"results": []}
     # Characters as themselves, not escaped: the cap counts code points.

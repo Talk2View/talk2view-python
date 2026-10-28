@@ -656,11 +656,12 @@ def _side_label(text: str, start: int, end: int, user_text: str, assistant_text:
 
 def result_limit(limit: Optional[int]) -> int:
     """How many results a ``search_memory`` call gets: RESULT_LIMIT_DEFAULT (12) when it
-    names no ``limit``, else its ``limit`` kept within RESULT_LIMIT_MIN (8) and
-    RESULT_LIMIT_MAX (20). A model that asks for a few would miss what a few more hold."""
+    names no ``limit``, else its ``limit``, as a whole number, kept within RESULT_LIMIT_MIN
+    (8) and RESULT_LIMIT_MAX (20). A model that asks for a few would miss what a few more
+    hold."""
     if limit is None:
         return RESULT_LIMIT_DEFAULT
-    return max(RESULT_LIMIT_MIN, min(limit, RESULT_LIMIT_MAX))
+    return max(RESULT_LIMIT_MIN, min(int(limit), RESULT_LIMIT_MAX))
 
 
 def search_memory_result(
