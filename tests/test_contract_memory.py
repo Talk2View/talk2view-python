@@ -64,6 +64,10 @@ def test_every_case_has_one_outcome() -> None:
     for case in SEARCHES["cases"]:
         assert all(isinstance(ref, str) for ref in case["expect"]), case["id"]
         assert len(case.get("expect_results", case["expect"])) == len(case["expect"]), case["id"]
+    tool_ids = [case["id"] for case in SEARCHES["tool_cases"]]
+    assert len(set(tool_ids)) == len(tool_ids) and not set(tool_ids) & set(_ids(SEARCHES))
+    for case in SEARCHES["tool_cases"]:
+        assert len({"expect", "expect_count"} & set(case)) == 1, case["id"]
     for case in PAYLOADS["cases"]:
         assert set(case["expect"]) == {"status", "entries", "recent", "recalled"}, case["id"]
 
@@ -145,6 +149,34 @@ def test_the_store_replays_the_search_case(
     assert [hit.ref for hit in hits] == case["expect"]
     if "expect_results" in case:
         assert json.loads(result_json(hits))["results"] == case["expect_results"]
+
+
+@pytest.mark.parametrize("backend", BACKENDS)
+@pytest.mark.parametrize(
+    "case", SEARCHES["tool_cases"], ids=[case["id"] for case in SEARCHES["tool_cases"]]
+)
+def test_the_store_replays_the_search_memory_case(
+    case: Dict[str, Any], backend: Backend, tmp_path: Path
+) -> None:
+    """A search_memory call's whole result: its limit, its dates and the fallback when they
+    find nothing, and its note."""
+    zone = _zone(case)
+    arguments = case["arguments"]
+    with closing(_built(tmp_path, backend, SEARCHES["corpus"])) as store:
+        result = json.loads(
+            store.search_result_json(
+                arguments["query"],
+                from_date=arguments.get("from_date"),
+                to_date=arguments.get("to_date"),
+                limit=arguments.get("limit"),
+                exclude_conversation=case.get("exclude_conversation"),
+                timezone=zone,
+            )
+        )
+    if "expect_count" in case:
+        assert len(result["results"]) == case["expect_count"]
+    else:
+        assert result == case["expect"]
 
 
 # ── payload_cases.json ──

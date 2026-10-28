@@ -25,9 +25,9 @@ from ..client import T2VClient
 from ..errors import T2VError
 from ..types import ChatEvent
 from . import bodies, days
-from .models import IDLE_EXTRACT_S, RESULT_LIMIT_MAX, AppliedBatch
+from .models import IDLE_EXTRACT_S, RESULT_LIMIT_DEFAULT, AppliedBatch
 from .ops import date_problem
-from .search import result_json
+from .search import result_json, result_limit
 from .store import MemoryStore, _timestamp, _utc, utc_now
 from .worker import Cooldown, Ticker, Worker
 
@@ -37,7 +37,7 @@ logger = logging.getLogger("talk2view.memory")
 # model's reply can't be parsed. The calls run in the background, so wait longer than that.
 CALL_TIMEOUT_S = 180.0
 # search_memory's arguments, as the engine's definition of the tool bounds them.
-SEARCH_LIMIT = 8
+SEARCH_LIMIT = RESULT_LIMIT_DEFAULT  # 12; a limit is kept within 8 to 20
 QUERY_MIN = 2
 QUERY_MAX = 200
 
@@ -253,7 +253,7 @@ class T2VMemory:
         the engine defines the tool, and the device answers it, as the memory is here. The
         current conversation is left out, as the agent has it in context already. A null
         argument counts as left out (the engine sends null for one the model left out):
-        ``limit`` is 8 by default and kept within 1 to 20, and ``query`` is cut to 200 code
+        ``limit`` is 12 by default and kept within 8 to 20, and ``query`` is cut to 200 code
         points. A malformed argument gets a short ``{"error": ...}`` result that never
         quotes memory; nothing raises. Paused, incognito or closed, nothing is found
         (NO_RESULTS)."""
@@ -832,11 +832,9 @@ def _search_arguments(
         if date_problem(value):
             return name + " must be a YYYY-MM-DD date", "", None, None, SEARCH_LIMIT
     limit = args.get("limit")
-    if limit is None:
-        limit = SEARCH_LIMIT
-    elif isinstance(limit, bool) or not isinstance(limit, int):
+    if limit is not None and (isinstance(limit, bool) or not isinstance(limit, int)):
         return "limit must be a whole number", "", None, None, SEARCH_LIMIT
-    return None, query, from_date, to_date, max(1, min(limit, RESULT_LIMIT_MAX))
+    return None, query, from_date, to_date, result_limit(limit)
 
 
 def _name(error: BaseException) -> str:

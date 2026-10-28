@@ -48,17 +48,28 @@ from talk2view.memory import (
     index_tokens,
     normalise_for_index,
 )
+from talk2view.memory import client as client_module
 from talk2view.memory import payload as payload_module
 from talk2view.memory import search as search_module
 from talk2view.memory import store as store_module
-from talk2view.memory.models import FACT_TEXT_MAX, RECALLED_TEXT_MAX, RESULT_CHARS_MAX
+from talk2view.memory.models import (
+    FACT_TEXT_MAX,
+    RECALLED_TEXT_MAX,
+    RESULT_CHARS_MAX,
+    RESULT_LIMIT_DEFAULT,
+    RESULT_LIMIT_MAX,
+    RESULT_LIMIT_MIN,
+)
 from talk2view.memory.payload import keep_within, recalled_items
 from talk2view.memory.search import (
+    ANY_DATE,
     CJK_STOP_BIGRAMS,
     ELLIPSIS,
+    EXCERPT_WIDTH,
     PRESELECT_FLOOR,
     QUERY_BIGRAMS_MAX,
     QUERY_TERMS_MAX,
+    REPLY_EXCERPT_WIDTH,
     best_first,
     bm25_scan,
     build_fts_query,
@@ -71,9 +82,12 @@ from talk2view.memory.search import (
     matched_units,
     preselected,
     query_terms,
+    result_json,
+    result_limit,
     round_hit,
     round_text,
     rrf,
+    search_memory_result,
     strong_match,
     term_frequency,
 )
@@ -725,10 +739,84 @@ def test_an_excerpt_says_whose_words_it_starts_in(store: MemoryStore) -> None:
     assert hit.text == reply
 
 
+def _glacier_hit(reply: str) -> str:
+    """The text of a round hit for "glacier crampons boots", asked about in a short question
+    whose first window reaches some 530 code points into ``reply``."""
+    terms = query_terms("glacier crampons boots")
+    question = "Give me a packing list for the glacier hike, please."
+    return round_hit("r:c1:1", 0.0, question, reply, "2026-10-21", "", terms).text
+
+
+def test_an_excerpt_shows_the_replys_best_match_the_first_window_misses() -> None:
+    """D5 (R115): a round's first window is around its first match, as before; when the
+    reply holds matches that window doesn't show whole, a second window of
+    REPLY_EXCERPT_WIDTH shows the best of them: the most distinct terms within its width.
+    The gap between the two shows as " … Assistant: ", the first window's closing ellipsis
+    left out, and the excerpt keeps within RECALLED_TEXT_MAX."""
+    lone = "Bring crampons."  # one term, alone
+    dense = "Bring stiff boots and crampons for the glacier."  # three
+    reply = " ".join(_words(100) + [lone] + _words(60, 100) + [dense] + _words(60, 160))
+    text = _glacier_hit(reply)
+    first, second = text.split(" " + ELLIPSIS + " Assistant: ")
+    assert first.startswith("User: Give me a packing list for the glacier hike, please.")
+    assert not first.endswith(ELLIPSIS) and first.endswith("word065")
+    assert dense in second and second.endswith(ELLIPSIS)
+    assert len(second) <= REPLY_EXCERPT_WIDTH + 1
+    assert lone not in text  # the best match is the densest, not the first
+    assert len(text) <= RECALLED_TEXT_MAX
+
+
+def test_of_two_equal_matches_the_second_window_shows_the_earlier() -> None:
+    monday = "Bring boots and crampons on Monday."
+    friday = "Bring boots and crampons on Friday."
+    reply = " ".join(_words(100) + [monday] + _words(60, 100) + [friday] + _words(60, 160))
+    text = _glacier_hit(reply)
+    assert "on Monday." in text and "on Friday." not in text
+
+
+def test_windows_that_would_overlap_are_one() -> None:
+    """A second window that would start before the first ends joins it: one window from the
+    first's start to the second's end, so no gap shows."""
+    reply = " ".join(_words(70) + ["boots crampons glacier"] + _words(100, 70))
+    text = _glacier_hit(reply)
+    assert ELLIPSIS + " Assistant:" not in text
+    assert text.startswith("User: Give me") and "boots crampons glacier" in text
+    assert text.endswith(ELLIPSIS) and len(text) <= EXCERPT_WIDTH + REPLY_EXCERPT_WIDTH + 1
+
+
+def test_no_second_window_when_the_first_shows_the_replys_matches() -> None:
+    reply = " ".join(["Bring boots and crampons."] + _words(200))
+    text = _glacier_hit(reply)
+    assert text.count("Assistant:") == 1 and "Bring boots and crampons." in text
+    assert len(text) <= EXCERPT_WIDTH + 1
+
+
+def test_an_excerpt_never_passes_recalled_text_max() -> None:
+    """The two widths and their labels and ellipses keep any round's excerpt within
+    RECALLED_TEXT_MAX (1,000), so a long round is never too long to be recalled."""
+    rng = random.Random(20261028)  # noqa: S311 - test data, not cryptography
+    vocabulary = ["kayak", "glacier", "crampons", "boots", "x" * 30, "y"] + _words(40)
+    terms = query_terms("kayak glacier crampons boots")
+    longest = 0
+    for _ in range(300):
+        sides = [
+            " ".join(rng.choice(vocabulary) for _ in range(rng.randint(0, 400)))
+            for _ in range(2)
+        ]
+        if not any(sides):
+            continue
+        text = round_hit("r:c1:1", 0.0, sides[0], sides[1], "2026-10-21", "", terms).text
+        longest = max(longest, len(text))
+    # Three ellipses, two labels, the gap's space and the two widths: 988.
+    bound = 3 * len(ELLIPSIS) + 2 * len(" Assistant: ") + 1 + EXCERPT_WIDTH + REPLY_EXCERPT_WIDTH
+    assert longest <= bound == 988
+    assert longest <= RECALLED_TEXT_MAX
+
+
 # ── the search_memory result (§8.4) ──
 
 
-def test_result_json_capped_at_8000_with_note(store: MemoryStore) -> None:
+def test_result_json_capped_at_12000_with_note(store: MemoryStore) -> None:
     for number in range(30):
         text = " ".join(["kayak"] + _words(120))
         _say(store, "c{}".format(number), text, days_ago=number, title="Chat {}".format(number))
@@ -757,19 +845,72 @@ def test_search_result_json_limits_and_shape(store: MemoryStore) -> None:
             "Paddled kayak route {}.".format(number),
             days_ago=number - 1,
         )
-    assert store.search_result_json("kayak", limit=1) == (
+    _know(store, "f98", "Rowed the canal once.")
+    assert store.search_result_json("canal") == (
         '{"results":[{"date":"2026-10-21","conversation":"","kind":"fact",'
-        '"text":"Paddled kayak route 1."}]}'
+        '"text":"Rowed the canal once."}]}'
     )
-    assert len(json.loads(store.search_result_json("kayak"))["results"]) == 8
-    # The limit is kept within 1 to 20.
-    assert len(json.loads(store.search_result_json("kayak", limit=100))["results"]) == 20
-    assert len(json.loads(store.search_result_json("kayak", limit=0))["results"]) == 1
+    # 12 when the call names no limit; else its limit, kept within 8 to 20.
+    assert (RESULT_LIMIT_MIN, RESULT_LIMIT_DEFAULT, RESULT_LIMIT_MAX) == (8, 12, 20)
+    counts = {
+        limit: len(json.loads(store.search_result_json("kayak", limit=limit))["results"])
+        for limit in (None, 0, 1, 8, 9, 20, 100)
+    }
+    assert counts == {None: 12, 0: 8, 1: 8, 8: 8, 9: 9, 20: 20, 100: 20}
+    assert [result_limit(limit) for limit in (None, -5, 3, 15, 21)] == [12, 8, 8, 15, 20]
     assert store.search("kayak", limit=0) == []
     assert json.loads(store.search_result_json("the of")) == {"results": []}
     # Characters as themselves, not escaped: the cap counts code points.
     _know(store, "f99", "Flew to " + TOKYO + " in May.")
     assert TOKYO in store.search_result_json(TOKYO)
+
+
+def test_dates_that_find_nothing_fall_back_to_any_date(store: MemoryStore) -> None:
+    """D5 (R117): a search whose dates find nothing searches again without them, and its
+    results come with a note saying so. Dates that find something, or a search that finds
+    nothing on any date, carry no note."""
+    _know(store, "f1", "Booked the dentist for a cleaning.", days_ago=10)
+    _say(store, "c1", "The dentist moved my appointment.", "Noted.", days_ago=20, title="Teeth")
+    assert ANY_DATE == "nothing matched on those dates, so these results are from any date"
+    widened = json.loads(
+        store.search_result_json("dentist", from_date="2026-10-20", to_date="2026-10-21")
+    )
+    assert widened == {
+        "results": json.loads(store.search_result_json("dentist"))["results"],
+        "note": ANY_DATE,
+    }
+    assert [item["kind"] for item in widened["results"]] == ["fact", "excerpt"]
+    found = json.loads(store.search_result_json("dentist", from_date="2026-10-11"))
+    assert set(found) == {"results"} and [i["kind"] for i in found["results"]] == ["fact"]
+    assert json.loads(store.search_result_json("orthodontist", to_date="2026-10-01")) == {
+        "results": []
+    }
+
+
+def test_a_widened_result_that_overflows_gives_both_notes(store: MemoryStore) -> None:
+    for number in range(30):
+        text = " ".join(["kayak"] + _words(120))
+        _say(store, "c{}".format(number), text, days_ago=number + 30, title="Chat")
+    result = json.loads(store.search_result_json("kayak", limit=20, from_date="2026-10-15"))
+    assert result["note"] == ANY_DATE + "; truncated"
+    assert 0 < len(result["results"]) < 20
+
+
+def test_search_memory_result_searches_again_only_for_dates_that_find_nothing() -> None:
+    calls: List[Tuple[Optional[str], Optional[str]]] = []
+    hit = SearchHit(
+        kind="fact", date="2026-10-21", conversation="", text="Kayak.", score=1.0, ref="f1"
+    )
+
+    def search(start: Optional[str], end: Optional[str]) -> List[SearchHit]:
+        calls.append((start, end))
+        return [hit] if start is None and end is None else []
+
+    assert json.loads(search_memory_result(search, "2026-10-01", None))["note"] == ANY_DATE
+    assert calls == [("2026-10-01", None), (None, None)]
+    calls.clear()
+    assert search_memory_result(search, None, None) == result_json([hit])
+    assert calls == [(None, None)]
 
 
 # ── pre-selection and the turn payload (§8.1) ──
@@ -1900,7 +2041,7 @@ def test_search_exports_the_plans_interfaces_and_what_the_store_uses() -> None:
     and nothing else."""
     used = {"build_fts_query", "query_terms", "rrf", "bm25_scan", "excerpt"}
     used |= {"PRESELECT_FLOOR", "PRESELECT_MIN_TERMS"}
-    for module in (store_module, payload_module):
+    for module in (store_module, payload_module, client_module):
         for node in ast.walk(ast.parse(inspect.getsource(module))):
             if isinstance(node, ast.ImportFrom) and node.level == 1 and node.module == "search":
                 used |= {alias.name for alias in node.names}

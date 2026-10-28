@@ -56,7 +56,6 @@ from .models import (
     ENTRIES_CHARS_MAX,
     ENTRY_MAX,
     FACT_TEXT_MAX,
-    RESULT_LIMIT_MAX,
     SUMMARY_TEXT_MAX,
     SUMMARY_TITLE_MAX,
     TOPICS,
@@ -84,9 +83,10 @@ from .search import (
     fts_query,
     fuse,
     query_terms,
-    result_json,
+    result_limit,
     round_hit,
     round_ref,
+    search_memory_result,
 )
 from .text import code_points, normalise_dedupe, normalise_for_index
 
@@ -1514,9 +1514,10 @@ class MemoryStore:
         in ``timezone`` (``days.bounds``: a day the calendar lacks, such as 2026-04-31,
         reads as the nearest real one). The two lists are fused by reciprocal rank fusion
         (k = 60), a tie going to the newer. A fact comes whole; a round as an excerpt of
-        about 600 code points around its first match. Each hit has its date, the day in
-        ``timezone``, and its conversation's name ("" when it has none). A query with no
-        terms finds nothing.
+        about 600 code points around its first match, and about 360 more around the
+        reply's best match when the first window misses it (``search.round_hit``). Each
+        hit has its date, the day in ``timezone``, and its conversation's name ("" when it
+        has none). A query with no terms finds nothing.
 
         ``exclude_conversation``, the conversation the user is in, leaves out its rounds and
         the facts drawn from it, as a turn's pre-selection does: they are in the turn's
@@ -1541,25 +1542,31 @@ class MemoryStore:
         *,
         from_date: Optional[str] = None,
         to_date: Optional[str] = None,
-        limit: int = 8,
+        limit: Optional[int] = None,
         exclude_conversation: Optional[str] = None,
         timezone: Optional[str] = None,
     ) -> str:
         """The ``search_memory`` tool's result for these arguments, in the shape and within
-        the limits the engine's definition of the tool gives: ``search``, with ``limit``
-        kept within 1 to RESULT_LIMIT_MAX (20), as ``{"results": [{"date", "conversation",
-        "kind", "text"}]}`` JSON of at most RESULT_CHARS_MAX (8,000) code points, with
-        ``"note": "truncated"`` when results were dropped to fit.
+        the limits the engine's definition of the tool gives: ``search``, for
+        ``search.result_limit(limit)`` results (12 when None, else ``limit`` kept within 8
+        to 20), as ``{"results": [{"date", "conversation", "kind", "text"}]}`` JSON of at
+        most RESULT_CHARS_MAX (12,000) code points, with a ``"note"`` ending "truncated"
+        when results were dropped to fit. Dates that find nothing are dropped for a second
+        search, whose results come with a note saying so (``search.search_memory_result``).
         ``exclude_conversation`` and ``timezone`` go to ``search`` as they are."""
-        hits = self.search(
-            query,
-            from_date=from_date,
-            to_date=to_date,
-            limit=max(1, min(limit, RESULT_LIMIT_MAX)),
-            exclude_conversation=exclude_conversation,
-            timezone=timezone,
-        )
-        return result_json(hits)
+        count = result_limit(limit)
+
+        def dated(start: Optional[str], end: Optional[str]) -> List[SearchHit]:
+            return self.search(
+                query,
+                from_date=start,
+                to_date=end,
+                limit=count,
+                exclude_conversation=exclude_conversation,
+                timezone=timezone,
+            )
+
+        return search_memory_result(dated, from_date, to_date)
 
     def turn_payload(
         self,

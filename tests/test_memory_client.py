@@ -640,7 +640,7 @@ def test_handle_search_refuses_malformed_arguments(
 def test_handle_search_reads_nulls_as_absent_and_keeps_limits(
     memory: T2VMemory, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A7/R40: None is left out (limit 8); limit kept within 1-20; the query cut to 200 code
+    """A7/R40: None is left out (limit 12); limit kept within 8-20; the query cut to 200 code
     points; the current conversation and the timezone go to the store."""
     calls: List[Tuple[str, Dict[str, Any]]] = []
     real = memory.store.search_result_json
@@ -661,11 +661,11 @@ def test_handle_search_reads_nulls_as_absent_and_keeps_limits(
     memory.handle_search(dict(dates, query="Perth", limit=5))
 
     assert [(len(query), kwargs["limit"]) for query, kwargs in calls] == [
-        (200, 1),
+        (200, 8),
         (5, 20),
+        (5, 12),
+        (5, 12),
         (5, 8),
-        (5, 8),
-        (5, 5),
     ]
     assert calls[0][0] == chr(0x1F600) * 200
     assert [(kwargs["from_date"], kwargs["to_date"]) for _, kwargs in calls] == [

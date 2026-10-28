@@ -26,7 +26,14 @@ from typing import (
     Tuple,
 )
 
-from .models import RESULT_CHARS_MAX, SUMMARY_TITLE_MAX, SearchHit
+from .models import (
+    RESULT_CHARS_MAX,
+    RESULT_LIMIT_DEFAULT,
+    RESULT_LIMIT_MAX,
+    RESULT_LIMIT_MIN,
+    SUMMARY_TITLE_MAX,
+    SearchHit,
+)
 from .text import (
     SEPARATOR,
     STOP_WORDS,
@@ -109,9 +116,16 @@ PRESELECT_FLOOR = 1 / 64
 PRESELECT_MIN_TERMS = 2
 #: A round excerpt's width in code points, ellipses aside.
 EXCERPT_WIDTH = 600
+#: The width of a round excerpt's second window, around the reply's best match that the
+#: first window misses, in code points, ellipses and labels aside. With EXCERPT_WIDTH it
+#: keeps an excerpt within RECALLED_TEXT_MAX (1,000): at most 988 code points.
+REPLY_EXCERPT_WIDTH = 360
 ELLIPSIS = chr(0x2026)
 #: The note a ``search_memory`` result carries when results were dropped to fit.
 TRUNCATED = "truncated"
+#: The note a ``search_memory`` result carries when its dates matched nothing and its
+#: results come from a search without them.
+ANY_DATE = "nothing matched on those dates, so these results are from any date"
 
 # FTS5's bm25() constants.
 _K1 = 1.2
@@ -467,20 +481,27 @@ def _labelled(user_text: str, assistant_text: str, user_label: str, assistant_la
 def first_match(text: str, terms: Sequence[str]) -> Optional[Tuple[int, int]]:
     """The span of ``text``, in code points, where a term first occurs as the index would
     match it, or None. A phrase is found where its last token is."""
+    found = next(_matches(text, terms), None)
+    return None if found is None else (found[0], found[1])
+
+
+def _matches(text: str, terms: Sequence[str]) -> Iterator[Tuple[int, int, int]]:
+    """Every place in ``text`` a term occurs as the index would match it, as ``(start,
+    end, term)``, ``term`` its index in ``terms``: token by token, and at one token in the
+    order of ``terms``. A phrase is found where its last token is, its span from its first."""
     wanted = [(term.split(" "), not is_phrase(term)) for term in terms]
     if not wanted:
-        return None
+        return
     longest = max(len(parts) for parts, _ in wanted)
     recent: List[Tuple[str, int]] = []  # the last tokens, with where each starts
     for token, start, end in index_token_spans(text):
         recent = (recent + [(token, start)])[-longest:]
-        for parts, prefix in wanted:
+        for number, (parts, prefix) in enumerate(wanted):
             if prefix:
                 if token.startswith(parts[0]):
-                    return start, end
+                    yield start, end, number
             elif len(recent) >= len(parts) and [t for t, _ in recent[-len(parts) :]] == parts:
-                return recent[-len(parts)][1], end
-    return None
+                yield recent[-len(parts)][1], end, number
 
 
 def excerpt(
@@ -509,7 +530,14 @@ def _window(text: str, terms: Sequence[str], width: int, find_in: Optional[str])
     found = first_match(text if find_in is None else find_in, terms)
     begin, finish = found if found is not None else (0, 0)
     start = max(0, min(begin - width // 2, len(text) - width))
-    end = start + width
+    return _off_words(text, start, start + width, begin, finish)
+
+
+def _off_words(text: str, start: int, end: int, begin: int, finish: int) -> Tuple[int, int]:
+    """A cut of ``text`` from ``start`` to ``end`` around a match from ``begin`` to
+    ``finish``, moved off the middle of words: a start that doesn't follow whitespace moves
+    forward to just past the next whitespace, never past ``begin``; an end that isn't on
+    whitespace moves back to the last whitespace, never before ``finish``."""
     if start > 0 and not text[start - 1].isspace():
         space = _SPACE.search(text, start, max(begin, start))
         if space is not None:
@@ -554,19 +582,62 @@ def round_hit(
     user's day it was said (``days.day``). The excerpt is centred on a term in what was
     said, never in a label: "use" begins "User". One cut after the round's start gives the
     label of the side it starts in after the ellipsis, "… Assistant: …", so whose words
-    they are is never lost; its width is excerpt's."""
+    they are is never lost; its width is excerpt's.
+
+    When the reply holds a match that window doesn't show whole, a second window of
+    REPLY_EXCERPT_WIDTH shows the best of them (``_reply_window``), after a space, an
+    ellipsis and "Assistant: ", the first window's closing ellipsis left out: "…User: …
+    … Assistant: …". Two windows that would overlap or touch are one, from the first's
+    start to the second's end."""
     text = round_text(user_text, assistant_text)
     said = _labelled(user_text, assistant_text, " " * len(_USER_LABEL), " " * len(_ASSISTANT_LABEL))
     start, end = _window(text, terms, EXCERPT_WIDTH, said)
+    reply = _reply_window(text, said, terms, assistant_text, end)
+    if reply is not None and reply[0] <= end:
+        start, end, reply = start, reply[1], None
     label = " " + _side_label(text, start, end, user_text, assistant_text)
+    shown = _shown(text, start, end, label)
+    if reply is not None:
+        # The first window ends before the second starts, so its end was cut: the
+        # second's ellipsis marks the gap instead.
+        second = _shown(text, reply[0], reply[1], " " + _ASSISTANT_LABEL)
+        shown = shown[: -len(ELLIPSIS)] + " " + second
     return SearchHit(
-        kind="excerpt",
-        date=date,
-        conversation=title,
-        text=_shown(text, start, end, label),
-        score=score,
-        ref=ref,
+        kind="excerpt", date=date, conversation=title, text=shown, score=score, ref=ref
     )
+
+
+def _reply_window(
+    text: str, said: str, terms: Sequence[str], assistant_text: str, shown_end: int
+) -> Optional[Tuple[int, int]]:
+    """Where a round excerpt's second window cuts ``text``, a ``round_text``, as ``(start,
+    end)``, or None. ``said`` is ``text`` with its labels blanked, and ``shown_end`` where
+    the first window ends.
+
+    The window is around the reply's best match among those that end after ``shown_end``:
+    the place where the most distinct terms occur within REPLY_EXCERPT_WIDTH code points,
+    counted from a match's start; the earliest on a tie. It centres those matches, within
+    the reply, and moves off the middle of words as ``excerpt`` does. None when the round
+    has no reply or the reply has no such match."""
+    if not assistant_text:
+        return None
+    begins = len(text) - len(assistant_text)  # where the reply's own text starts
+    found = [hit for hit in _matches(said, terms) if hit[0] >= begins and hit[1] > shown_end]
+    best: Optional[Tuple[int, int, int]] = None  # (distinct terms, start, end)
+    for number, (first, _, _) in enumerate(found):
+        reach = first + REPLY_EXCERPT_WIDTH
+        near = [found[number]] + [
+            hit for hit in found[number + 1 :] if hit[0] >= first and hit[1] <= reach
+        ]
+        distinct = len({term for _, _, term in near})
+        if best is None or distinct > best[0]:
+            best = (distinct, first, max(hit[1] for hit in near))
+    if best is None:
+        return None
+    _, begin, finish = best
+    room = max(0, REPLY_EXCERPT_WIDTH - (finish - begin))
+    start = max(begins, min(begin - room // 2, len(text) - REPLY_EXCERPT_WIDTH))
+    return _off_words(text, start, min(len(text), start + REPLY_EXCERPT_WIDTH), begin, finish)
 
 
 def _side_label(text: str, start: int, end: int, user_text: str, assistant_text: str) -> str:
@@ -583,19 +654,53 @@ def _side_label(text: str, start: int, end: int, user_text: str, assistant_text:
 # ── the search_memory result ──
 
 
-def result_json(hits: Sequence[SearchHit]) -> str:
+def result_limit(limit: Optional[int]) -> int:
+    """How many results a ``search_memory`` call gets: RESULT_LIMIT_DEFAULT (12) when it
+    names no ``limit``, else its ``limit`` kept within RESULT_LIMIT_MIN (8) and
+    RESULT_LIMIT_MAX (20). A model that asks for a few would miss what a few more hold."""
+    if limit is None:
+        return RESULT_LIMIT_DEFAULT
+    return max(RESULT_LIMIT_MIN, min(limit, RESULT_LIMIT_MAX))
+
+
+def search_memory_result(
+    search: Callable[[Optional[str], Optional[str]], Sequence[SearchHit]],
+    from_date: Optional[str],
+    to_date: Optional[str],
+) -> str:
+    """The ``search_memory`` tool's result for ``search(from_date, to_date)``, a search
+    with those dates: ``result_json`` of its hits. When the dates find nothing, the search
+    runs again without them, and what it finds comes with ``"note"`` ANY_DATE, saying so.
+    A date the model gives is a guess at when something was said, and a wrong one would
+    otherwise read as nothing remembered."""
+    hits = search(from_date, to_date)
+    if hits or (from_date is None and to_date is None):
+        return result_json(hits)
+    hits = search(None, None)
+    return result_json(hits, notes=[ANY_DATE] if hits else [])
+
+
+def result_json(hits: Sequence[SearchHit], notes: Sequence[str] = ()) -> str:
     """The ``search_memory`` tool's result: ``{"results": [{"date", "conversation", "kind",
-    "text"}]}`` as compact JSON, at most RESULT_CHARS_MAX (8,000) code points. Results that
-    would take it over are dropped from the end, and ``"note": "truncated"`` says so."""
+    "text"}]}`` as compact JSON, at most RESULT_CHARS_MAX (12,000) code points, with
+    ``"note"`` giving ``notes`` joined by "; " when there are any. Results that would take
+    it over are dropped from the end, and the note's last part, "truncated", says so."""
     results = [
         {"date": hit.date, "conversation": hit.conversation, "kind": hit.kind, "text": hit.text}
         for hit in hits
     ]
-    document = _dumps({"results": results})
+    document = _document(results, notes)
     while len(document) > RESULT_CHARS_MAX and results:
         results.pop()
-        document = _dumps({"results": results, "note": TRUNCATED})
+        document = _document(results, [*notes, TRUNCATED])
     return document
+
+
+def _document(results: List[Dict[str, str]], notes: Sequence[str]) -> str:
+    value: Dict[str, Any] = {"results": results}
+    if notes:
+        value["note"] = "; ".join(notes)
+    return _dumps(value)
 
 
 def _dumps(value: Dict[str, Any]) -> str:
@@ -618,7 +723,9 @@ __all__ = [
     "preselected",
     "query_terms",
     "result_json",
+    "result_limit",
     "round_hit",
     "round_ref",
     "rrf",
+    "search_memory_result",
 ]
