@@ -52,6 +52,13 @@
       "streams": ["tool_events_image.sse"]
     },
     {
+      "id": "memory_event",
+      "sdks": ["python"],
+      "prompt": "Remember that I prefer metric units",
+      "capabilities": { "memory": true },
+      "streams": ["memory_event.sse"]
+    },
+    {
       "id": "unspaced_data",
       "sdks": ["python", "ts"],
       "prompt": "Say hello",

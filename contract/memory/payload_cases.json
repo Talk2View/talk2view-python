@@ -1,0 +1,2001 @@
+{
+  "version": 1,
+  "about": "A turn's `memory` field. Each case gives `now`, `timezone` (optional), `conversation` (the current one, or null), `message` (the user's latest, the query of pre-selection, its terms built as search_cases.json's about says, or null) and its own `corpus`: `conversations`, `rounds` and `facts` as in search_cases.json, and `entries` ({id, topic, text, updated_at, valid_until?, locked?}, locked false when left out). An incognito conversation's rounds are recorded first, as any other's; marking it then deletes them and its summary, and keeps its title. `expect` is turn_payload(message, exclude_conversation=conversation, timezone) at `now`: {status, entries, recent, recalled}, every list in order. A case without `timezone` runs in UTC; with one, each day (today, for expiry, each entry's updated_at, each conversation's last_active_at and each recalled date) is a day in that IANA zone. Every cap counts code points, and a list over a cap keeps the longest run of its items, in its order, that fits: an item that would fit after one that doesn't is left out too. `entries`: the visible ones still valid today (a valid_until before today has expired), as {id, topic, text, updated_at, valid_until?}, at most 40 and 6,000 of text, ranked for the caps locked first, then the most recently updated first, so unlocked entries are left out before locked ones, the least recently updated first; they are sent in the store's order. `recent`: the conversations most recently active first, but the current one and incognito ones, as {id, title, summary, last_active_at}, at most 8 and 3,000 of title and summary; the title is the conversation's, else its summary's, and one with neither is passed over before the caps are counted. `recalled`: the hits of a search for `message` (limit 8), best first, leaving out the current conversation's rounds and the facts drawn from it, that clear pre-selection's floor: a fused score of at least 1/64, and 2 units of the text, which for a round is its user_text and assistant_text without labels, and for a fact its text without the (until) prefix. Each CJK or Thai term of the query that the text holds is one unit, and the query's words make as many as a maximum matching pairs them with distinct words of the text that they begin, each word on either side in one pair at most. So the floor asks for two distinct matches in every script, and one query word that begins two words of the text counts once. Recalled hits are {kind, date, conversation_title, text}, at most 4 and 4,000 of conversation_title and text. A title is at most 120 code points, and an excerpt at most 614 with its ellipses and label, or 988 with the reply's second window (search_cases.json). 4 times (120 + 614) is 2,936, so the 4,000 can bind only when three or four hits have two windows: 3 times (120 + 988), plus 120 + 614, is 4,058. A fact with a valid_until reads \"(until YYYY-MM-DD) \" before its text, and one past it is still recalled: a fact stays true as history, and answers questions about the past. Python's MemoryStore.turn_payload replays every case on each backend (talk2view-python, tests/test_contract_memory.py).",
+  "cases": [
+    {
+      "id": "over_40_entries_drops_oldest_unlocked",
+      "now": "2026-10-21T10:00:00Z",
+      "conversation": null,
+      "message": null,
+      "corpus": {
+        "entries": [
+          {
+            "id": "e1",
+            "topic": "preferences",
+            "text": "Prefers metric units.",
+            "updated_at": "2026-07-01T09:00:00Z",
+            "locked": true
+          },
+          {
+            "id": "e2",
+            "topic": "preferences",
+            "text": "Note 02 about the user.",
+            "updated_at": "2026-10-19T00:00:00Z"
+          },
+          {
+            "id": "e3",
+            "topic": "preferences",
+            "text": "Note 03 about the user.",
+            "updated_at": "2026-10-19T01:00:00Z"
+          },
+          {
+            "id": "e4",
+            "topic": "preferences",
+            "text": "Note 04 about the user.",
+            "updated_at": "2026-10-19T02:00:00Z"
+          },
+          {
+            "id": "e5",
+            "topic": "preferences",
+            "text": "Note 05 about the user.",
+            "updated_at": "2026-10-19T03:00:00Z"
+          },
+          {
+            "id": "e6",
+            "topic": "preferences",
+            "text": "Note 06 about the user.",
+            "updated_at": "2026-10-19T04:00:00Z"
+          },
+          {
+            "id": "e7",
+            "topic": "preferences",
+            "text": "Note 07 about the user.",
+            "updated_at": "2026-10-19T05:00:00Z"
+          },
+          {
+            "id": "e8",
+            "topic": "preferences",
+            "text": "Note 08 about the user.",
+            "updated_at": "2026-10-19T06:00:00Z"
+          },
+          {
+            "id": "e9",
+            "topic": "preferences",
+            "text": "Note 09 about the user.",
+            "updated_at": "2026-10-19T07:00:00Z"
+          },
+          {
+            "id": "e10",
+            "topic": "preferences",
+            "text": "Note 10 about the user.",
+            "updated_at": "2026-10-19T08:00:00Z"
+          },
+          {
+            "id": "e11",
+            "topic": "preferences",
+            "text": "Note 11 about the user.",
+            "updated_at": "2026-10-19T09:00:00Z"
+          },
+          {
+            "id": "e12",
+            "topic": "preferences",
+            "text": "Note 12 about the user.",
+            "updated_at": "2026-10-19T10:00:00Z"
+          },
+          {
+            "id": "e13",
+            "topic": "preferences",
+            "text": "Note 13 about the user.",
+            "updated_at": "2026-10-19T11:00:00Z"
+          },
+          {
+            "id": "e14",
+            "topic": "preferences",
+            "text": "Note 14 about the user.",
+            "updated_at": "2026-10-19T12:00:00Z"
+          },
+          {
+            "id": "e15",
+            "topic": "preferences",
+            "text": "Note 15 about the user.",
+            "updated_at": "2026-10-19T13:00:00Z"
+          },
+          {
+            "id": "e16",
+            "topic": "preferences",
+            "text": "Note 16 about the user.",
+            "updated_at": "2026-10-19T14:00:00Z"
+          },
+          {
+            "id": "e17",
+            "topic": "preferences",
+            "text": "Note 17 about the user.",
+            "updated_at": "2026-10-19T15:00:00Z"
+          },
+          {
+            "id": "e18",
+            "topic": "preferences",
+            "text": "Note 18 about the user.",
+            "updated_at": "2026-10-19T16:00:00Z"
+          },
+          {
+            "id": "e19",
+            "topic": "preferences",
+            "text": "Note 19 about the user.",
+            "updated_at": "2026-10-19T17:00:00Z"
+          },
+          {
+            "id": "e20",
+            "topic": "preferences",
+            "text": "Note 20 about the user.",
+            "updated_at": "2026-10-19T18:00:00Z"
+          },
+          {
+            "id": "e21",
+            "topic": "preferences",
+            "text": "Note 21 about the user.",
+            "updated_at": "2026-10-19T19:00:00Z"
+          },
+          {
+            "id": "e22",
+            "topic": "preferences",
+            "text": "Note 22 about the user.",
+            "updated_at": "2026-10-19T20:00:00Z"
+          },
+          {
+            "id": "e23",
+            "topic": "preferences",
+            "text": "Note 23 about the user.",
+            "updated_at": "2026-10-19T21:00:00Z"
+          },
+          {
+            "id": "e24",
+            "topic": "preferences",
+            "text": "Note 24 about the user.",
+            "updated_at": "2026-10-19T22:00:00Z"
+          },
+          {
+            "id": "e25",
+            "topic": "preferences",
+            "text": "Note 25 about the user.",
+            "updated_at": "2026-10-19T23:00:00Z"
+          },
+          {
+            "id": "e26",
+            "topic": "preferences",
+            "text": "Note 26 about the user.",
+            "updated_at": "2026-10-20T00:00:00Z"
+          },
+          {
+            "id": "e27",
+            "topic": "preferences",
+            "text": "Note 27 about the user.",
+            "updated_at": "2026-10-20T01:00:00Z"
+          },
+          {
+            "id": "e28",
+            "topic": "preferences",
+            "text": "Note 28 about the user.",
+            "updated_at": "2026-10-20T02:00:00Z"
+          },
+          {
+            "id": "e29",
+            "topic": "preferences",
+            "text": "Note 29 about the user.",
+            "updated_at": "2026-10-20T03:00:00Z"
+          },
+          {
+            "id": "e30",
+            "topic": "preferences",
+            "text": "Note 30 about the user.",
+            "updated_at": "2026-10-20T04:00:00Z"
+          },
+          {
+            "id": "e31",
+            "topic": "preferences",
+            "text": "Note 31 about the user.",
+            "updated_at": "2026-10-20T05:00:00Z"
+          },
+          {
+            "id": "e32",
+            "topic": "preferences",
+            "text": "Note 32 about the user.",
+            "updated_at": "2026-10-20T06:00:00Z"
+          },
+          {
+            "id": "e33",
+            "topic": "preferences",
+            "text": "Note 33 about the user.",
+            "updated_at": "2026-10-20T07:00:00Z"
+          },
+          {
+            "id": "e34",
+            "topic": "preferences",
+            "text": "Note 34 about the user.",
+            "updated_at": "2026-10-20T08:00:00Z"
+          },
+          {
+            "id": "e35",
+            "topic": "preferences",
+            "text": "Note 35 about the user.",
+            "updated_at": "2026-10-20T09:00:00Z"
+          },
+          {
+            "id": "e36",
+            "topic": "preferences",
+            "text": "Note 36 about the user.",
+            "updated_at": "2026-10-20T10:00:00Z"
+          },
+          {
+            "id": "e37",
+            "topic": "preferences",
+            "text": "Note 37 about the user.",
+            "updated_at": "2026-10-20T11:00:00Z"
+          },
+          {
+            "id": "e38",
+            "topic": "preferences",
+            "text": "Note 38 about the user.",
+            "updated_at": "2026-10-20T12:00:00Z"
+          },
+          {
+            "id": "e39",
+            "topic": "preferences",
+            "text": "Note 39 about the user.",
+            "updated_at": "2026-10-20T13:00:00Z"
+          },
+          {
+            "id": "e40",
+            "topic": "preferences",
+            "text": "Note 40 about the user.",
+            "updated_at": "2026-10-20T14:00:00Z"
+          },
+          {
+            "id": "e41",
+            "topic": "preferences",
+            "text": "Note 41 about the user.",
+            "updated_at": "2026-10-20T15:00:00Z"
+          }
+        ]
+      },
+      "expect": {
+        "status": "on",
+        "entries": [
+          {
+            "id": "e1",
+            "topic": "preferences",
+            "text": "Prefers metric units.",
+            "updated_at": "2026-07-01"
+          },
+          {
+            "id": "e3",
+            "topic": "preferences",
+            "text": "Note 03 about the user.",
+            "updated_at": "2026-10-19"
+          },
+          {
+            "id": "e4",
+            "topic": "preferences",
+            "text": "Note 04 about the user.",
+            "updated_at": "2026-10-19"
+          },
+          {
+            "id": "e5",
+            "topic": "preferences",
+            "text": "Note 05 about the user.",
+            "updated_at": "2026-10-19"
+          },
+          {
+            "id": "e6",
+            "topic": "preferences",
+            "text": "Note 06 about the user.",
+            "updated_at": "2026-10-19"
+          },
+          {
+            "id": "e7",
+            "topic": "preferences",
+            "text": "Note 07 about the user.",
+            "updated_at": "2026-10-19"
+          },
+          {
+            "id": "e8",
+            "topic": "preferences",
+            "text": "Note 08 about the user.",
+            "updated_at": "2026-10-19"
+          },
+          {
+            "id": "e9",
+            "topic": "preferences",
+            "text": "Note 09 about the user.",
+            "updated_at": "2026-10-19"
+          },
+          {
+            "id": "e10",
+            "topic": "preferences",
+            "text": "Note 10 about the user.",
+            "updated_at": "2026-10-19"
+          },
+          {
+            "id": "e11",
+            "topic": "preferences",
+            "text": "Note 11 about the user.",
+            "updated_at": "2026-10-19"
+          },
+          {
+            "id": "e12",
+            "topic": "preferences",
+            "text": "Note 12 about the user.",
+            "updated_at": "2026-10-19"
+          },
+          {
+            "id": "e13",
+            "topic": "preferences",
+            "text": "Note 13 about the user.",
+            "updated_at": "2026-10-19"
+          },
+          {
+            "id": "e14",
+            "topic": "preferences",
+            "text": "Note 14 about the user.",
+            "updated_at": "2026-10-19"
+          },
+          {
+            "id": "e15",
+            "topic": "preferences",
+            "text": "Note 15 about the user.",
+            "updated_at": "2026-10-19"
+          },
+          {
+            "id": "e16",
+            "topic": "preferences",
+            "text": "Note 16 about the user.",
+            "updated_at": "2026-10-19"
+          },
+          {
+            "id": "e17",
+            "topic": "preferences",
+            "text": "Note 17 about the user.",
+            "updated_at": "2026-10-19"
+          },
+          {
+            "id": "e18",
+            "topic": "preferences",
+            "text": "Note 18 about the user.",
+            "updated_at": "2026-10-19"
+          },
+          {
+            "id": "e19",
+            "topic": "preferences",
+            "text": "Note 19 about the user.",
+            "updated_at": "2026-10-19"
+          },
+          {
+            "id": "e20",
+            "topic": "preferences",
+            "text": "Note 20 about the user.",
+            "updated_at": "2026-10-19"
+          },
+          {
+            "id": "e21",
+            "topic": "preferences",
+            "text": "Note 21 about the user.",
+            "updated_at": "2026-10-19"
+          },
+          {
+            "id": "e22",
+            "topic": "preferences",
+            "text": "Note 22 about the user.",
+            "updated_at": "2026-10-19"
+          },
+          {
+            "id": "e23",
+            "topic": "preferences",
+            "text": "Note 23 about the user.",
+            "updated_at": "2026-10-19"
+          },
+          {
+            "id": "e24",
+            "topic": "preferences",
+            "text": "Note 24 about the user.",
+            "updated_at": "2026-10-19"
+          },
+          {
+            "id": "e25",
+            "topic": "preferences",
+            "text": "Note 25 about the user.",
+            "updated_at": "2026-10-19"
+          },
+          {
+            "id": "e26",
+            "topic": "preferences",
+            "text": "Note 26 about the user.",
+            "updated_at": "2026-10-20"
+          },
+          {
+            "id": "e27",
+            "topic": "preferences",
+            "text": "Note 27 about the user.",
+            "updated_at": "2026-10-20"
+          },
+          {
+            "id": "e28",
+            "topic": "preferences",
+            "text": "Note 28 about the user.",
+            "updated_at": "2026-10-20"
+          },
+          {
+            "id": "e29",
+            "topic": "preferences",
+            "text": "Note 29 about the user.",
+            "updated_at": "2026-10-20"
+          },
+          {
+            "id": "e30",
+            "topic": "preferences",
+            "text": "Note 30 about the user.",
+            "updated_at": "2026-10-20"
+          },
+          {
+            "id": "e31",
+            "topic": "preferences",
+            "text": "Note 31 about the user.",
+            "updated_at": "2026-10-20"
+          },
+          {
+            "id": "e32",
+            "topic": "preferences",
+            "text": "Note 32 about the user.",
+            "updated_at": "2026-10-20"
+          },
+          {
+            "id": "e33",
+            "topic": "preferences",
+            "text": "Note 33 about the user.",
+            "updated_at": "2026-10-20"
+          },
+          {
+            "id": "e34",
+            "topic": "preferences",
+            "text": "Note 34 about the user.",
+            "updated_at": "2026-10-20"
+          },
+          {
+            "id": "e35",
+            "topic": "preferences",
+            "text": "Note 35 about the user.",
+            "updated_at": "2026-10-20"
+          },
+          {
+            "id": "e36",
+            "topic": "preferences",
+            "text": "Note 36 about the user.",
+            "updated_at": "2026-10-20"
+          },
+          {
+            "id": "e37",
+            "topic": "preferences",
+            "text": "Note 37 about the user.",
+            "updated_at": "2026-10-20"
+          },
+          {
+            "id": "e38",
+            "topic": "preferences",
+            "text": "Note 38 about the user.",
+            "updated_at": "2026-10-20"
+          },
+          {
+            "id": "e39",
+            "topic": "preferences",
+            "text": "Note 39 about the user.",
+            "updated_at": "2026-10-20"
+          },
+          {
+            "id": "e40",
+            "topic": "preferences",
+            "text": "Note 40 about the user.",
+            "updated_at": "2026-10-20"
+          },
+          {
+            "id": "e41",
+            "topic": "preferences",
+            "text": "Note 41 about the user.",
+            "updated_at": "2026-10-20"
+          }
+        ],
+        "recent": [],
+        "recalled": []
+      }
+    },
+    {
+      "id": "over_6000_chars",
+      "now": "2026-10-21T10:00:00Z",
+      "conversation": null,
+      "message": null,
+      "corpus": {
+        "entries": [
+          {
+            "id": "e1",
+            "topic": "work",
+            "text": "éééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééé😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀xA",
+            "updated_at": "2026-10-01T09:00:00Z"
+          },
+          {
+            "id": "e2",
+            "topic": "work",
+            "text": "éééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééé😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀xB",
+            "updated_at": "2026-10-02T09:00:00Z"
+          },
+          {
+            "id": "e3",
+            "topic": "work",
+            "text": "éééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééé😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀xC",
+            "updated_at": "2026-10-03T09:00:00Z"
+          },
+          {
+            "id": "e4",
+            "topic": "work",
+            "text": "éééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééé😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀xD",
+            "updated_at": "2026-10-04T09:00:00Z"
+          },
+          {
+            "id": "e5",
+            "topic": "work",
+            "text": "éééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééé😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀xE",
+            "updated_at": "2026-10-05T09:00:00Z"
+          },
+          {
+            "id": "e6",
+            "topic": "work",
+            "text": "éééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééé😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀xF",
+            "updated_at": "2026-10-06T09:00:00Z"
+          },
+          {
+            "id": "e7",
+            "topic": "work",
+            "text": "éééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééé😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀xG",
+            "updated_at": "2026-10-07T09:00:00Z"
+          },
+          {
+            "id": "e8",
+            "topic": "work",
+            "text": "éééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééé😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀xH",
+            "updated_at": "2026-10-08T09:00:00Z"
+          },
+          {
+            "id": "e9",
+            "topic": "work",
+            "text": "éééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééé😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀xI",
+            "updated_at": "2026-10-09T09:00:00Z"
+          },
+          {
+            "id": "e10",
+            "topic": "work",
+            "text": "éééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééé😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀xJ",
+            "updated_at": "2026-10-10T09:00:00Z"
+          },
+          {
+            "id": "e11",
+            "topic": "work",
+            "text": "éééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééé😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀xK",
+            "updated_at": "2026-10-11T09:00:00Z"
+          },
+          {
+            "id": "e12",
+            "topic": "work",
+            "text": "éééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééé😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀xL",
+            "updated_at": "2026-10-12T09:00:00Z"
+          },
+          {
+            "id": "e13",
+            "topic": "work",
+            "text": "éééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééé😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀xM",
+            "updated_at": "2026-10-13T09:00:00Z"
+          },
+          {
+            "id": "e14",
+            "topic": "work",
+            "text": "éééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééé😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀xN",
+            "updated_at": "2026-10-14T09:00:00Z"
+          },
+          {
+            "id": "e15",
+            "topic": "work",
+            "text": "éééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééé😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀xO",
+            "updated_at": "2026-10-15T09:00:00Z"
+          },
+          {
+            "id": "e16",
+            "topic": "work",
+            "text": "éééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééé😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀xP",
+            "updated_at": "2026-10-16T09:00:00Z"
+          },
+          {
+            "id": "e17",
+            "topic": "work",
+            "text": "éééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééé😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀xQ",
+            "updated_at": "2026-10-17T09:00:00Z"
+          },
+          {
+            "id": "e18",
+            "topic": "work",
+            "text": "éééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééé😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀xR",
+            "updated_at": "2026-10-18T09:00:00Z"
+          },
+          {
+            "id": "e19",
+            "topic": "work",
+            "text": "éééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééé😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀xS",
+            "updated_at": "2026-10-19T09:00:00Z"
+          },
+          {
+            "id": "e20",
+            "topic": "work",
+            "text": "éééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééé😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀xT",
+            "updated_at": "2026-10-20T09:00:00Z"
+          },
+          {
+            "id": "e21",
+            "topic": "work",
+            "text": "😀",
+            "updated_at": "2026-09-01T09:00:00Z"
+          }
+        ]
+      },
+      "expect": {
+        "status": "on",
+        "entries": [
+          {
+            "id": "e1",
+            "topic": "work",
+            "text": "éééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééé😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀xA",
+            "updated_at": "2026-10-01"
+          },
+          {
+            "id": "e2",
+            "topic": "work",
+            "text": "éééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééé😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀xB",
+            "updated_at": "2026-10-02"
+          },
+          {
+            "id": "e3",
+            "topic": "work",
+            "text": "éééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééé😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀xC",
+            "updated_at": "2026-10-03"
+          },
+          {
+            "id": "e4",
+            "topic": "work",
+            "text": "éééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééé😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀xD",
+            "updated_at": "2026-10-04"
+          },
+          {
+            "id": "e5",
+            "topic": "work",
+            "text": "éééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééé😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀xE",
+            "updated_at": "2026-10-05"
+          },
+          {
+            "id": "e6",
+            "topic": "work",
+            "text": "éééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééé😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀xF",
+            "updated_at": "2026-10-06"
+          },
+          {
+            "id": "e7",
+            "topic": "work",
+            "text": "éééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééé😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀xG",
+            "updated_at": "2026-10-07"
+          },
+          {
+            "id": "e8",
+            "topic": "work",
+            "text": "éééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééé😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀xH",
+            "updated_at": "2026-10-08"
+          },
+          {
+            "id": "e9",
+            "topic": "work",
+            "text": "éééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééé😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀xI",
+            "updated_at": "2026-10-09"
+          },
+          {
+            "id": "e10",
+            "topic": "work",
+            "text": "éééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééé😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀xJ",
+            "updated_at": "2026-10-10"
+          },
+          {
+            "id": "e11",
+            "topic": "work",
+            "text": "éééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééé😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀xK",
+            "updated_at": "2026-10-11"
+          },
+          {
+            "id": "e12",
+            "topic": "work",
+            "text": "éééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééé😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀xL",
+            "updated_at": "2026-10-12"
+          },
+          {
+            "id": "e13",
+            "topic": "work",
+            "text": "éééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééé😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀xM",
+            "updated_at": "2026-10-13"
+          },
+          {
+            "id": "e14",
+            "topic": "work",
+            "text": "éééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééé😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀xN",
+            "updated_at": "2026-10-14"
+          },
+          {
+            "id": "e15",
+            "topic": "work",
+            "text": "éééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééé😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀xO",
+            "updated_at": "2026-10-15"
+          },
+          {
+            "id": "e16",
+            "topic": "work",
+            "text": "éééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééé😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀xP",
+            "updated_at": "2026-10-16"
+          },
+          {
+            "id": "e17",
+            "topic": "work",
+            "text": "éééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééé😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀xQ",
+            "updated_at": "2026-10-17"
+          },
+          {
+            "id": "e18",
+            "topic": "work",
+            "text": "éééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééé😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀xR",
+            "updated_at": "2026-10-18"
+          },
+          {
+            "id": "e19",
+            "topic": "work",
+            "text": "éééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééé😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀xS",
+            "updated_at": "2026-10-19"
+          },
+          {
+            "id": "e20",
+            "topic": "work",
+            "text": "éééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééé😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀xT",
+            "updated_at": "2026-10-20"
+          }
+        ],
+        "recent": [],
+        "recalled": []
+      }
+    },
+    {
+      "id": "over_6000_chars_keeps_the_longest_run",
+      "now": "2026-10-21T10:00:00Z",
+      "conversation": null,
+      "message": null,
+      "corpus": {
+        "entries": [
+          {
+            "id": "e1",
+            "topic": "work",
+            "text": "éééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééxA",
+            "updated_at": "2026-10-01T09:00:00Z"
+          },
+          {
+            "id": "e2",
+            "topic": "work",
+            "text": "éééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééxB",
+            "updated_at": "2026-10-02T09:00:00Z"
+          },
+          {
+            "id": "e3",
+            "topic": "work",
+            "text": "éééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééxC",
+            "updated_at": "2026-10-03T09:00:00Z"
+          },
+          {
+            "id": "e4",
+            "topic": "work",
+            "text": "éééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééxD",
+            "updated_at": "2026-10-04T09:00:00Z"
+          },
+          {
+            "id": "e5",
+            "topic": "work",
+            "text": "éééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééxE",
+            "updated_at": "2026-10-05T09:00:00Z"
+          },
+          {
+            "id": "e6",
+            "topic": "work",
+            "text": "éééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééxF",
+            "updated_at": "2026-10-06T09:00:00Z"
+          },
+          {
+            "id": "e7",
+            "topic": "work",
+            "text": "éééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééxG",
+            "updated_at": "2026-10-07T09:00:00Z"
+          },
+          {
+            "id": "e8",
+            "topic": "work",
+            "text": "éééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééxH",
+            "updated_at": "2026-10-08T09:00:00Z"
+          },
+          {
+            "id": "e9",
+            "topic": "work",
+            "text": "éééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééxI",
+            "updated_at": "2026-10-09T09:00:00Z"
+          },
+          {
+            "id": "e10",
+            "topic": "work",
+            "text": "éééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééxJ",
+            "updated_at": "2026-10-10T09:00:00Z"
+          },
+          {
+            "id": "e11",
+            "topic": "work",
+            "text": "éééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééxK",
+            "updated_at": "2026-10-11T09:00:00Z"
+          },
+          {
+            "id": "e12",
+            "topic": "work",
+            "text": "éééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééxL",
+            "updated_at": "2026-10-12T09:00:00Z"
+          },
+          {
+            "id": "e13",
+            "topic": "work",
+            "text": "éééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééxM",
+            "updated_at": "2026-10-13T09:00:00Z"
+          },
+          {
+            "id": "e14",
+            "topic": "work",
+            "text": "éééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééxN",
+            "updated_at": "2026-10-14T09:00:00Z"
+          },
+          {
+            "id": "e15",
+            "topic": "work",
+            "text": "éééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééxO",
+            "updated_at": "2026-10-15T09:00:00Z"
+          },
+          {
+            "id": "e16",
+            "topic": "work",
+            "text": "éééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééxP",
+            "updated_at": "2026-10-16T09:00:00Z"
+          },
+          {
+            "id": "e17",
+            "topic": "work",
+            "text": "éééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééxQ",
+            "updated_at": "2026-10-17T09:00:00Z"
+          },
+          {
+            "id": "e18",
+            "topic": "work",
+            "text": "éééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééxR",
+            "updated_at": "2026-10-18T09:00:00Z"
+          },
+          {
+            "id": "e19",
+            "topic": "work",
+            "text": "éééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééxS",
+            "updated_at": "2026-10-19T09:00:00Z"
+          },
+          {
+            "id": "e20",
+            "topic": "work",
+            "text": "ééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééxT",
+            "updated_at": "2026-10-20T09:00:00Z"
+          },
+          {
+            "id": "e21",
+            "topic": "work",
+            "text": "Short note, 20 long.",
+            "updated_at": "2026-09-02T09:00:00Z"
+          },
+          {
+            "id": "e22",
+            "topic": "work",
+            "text": "Tiny.",
+            "updated_at": "2026-09-01T09:00:00Z"
+          }
+        ]
+      },
+      "expect": {
+        "status": "on",
+        "entries": [
+          {
+            "id": "e1",
+            "topic": "work",
+            "text": "éééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééxA",
+            "updated_at": "2026-10-01"
+          },
+          {
+            "id": "e2",
+            "topic": "work",
+            "text": "éééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééxB",
+            "updated_at": "2026-10-02"
+          },
+          {
+            "id": "e3",
+            "topic": "work",
+            "text": "éééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééxC",
+            "updated_at": "2026-10-03"
+          },
+          {
+            "id": "e4",
+            "topic": "work",
+            "text": "éééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééxD",
+            "updated_at": "2026-10-04"
+          },
+          {
+            "id": "e5",
+            "topic": "work",
+            "text": "éééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééxE",
+            "updated_at": "2026-10-05"
+          },
+          {
+            "id": "e6",
+            "topic": "work",
+            "text": "éééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééxF",
+            "updated_at": "2026-10-06"
+          },
+          {
+            "id": "e7",
+            "topic": "work",
+            "text": "éééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééxG",
+            "updated_at": "2026-10-07"
+          },
+          {
+            "id": "e8",
+            "topic": "work",
+            "text": "éééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééxH",
+            "updated_at": "2026-10-08"
+          },
+          {
+            "id": "e9",
+            "topic": "work",
+            "text": "éééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééxI",
+            "updated_at": "2026-10-09"
+          },
+          {
+            "id": "e10",
+            "topic": "work",
+            "text": "éééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééxJ",
+            "updated_at": "2026-10-10"
+          },
+          {
+            "id": "e11",
+            "topic": "work",
+            "text": "éééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééxK",
+            "updated_at": "2026-10-11"
+          },
+          {
+            "id": "e12",
+            "topic": "work",
+            "text": "éééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééxL",
+            "updated_at": "2026-10-12"
+          },
+          {
+            "id": "e13",
+            "topic": "work",
+            "text": "éééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééxM",
+            "updated_at": "2026-10-13"
+          },
+          {
+            "id": "e14",
+            "topic": "work",
+            "text": "éééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééxN",
+            "updated_at": "2026-10-14"
+          },
+          {
+            "id": "e15",
+            "topic": "work",
+            "text": "éééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééxO",
+            "updated_at": "2026-10-15"
+          },
+          {
+            "id": "e16",
+            "topic": "work",
+            "text": "éééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééxP",
+            "updated_at": "2026-10-16"
+          },
+          {
+            "id": "e17",
+            "topic": "work",
+            "text": "éééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééxQ",
+            "updated_at": "2026-10-17"
+          },
+          {
+            "id": "e18",
+            "topic": "work",
+            "text": "éééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééxR",
+            "updated_at": "2026-10-18"
+          },
+          {
+            "id": "e19",
+            "topic": "work",
+            "text": "éééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééxS",
+            "updated_at": "2026-10-19"
+          },
+          {
+            "id": "e20",
+            "topic": "work",
+            "text": "ééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééxT",
+            "updated_at": "2026-10-20"
+          }
+        ],
+        "recent": [],
+        "recalled": []
+      }
+    },
+    {
+      "id": "expired_entry_excluded",
+      "now": "2026-10-21T10:00:00Z",
+      "conversation": null,
+      "message": null,
+      "corpus": {
+        "entries": [
+          {
+            "id": "e1",
+            "topic": "ongoing",
+            "text": "Is in Tokyo this week.",
+            "updated_at": "2026-10-14T09:00:00Z",
+            "valid_until": "2026-10-20"
+          },
+          {
+            "id": "e2",
+            "topic": "ongoing",
+            "text": "Is training for a marathon.",
+            "updated_at": "2026-10-15T09:00:00Z",
+            "valid_until": "2026-10-21"
+          },
+          {
+            "id": "e3",
+            "topic": "people",
+            "text": "Has a dog.",
+            "updated_at": "2026-10-16T09:00:00Z"
+          }
+        ]
+      },
+      "expect": {
+        "status": "on",
+        "entries": [
+          {
+            "id": "e2",
+            "topic": "ongoing",
+            "text": "Is training for a marathon.",
+            "updated_at": "2026-10-15",
+            "valid_until": "2026-10-21"
+          },
+          {
+            "id": "e3",
+            "topic": "people",
+            "text": "Has a dog.",
+            "updated_at": "2026-10-16"
+          }
+        ],
+        "recent": [],
+        "recalled": []
+      }
+    },
+    {
+      "id": "expired_entry_in_user_zone_los_angeles",
+      "now": "2026-11-10T20:00:00Z",
+      "timezone": "America/Los_Angeles",
+      "conversation": null,
+      "message": null,
+      "corpus": {
+        "conversations": [
+          {
+            "id": "c1",
+            "title": "Greetings"
+          }
+        ],
+        "rounds": [
+          {
+            "conversation_id": "c1",
+            "idx": 1,
+            "user_text": "Hello.",
+            "assistant_text": "Hi.",
+            "at": "2026-11-10T20:00:00Z"
+          }
+        ],
+        "entries": [
+          {
+            "id": "e1",
+            "topic": "ongoing",
+            "text": "Is in Tokyo until 10 Nov.",
+            "updated_at": "2026-11-10T20:00:00Z",
+            "valid_until": "2026-11-10"
+          },
+          {
+            "id": "e2",
+            "topic": "people",
+            "text": "Has a dog.",
+            "updated_at": "2026-11-10T20:00:00Z"
+          }
+        ]
+      },
+      "expect": {
+        "status": "on",
+        "entries": [
+          {
+            "id": "e1",
+            "topic": "ongoing",
+            "text": "Is in Tokyo until 10 Nov.",
+            "updated_at": "2026-11-10",
+            "valid_until": "2026-11-10"
+          },
+          {
+            "id": "e2",
+            "topic": "people",
+            "text": "Has a dog.",
+            "updated_at": "2026-11-10"
+          }
+        ],
+        "recent": [
+          {
+            "id": "c1",
+            "title": "Greetings",
+            "summary": "",
+            "last_active_at": "2026-11-10"
+          }
+        ],
+        "recalled": []
+      }
+    },
+    {
+      "id": "expired_entry_in_user_zone_sydney",
+      "now": "2026-11-10T20:00:00Z",
+      "timezone": "Australia/Sydney",
+      "conversation": null,
+      "message": null,
+      "corpus": {
+        "conversations": [
+          {
+            "id": "c1",
+            "title": "Greetings"
+          }
+        ],
+        "rounds": [
+          {
+            "conversation_id": "c1",
+            "idx": 1,
+            "user_text": "Hello.",
+            "assistant_text": "Hi.",
+            "at": "2026-11-10T20:00:00Z"
+          }
+        ],
+        "entries": [
+          {
+            "id": "e1",
+            "topic": "ongoing",
+            "text": "Is in Tokyo until 10 Nov.",
+            "updated_at": "2026-11-10T20:00:00Z",
+            "valid_until": "2026-11-10"
+          },
+          {
+            "id": "e2",
+            "topic": "people",
+            "text": "Has a dog.",
+            "updated_at": "2026-11-10T20:00:00Z"
+          }
+        ]
+      },
+      "expect": {
+        "status": "on",
+        "entries": [
+          {
+            "id": "e2",
+            "topic": "people",
+            "text": "Has a dog.",
+            "updated_at": "2026-11-11"
+          }
+        ],
+        "recent": [
+          {
+            "id": "c1",
+            "title": "Greetings",
+            "summary": "",
+            "last_active_at": "2026-11-11"
+          }
+        ],
+        "recalled": []
+      }
+    },
+    {
+      "id": "recent_excludes_current_and_incognito",
+      "now": "2026-10-21T10:00:00Z",
+      "conversation": "c3",
+      "message": null,
+      "corpus": {
+        "conversations": [
+          {
+            "id": "c1",
+            "title": "Weekend plans",
+            "summary_title": "Weekend",
+            "summary_text": "The user planned a hike in the hills."
+          },
+          {
+            "id": "c2",
+            "title": "Private chat",
+            "incognito": true
+          },
+          {
+            "id": "c3",
+            "title": "Gift ideas"
+          },
+          {
+            "id": "c4",
+            "title": "Recipes"
+          },
+          {
+            "id": "c5"
+          }
+        ],
+        "rounds": [
+          {
+            "conversation_id": "c1",
+            "idx": 1,
+            "user_text": "Plan a weekend hike.",
+            "assistant_text": "Here is a plan.",
+            "at": "2026-10-15T09:00:00Z"
+          },
+          {
+            "conversation_id": "c2",
+            "idx": 1,
+            "user_text": "Keep this between us.",
+            "assistant_text": "Of course.",
+            "at": "2026-10-21T09:00:00Z"
+          },
+          {
+            "conversation_id": "c3",
+            "idx": 1,
+            "user_text": "Ideas for a birthday gift?",
+            "assistant_text": "A book or a plant.",
+            "at": "2026-10-20T09:00:00Z"
+          },
+          {
+            "conversation_id": "c4",
+            "idx": 1,
+            "user_text": "A quick pasta recipe?",
+            "assistant_text": "Try aglio e olio.",
+            "at": "2026-10-18T09:00:00Z"
+          },
+          {
+            "conversation_id": "c5",
+            "idx": 1,
+            "user_text": "Is it going to rain?",
+            "assistant_text": "Probably not.",
+            "at": "2026-10-19T09:00:00Z"
+          }
+        ]
+      },
+      "expect": {
+        "status": "on",
+        "entries": [],
+        "recent": [
+          {
+            "id": "c4",
+            "title": "Recipes",
+            "summary": "",
+            "last_active_at": "2026-10-18"
+          },
+          {
+            "id": "c1",
+            "title": "Weekend plans",
+            "summary": "The user planned a hike in the hills.",
+            "last_active_at": "2026-10-15"
+          }
+        ],
+        "recalled": []
+      }
+    },
+    {
+      "id": "recent_over_8_keeps_the_most_recent",
+      "now": "2026-10-21T10:00:00Z",
+      "conversation": null,
+      "message": null,
+      "corpus": {
+        "conversations": [
+          {
+            "id": "c1",
+            "title": "Chat 1"
+          },
+          {
+            "id": "c2",
+            "title": "Chat 2"
+          },
+          {
+            "id": "c3",
+            "title": "Chat 3"
+          },
+          {
+            "id": "c4",
+            "title": "Chat 4"
+          },
+          {
+            "id": "c5",
+            "title": "Chat 5"
+          },
+          {
+            "id": "c6",
+            "title": "Chat 6"
+          },
+          {
+            "id": "c7",
+            "title": "Chat 7"
+          },
+          {
+            "id": "c8",
+            "title": "Chat 8"
+          },
+          {
+            "id": "c9",
+            "title": "Chat 9"
+          },
+          {
+            "id": "c10",
+            "title": "Chat 10"
+          },
+          {
+            "id": "c11"
+          }
+        ],
+        "rounds": [
+          {
+            "conversation_id": "c1",
+            "idx": 1,
+            "user_text": "Hello 1.",
+            "assistant_text": "Hi.",
+            "at": "2026-10-11T09:00:00Z"
+          },
+          {
+            "conversation_id": "c2",
+            "idx": 1,
+            "user_text": "Hello 2.",
+            "assistant_text": "Hi.",
+            "at": "2026-10-12T09:00:00Z"
+          },
+          {
+            "conversation_id": "c3",
+            "idx": 1,
+            "user_text": "Hello 3.",
+            "assistant_text": "Hi.",
+            "at": "2026-10-13T09:00:00Z"
+          },
+          {
+            "conversation_id": "c4",
+            "idx": 1,
+            "user_text": "Hello 4.",
+            "assistant_text": "Hi.",
+            "at": "2026-10-14T09:00:00Z"
+          },
+          {
+            "conversation_id": "c5",
+            "idx": 1,
+            "user_text": "Hello 5.",
+            "assistant_text": "Hi.",
+            "at": "2026-10-15T09:00:00Z"
+          },
+          {
+            "conversation_id": "c6",
+            "idx": 1,
+            "user_text": "Hello 6.",
+            "assistant_text": "Hi.",
+            "at": "2026-10-16T09:00:00Z"
+          },
+          {
+            "conversation_id": "c7",
+            "idx": 1,
+            "user_text": "Hello 7.",
+            "assistant_text": "Hi.",
+            "at": "2026-10-17T09:00:00Z"
+          },
+          {
+            "conversation_id": "c8",
+            "idx": 1,
+            "user_text": "Hello 8.",
+            "assistant_text": "Hi.",
+            "at": "2026-10-18T09:00:00Z"
+          },
+          {
+            "conversation_id": "c9",
+            "idx": 1,
+            "user_text": "Hello 9.",
+            "assistant_text": "Hi.",
+            "at": "2026-10-19T09:00:00Z"
+          },
+          {
+            "conversation_id": "c10",
+            "idx": 1,
+            "user_text": "Hello 10.",
+            "assistant_text": "Hi.",
+            "at": "2026-10-20T09:00:00Z"
+          },
+          {
+            "conversation_id": "c11",
+            "idx": 1,
+            "user_text": "Hello again.",
+            "assistant_text": "Hi.",
+            "at": "2026-10-21T09:00:00Z"
+          }
+        ]
+      },
+      "expect": {
+        "status": "on",
+        "entries": [],
+        "recent": [
+          {
+            "id": "c10",
+            "title": "Chat 10",
+            "summary": "",
+            "last_active_at": "2026-10-20"
+          },
+          {
+            "id": "c9",
+            "title": "Chat 9",
+            "summary": "",
+            "last_active_at": "2026-10-19"
+          },
+          {
+            "id": "c8",
+            "title": "Chat 8",
+            "summary": "",
+            "last_active_at": "2026-10-18"
+          },
+          {
+            "id": "c7",
+            "title": "Chat 7",
+            "summary": "",
+            "last_active_at": "2026-10-17"
+          },
+          {
+            "id": "c6",
+            "title": "Chat 6",
+            "summary": "",
+            "last_active_at": "2026-10-16"
+          },
+          {
+            "id": "c5",
+            "title": "Chat 5",
+            "summary": "",
+            "last_active_at": "2026-10-15"
+          },
+          {
+            "id": "c4",
+            "title": "Chat 4",
+            "summary": "",
+            "last_active_at": "2026-10-14"
+          },
+          {
+            "id": "c3",
+            "title": "Chat 3",
+            "summary": "",
+            "last_active_at": "2026-10-13"
+          }
+        ],
+        "recalled": []
+      }
+    },
+    {
+      "id": "recent_over_3000_code_points_keeps_the_longest_run",
+      "now": "2026-10-21T10:00:00Z",
+      "conversation": null,
+      "message": null,
+      "corpus": {
+        "conversations": [
+          {
+            "id": "c1",
+            "title": "éééééééééééééééééééééééééééééé😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀TA",
+            "summary_text": "éééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééé😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀SA"
+          },
+          {
+            "id": "c2",
+            "title": "éééééééééééééééééééééééééééééé😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀TB",
+            "summary_text": "éééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééé😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀SB"
+          },
+          {
+            "id": "c3",
+            "title": "éééééééééééééééééééééééééééééé😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀TC",
+            "summary_text": "éééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééé😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀SC"
+          },
+          {
+            "id": "c4",
+            "title": "éééééééééééééééééééééééééééééé😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀TD",
+            "summary_text": "éééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééé😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀SD"
+          },
+          {
+            "id": "c5",
+            "title": "éééééééééééééééééééééééééééééé😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀TE",
+            "summary_text": "😀"
+          },
+          {
+            "id": "c6",
+            "title": "Short chat"
+          }
+        ],
+        "rounds": [
+          {
+            "conversation_id": "c1",
+            "idx": 1,
+            "user_text": "Hello.",
+            "assistant_text": "Hi.",
+            "at": "2026-10-20T09:00:00Z"
+          },
+          {
+            "conversation_id": "c2",
+            "idx": 1,
+            "user_text": "Hello.",
+            "assistant_text": "Hi.",
+            "at": "2026-10-19T09:00:00Z"
+          },
+          {
+            "conversation_id": "c3",
+            "idx": 1,
+            "user_text": "Hello.",
+            "assistant_text": "Hi.",
+            "at": "2026-10-18T09:00:00Z"
+          },
+          {
+            "conversation_id": "c4",
+            "idx": 1,
+            "user_text": "Hello.",
+            "assistant_text": "Hi.",
+            "at": "2026-10-17T09:00:00Z"
+          },
+          {
+            "conversation_id": "c5",
+            "idx": 1,
+            "user_text": "Hello.",
+            "assistant_text": "Hi.",
+            "at": "2026-10-16T09:00:00Z"
+          },
+          {
+            "conversation_id": "c6",
+            "idx": 1,
+            "user_text": "Hello.",
+            "assistant_text": "Hi.",
+            "at": "2026-10-15T09:00:00Z"
+          }
+        ]
+      },
+      "expect": {
+        "status": "on",
+        "entries": [],
+        "recent": [
+          {
+            "id": "c1",
+            "title": "éééééééééééééééééééééééééééééé😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀TA",
+            "summary": "éééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééé😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀SA",
+            "last_active_at": "2026-10-20"
+          },
+          {
+            "id": "c2",
+            "title": "éééééééééééééééééééééééééééééé😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀TB",
+            "summary": "éééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééé😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀SB",
+            "last_active_at": "2026-10-19"
+          },
+          {
+            "id": "c3",
+            "title": "éééééééééééééééééééééééééééééé😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀TC",
+            "summary": "éééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééé😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀SC",
+            "last_active_at": "2026-10-18"
+          },
+          {
+            "id": "c4",
+            "title": "éééééééééééééééééééééééééééééé😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀TD",
+            "summary": "éééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééé😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀SD",
+            "last_active_at": "2026-10-17"
+          }
+        ],
+        "recalled": []
+      }
+    },
+    {
+      "id": "recalled_over_4_keeps_the_best",
+      "now": "2026-10-21T10:00:00Z",
+      "conversation": null,
+      "message": "When is my kayak trip to Norway?",
+      "corpus": {
+        "conversations": [
+          {
+            "id": "c1",
+            "title": "Norway trip"
+          }
+        ],
+        "rounds": [
+          {
+            "conversation_id": "c1",
+            "idx": 1,
+            "user_text": "Should we rent a kayak from the club or buy one before the summer?",
+            "assistant_text": "Renting is cheaper unless you paddle often, so plan the trip first and decide after.",
+            "at": "2026-10-15T09:00:00Z"
+          },
+          {
+            "conversation_id": "c1",
+            "idx": 2,
+            "user_text": "Is the kayak trip to Norway still on this week?",
+            "assistant_text": "Yes, but pack warm layers and check the forecast again on Friday.",
+            "at": "2026-10-17T09:00:00Z"
+          },
+          {
+            "conversation_id": "c1",
+            "idx": 3,
+            "user_text": "Booked the kayak trip to Norway.",
+            "assistant_text": "Great, enjoy the fjords!",
+            "at": "2026-10-20T09:00:00Z"
+          }
+        ],
+        "facts": [
+          {
+            "id": "f1",
+            "text": "Kayak trip to Norway in June.",
+            "topic": "ongoing",
+            "recorded_at": "2026-10-19T09:00:00Z"
+          },
+          {
+            "id": "f2",
+            "text": "Packed dry bags and a spare paddle for the kayak trip to Norway.",
+            "topic": "ongoing",
+            "recorded_at": "2026-10-18T09:00:00Z"
+          },
+          {
+            "id": "f3",
+            "text": "Asked the club about renting a kayak for a weekend trip up the coast.",
+            "topic": "ongoing",
+            "recorded_at": "2026-10-16T09:00:00Z"
+          }
+        ]
+      },
+      "expect": {
+        "status": "on",
+        "entries": [],
+        "recent": [
+          {
+            "id": "c1",
+            "title": "Norway trip",
+            "summary": "",
+            "last_active_at": "2026-10-20"
+          }
+        ],
+        "recalled": [
+          {
+            "kind": "excerpt",
+            "date": "2026-10-20",
+            "conversation_title": "Norway trip",
+            "text": "User: Booked the kayak trip to Norway.\nAssistant: Great, enjoy the fjords!"
+          },
+          {
+            "kind": "fact",
+            "date": "2026-10-19",
+            "conversation_title": "",
+            "text": "Kayak trip to Norway in June."
+          },
+          {
+            "kind": "fact",
+            "date": "2026-10-18",
+            "conversation_title": "",
+            "text": "Packed dry bags and a spare paddle for the kayak trip to Norway."
+          },
+          {
+            "kind": "excerpt",
+            "date": "2026-10-17",
+            "conversation_title": "Norway trip",
+            "text": "User: Is the kayak trip to Norway still on this week?\nAssistant: Yes, but pack warm layers and check the forecast again on Friday."
+          }
+        ]
+      }
+    },
+    {
+      "id": "recalled_floor",
+      "now": "2026-10-21T10:00:00Z",
+      "conversation": null,
+      "message": "go golfing",
+      "corpus": {
+        "facts": [
+          {
+            "id": "f1",
+            "text": "Went golfing at Royal Melbourne.",
+            "topic": "preferences",
+            "recorded_at": "2026-10-19T09:00:00Z"
+          },
+          {
+            "id": "f2",
+            "text": "Going golfing on Saturday.",
+            "topic": "ongoing",
+            "recorded_at": "2026-10-20T09:00:00Z"
+          }
+        ]
+      },
+      "expect": {
+        "status": "on",
+        "entries": [],
+        "recent": [],
+        "recalled": [
+          {
+            "kind": "fact",
+            "date": "2026-10-20",
+            "conversation_title": "",
+            "text": "Going golfing on Saturday."
+          }
+        ]
+      }
+    },
+    {
+      "id": "recalled_floor_a_query_word_counts_once",
+      "now": "2026-10-21T10:00:00Z",
+      "conversation": null,
+      "message": "Remind me about my kayak",
+      "corpus": {
+        "facts": [
+          {
+            "id": "f1",
+            "text": "Went kayaking in my new kayak.",
+            "topic": "preferences",
+            "recorded_at": "2026-10-19T09:00:00Z"
+          },
+          {
+            "id": "f2",
+            "text": "Need a reminder to wax the kayak.",
+            "topic": "ongoing",
+            "recorded_at": "2026-10-18T09:00:00Z"
+          }
+        ]
+      },
+      "expect": {
+        "status": "on",
+        "entries": [],
+        "recent": [],
+        "recalled": [
+          {
+            "kind": "fact",
+            "date": "2026-10-18",
+            "conversation_title": "",
+            "text": "Need a reminder to wax the kayak."
+          }
+        ]
+      }
+    },
+    {
+      "id": "recalled_floor_cjk_bigrams",
+      "now": "2026-10-21T10:00:00Z",
+      "conversation": null,
+      "message": "我下周去东京的行程是什么时候",
+      "corpus": {
+        "facts": [
+          {
+            "id": "f1",
+            "text": "用户11月3日到10日去东京旅行",
+            "topic": "ongoing",
+            "recorded_at": "2026-10-01T09:00:00Z"
+          },
+          {
+            "id": "f2",
+            "text": "不知道什么时候搬家",
+            "topic": "ongoing",
+            "recorded_at": "2026-10-20T09:00:00Z"
+          },
+          {
+            "id": "f3",
+            "text": "东京很大",
+            "topic": "preferences",
+            "recorded_at": "2026-10-19T09:00:00Z"
+          }
+        ]
+      },
+      "expect": {
+        "status": "on",
+        "entries": [],
+        "recent": [],
+        "recalled": [
+          {
+            "kind": "fact",
+            "date": "2026-10-01",
+            "conversation_title": "",
+            "text": "用户11月3日到10日去东京旅行"
+          }
+        ]
+      }
+    },
+    {
+      "id": "hit_date_in_user_zone",
+      "now": "2026-11-11T02:00:00Z",
+      "timezone": "Australia/Sydney",
+      "conversation": null,
+      "message": "When is my kayak lesson?",
+      "corpus": {
+        "conversations": [
+          {
+            "id": "c1",
+            "title": "Lessons"
+          }
+        ],
+        "rounds": [
+          {
+            "conversation_id": "c1",
+            "idx": 1,
+            "user_text": "Booked a kayak lesson.",
+            "assistant_text": "Have fun!",
+            "at": "2026-11-10T21:00:00Z"
+          }
+        ],
+        "facts": [
+          {
+            "id": "f1",
+            "text": "Booked a kayak lesson for Saturday.",
+            "topic": "ongoing",
+            "recorded_at": "2026-11-10T20:00:00Z"
+          }
+        ]
+      },
+      "expect": {
+        "status": "on",
+        "entries": [],
+        "recent": [
+          {
+            "id": "c1",
+            "title": "Lessons",
+            "summary": "",
+            "last_active_at": "2026-11-11"
+          }
+        ],
+        "recalled": [
+          {
+            "kind": "excerpt",
+            "date": "2026-11-11",
+            "conversation_title": "Lessons",
+            "text": "User: Booked a kayak lesson.\nAssistant: Have fun!"
+          },
+          {
+            "kind": "fact",
+            "date": "2026-11-11",
+            "conversation_title": "",
+            "text": "Booked a kayak lesson for Saturday."
+          }
+        ]
+      }
+    },
+    {
+      "id": "recalled_fact_carries_until",
+      "now": "2026-11-20T10:00:00Z",
+      "conversation": null,
+      "message": "When is my flight home from Tokyo?",
+      "corpus": {
+        "facts": [
+          {
+            "id": "f1",
+            "text": "Flies home from Tokyo again on 3 December, after a week in Kyoto with friends.",
+            "topic": "ongoing",
+            "recorded_at": "2026-10-01T09:00:00Z",
+            "valid_until": "2026-12-03"
+          },
+          {
+            "id": "f2",
+            "text": "Flies home from Tokyo on 10 November.",
+            "topic": "ongoing",
+            "recorded_at": "2026-10-02T09:00:00Z",
+            "valid_until": "2026-11-10"
+          }
+        ]
+      },
+      "expect": {
+        "status": "on",
+        "entries": [],
+        "recent": [],
+        "recalled": [
+          {
+            "kind": "fact",
+            "date": "2026-10-02",
+            "conversation_title": "",
+            "text": "(until 2026-11-10) Flies home from Tokyo on 10 November."
+          },
+          {
+            "kind": "fact",
+            "date": "2026-10-01",
+            "conversation_title": "",
+            "text": "(until 2026-12-03) Flies home from Tokyo again on 3 December, after a week in Kyoto with friends."
+          }
+        ]
+      }
+    },
+    {
+      "id": "recalled_excludes_current_conversation",
+      "now": "2026-10-21T10:00:00Z",
+      "conversation": "c1",
+      "message": "When is the kayak trip to Norway?",
+      "corpus": {
+        "conversations": [
+          {
+            "id": "c1",
+            "title": "Trip"
+          },
+          {
+            "id": "c2",
+            "title": "June plans"
+          }
+        ],
+        "rounds": [
+          {
+            "conversation_id": "c1",
+            "idx": 1,
+            "user_text": "Planning a kayak trip to Norway.",
+            "assistant_text": "Pack a drybag.",
+            "at": "2026-10-20T09:00:00Z"
+          },
+          {
+            "conversation_id": "c2",
+            "idx": 1,
+            "user_text": "The kayak trip is in June.",
+            "assistant_text": "Sounds fun.",
+            "at": "2026-10-18T09:00:00Z"
+          }
+        ],
+        "facts": [
+          {
+            "id": "f1",
+            "text": "Booked a kayak trip to Norway.",
+            "topic": "ongoing",
+            "recorded_at": "2026-10-20T10:00:00Z",
+            "conversation_id": "c1"
+          },
+          {
+            "id": "f2",
+            "text": "The kayak trip to Norway is in June.",
+            "topic": "ongoing",
+            "recorded_at": "2026-10-17T09:00:00Z",
+            "conversation_id": "c2"
+          },
+          {
+            "id": "f3",
+            "text": "Packed a drybag for the kayak trip.",
+            "topic": "ongoing",
+            "recorded_at": "2026-10-16T09:00:00Z"
+          }
+        ]
+      },
+      "expect": {
+        "status": "on",
+        "entries": [],
+        "recent": [
+          {
+            "id": "c2",
+            "title": "June plans",
+            "summary": "",
+            "last_active_at": "2026-10-18"
+          }
+        ],
+        "recalled": [
+          {
+            "kind": "excerpt",
+            "date": "2026-10-18",
+            "conversation_title": "June plans",
+            "text": "User: The kayak trip is in June.\nAssistant: Sounds fun."
+          },
+          {
+            "kind": "fact",
+            "date": "2026-10-17",
+            "conversation_title": "June plans",
+            "text": "The kayak trip to Norway is in June."
+          },
+          {
+            "kind": "fact",
+            "date": "2026-10-16",
+            "conversation_title": "",
+            "text": "Packed a drybag for the kayak trip."
+          }
+        ]
+      }
+    }
+  ]
+}

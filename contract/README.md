@@ -2,8 +2,8 @@
 
 Byte-exact engine output that every Talk2View SDK must handle the same way. No build step, no
 package manifest: just files, copied from the Talk2View engine, which generates and checks them.
-Here they are replayed by `tests/test_contract.py`, `tests/test_contract_ops.py` and
-`embed/tests/ops.test.ts`.
+Here they are replayed by `tests/test_contract.py`, `tests/test_contract_ops.py`,
+`tests/test_contract_memory.py` and `embed/tests/ops.test.ts`.
 
 | Path | What | Who writes it |
 |---|---|---|
@@ -13,6 +13,10 @@ Here they are replayed by `tests/test_contract.py`, `tests/test_contract_ops.py`
 | `expected/<id>.events.json` | `{"phases": [[event, …], …]}` — normalised chat events (TS key names), one list per SDK call | Hand-written |
 | `expected/<id>.snapshot.json` | Final chat state: `messages` without `id`/`timestamp`, plus `error`, `threadId`, `pendingApproval` | Hand-written |
 | `ops/cases.json` | Op batches and the state they must give, or `error: true`. Python's `state._apply_op` (`tests/test_contract_ops.py`) and the embed page's `applyOps` (`embed/tests/ops.test.ts`) replay every case | Hand-written |
+| `memory/op_cases.json` | Memory entry op batches, each applied to its case's `entries` at `now`: `expect` is every entry afterwards, hidden ones included, and the rule name of each op dropped. Ids, duplicates, locked entries, forget's whole-word match, and text caps counted in code points, never graphemes or UTF-16 units. Python's `apply_entry_ops` and `MemoryStore.apply_ops` (`tests/test_contract_memory.py`, in talk2view-python) replay every case | Hand-written; talk2view-python's memory store is the oracle |
+| `memory/search_cases.json` | One corpus of `conversations`, `rounds` and `facts`, and the searches run on it: a `query`, its terms built with `word_lists.json`, with an optional date window, `limit`, `timezone` and `exclude_conversation`, and the hits it must give, best first (`f<N>` for a fact, `r:<conversation_id>:<idx>` for a round), some with their `search_memory` results; and `tool_cases`, `search_memory` calls with their whole result: the limit kept within 8 to 20 (12 when left out), dates that find nothing searched again without them, and the result's `note`. Excerpts are cut in code points, a round's at most 988 of them: a window around its first match and, when its reply holds a match that window misses, a second around the best of those. `MemoryStore.search` and `MemoryStore.search_result_json` replay every case on each backend | Hand-written; talk2view-python's memory store is the oracle |
+| `memory/payload_cases.json` | A turn's `memory` field, `{status, entries, recent, recalled}`, for each case's `now`, `timezone`, current `conversation`, user `message` and `corpus` (as in `search_cases.json`, plus `entries`): expiry on the user's day, the caps in code points (entries 40 and 6,000, recent 8 and 3,000, recalled 4 and 4,000) and pre-selection's floor. `MemoryStore.turn_payload` replays every case on each backend | Hand-written; talk2view-python's memory store is the oracle |
+| `memory/word_lists.json` | The word lists the memory cases turn on, each sorted: `stop_words` and `cjk_stop_bigrams`, which a search query leaves out, and `forget_vague_words`, which name nothing in a forget's phrase. `tests/test_contract_memory.py` pins them equal to talk2view-python's `STOP_WORDS`, `CJK_STOP_BIGRAMS` and `FORGET_VAGUE_WORDS` | Generated from talk2view-python's constants |
 
 The engine is the oracle. Its own tests rebuild every `sse/` and `http/` file from engine code
 and assert the committed bytes still match, so an engine change that alters the wire format
@@ -37,10 +41,12 @@ lines and the missing `[DONE]` after an interrupt or approval chunk are the cont
 | `error_chunk` | text, then an `error` chunk whose message is mirrored into `delta.content` |
 | `heartbeat_preamble` | the `: t2v stream open` comment and empty-delta heartbeat chunks around one text delta |
 | `tool_events_image` | `tool_start` / heartbeat / `tool_end` with an image `display` — Python only until the TS follow-up |
+| `memory_event` | a text delta, a non-terminal `memory` chunk with two ops, stop, `[DONE]` — Python only until the TS phase |
 | `unspaced_data` | `text_stop` with `data:` and no space (legal per the EventStream spec; the engine never emits it, so this one is derived) |
 
 Event normalisation (both suites): TS `ChatEvent` key names (`toolName`, `toolCallId`, `threadId`,
 `errorType`), `undefined`/`None` fields dropped, `todos` text under `content`. Python-only events
-add `kind`/`details` (engine approval) and `{"type": "tool_event", "event": "tool_start" | "tool_end", …}`.
+add `kind`/`details` (engine approval), `{"type": "tool_event", "event": "tool_start" | "tool_end", …}`
+and `{"type": "memory", "toolCallId", "ops"}`.
 `manifest.pythonOnlyStepKeys` lists the `ToolStep` keys the TS suite strips from an expected
 snapshot before comparing.

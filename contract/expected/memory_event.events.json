@@ -1,0 +1,16 @@
+{
+  "phases": [
+    [
+      { "type": "text", "content": "Noted. " },
+      {
+        "type": "memory",
+        "toolCallId": "call_contract_3",
+        "ops": [
+          { "op": "add", "topic": "preferences", "text": "Prefers metric units" },
+          { "op": "remove", "id": "e7" }
+        ]
+      },
+      { "type": "done", "threadId": "thread_contract" }
+    ]
+  ]
+}

@@ -5,6 +5,42 @@ based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## Unreleased
 
+### Added
+
+- **On-device memory.** `Talk2View(memory_path=...)` gives the assistant a memory of the
+  end-user that lives only on their device: one SQLite file per user (a guest too), `0600`.
+  A `memory_path` directory the SDK has to create is made `0700`; a parent it has to create
+  too gets the default mode, and an existing directory is left as found, so point
+  `memory_path` at a directory under one that already exists. `t2v.memory` is the
+  signed-in user's `T2VMemory`, and `t2v.memory.store` its `MemoryStore`; both are in
+  `talk2view.memory`, with `MemoryEntry`, `Fact`, `SearchHit` and `AppliedBatch`. Each turn
+  sends the user's entries, recent conversations and recalled passages as its `memory`
+  field, the agent's `search_memory` calls are answered from the store, its `memory`
+  events are applied to it, and each finished round is recorded in the store's log.
+  `t2v.memory.last_applied` is the batch a `memory` event applied, and
+  `t2v.memory.undo(batch_id)` takes it back within 30 seconds, for a "Memory updated"
+  notice with an undo button. Extraction and consolidation run on a background thread
+  (`run_due()` before every turn, a new conversation on `clear_session()` and on
+  `detach_session()`, which the chat page's New chat and its list of chats use,
+  `start_background()` for a host that can sit idle) and never hold up a chat. A failed
+  call is silent: one log line, then a cooldown of 60 s that doubles up to an hour, which
+  every queued call checks again as it starts. A conversation whose extraction keeps
+  failing waits on its own (1, 4, 16, then 64 hours) and holds no other back; from its
+  fifth failure in a row, while other calls succeed, its failing rounds are skipped,
+  though they stay searchable. Incognito conversations and a pause switch
+  send nothing, a guest's memory makes no engine call, and the user can export
+  (`store.export_markdown()`, `store.export_json()`), import (`t2v.memory.import_text()`)
+  and reset (`store.reset()`) their memory. The engine keeps no memory content, and there
+  is no sync. See "On-device memory" in the README. Without `memory_path` nothing changes:
+  no flag, no `memory` field, no handler.
+- `Capabilities.memory` and `Capabilities.memory_search`, which `memory_path` sets; the
+  `memory` chat event (`ChatEvent.type == "memory"`, with `tool_call_id` and
+  `memory_ops`); and `T2VSession.send_message(memory=...)`, which sends the turn's memory
+  field on `/messages` and on every `/resume`.
+- The `memory` extra, `pip install 'talk2view[memory]'`: `apsw`, which bundles a SQLite
+  with FTS5, on Python 3.11 and newer, for a host whose `sqlite3` lacks FTS5. Without
+  either, the store keeps its search index in plain tables (`store.backend == "scan"`).
+
 ### Security
 
 - The chat page bundles `dompurify` 3.4.17 and `zod` 4.6.6, past DOMPurify's

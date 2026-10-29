@@ -108,6 +108,7 @@ t2v = Talk2View(
     anonymous_auto_start=False,         # Optional — start a demo session when signed out
     request_timeout=30.0,               # Optional — seconds per request (and to open a stream)
     upload_timeout=120.0,               # Optional — seconds per upload (attachments, audio)
+    memory_path=None,                   # Optional — a directory for on-device memory (see below)
 )
 ```
 
@@ -176,7 +177,9 @@ Explicitly create a new session. Returns a `T2VSession`.
 
 #### `t2v.clear_session()`
 
-Delete the current session and reset conversation history.
+Delete the current session and reset conversation history. With `memory_path`, it also
+starts a new memory conversation and queues the one that ended for extraction (see
+[On-device memory](#on-device-memory-memory_path)).
 
 #### `t2v.detach_session()`
 
@@ -185,6 +188,10 @@ fresh one. Unlike `clear_session()`, no `DELETE` goes out: the conversation
 this session belongs to may be one you switch back to, and its turn may still
 be finishing. `t2v.partner_key` is the partner key `Talk2View` was built with
 (read-only).
+
+With `memory_path`, it also starts a new memory conversation and queues the one put
+aside for extraction, as `clear_session()` does (see
+[On-device memory](#on-device-memory-memory_path)).
 
 #### `t2v.upload_attachment(file, filename=None, mime_type=None)`
 
@@ -517,6 +524,10 @@ t2v = Talk2View(
 )
 ```
 
+`memory` and `memory_search` (the user's on-device memory, and the agent's `search_memory`
+tool) are set for you by `Talk2View(memory_path=...)`; see
+[On-device memory](#on-device-memory-memory_path).
+
 ### Running tool handlers on the host's main thread
 
 Desktop hosts (3D Slicer, FreeCAD, Blender) only allow scene and UI access from
@@ -554,7 +565,8 @@ waits for it and uses its result.
 `on_anonymous_unavailable` and `t2v.skills.on_change` can run on any SDK-owned
 thread — a `ChatController` worker, the `t2v-warm-up` daemon, a skills debounce
 timer, the `t2v-register-skills` and `t2v-register-tools` threads a new session
-re-registers on — not just the thread that registered them. Unlike tool handlers and
+re-registers on, the `talk2view-memory` worker — not just the thread that
+registered them. Unlike tool handlers and
 `deliver_on_main` subscribers, these do not go through the dispatcher
 automatically: do any UI work from inside them with `run_on_main(dispatcher, fn)`.
 
@@ -929,10 +941,13 @@ rest of the page's life). The page then sends the stopped turn again with
 `reload`. "Default" in the model picker returns to the partner's default
 model.
 
-The page's "new chat" (`newSession`) runs `controller.clear()`, which deletes
-the engine session. The engine keeps one session per account and partner key,
-so that is also the session of any other Talk2View app the user is signed in
-to with the same partner key.
+The page's "new chat" (`threadNew`) keeps the current conversation in the list
+of chats and starts a blank one: the engine session is detached, not deleted.
+With no list (`ChatFeatures(thread_list=False)`, or a controller without
+`exchange_conversation` or `follow_identity`) it sends `newSession` instead,
+which runs `controller.clear()` and deletes the engine session. The engine
+keeps one session per account and partner key, so that is also the session of
+any other Talk2View app the user is signed in to with the same partner key.
 
 **Security.** The server binds `127.0.0.1` on an ephemeral port and admits
 a request only from a loopback peer, with its own `Host`, and with its own
@@ -1110,6 +1125,310 @@ t2v.preferences.on_change(lambda p: print(p))
 Every value is a string or `None`: anything else raises `TypeError`, and a `font_size`
 other than `small`/`medium`/`large` raises `ValueError`, before anything is stored.
 
+### On-device memory (`memory_path`)
+
+With `memory_path`, the assistant remembers the end-user across conversations: who they
+are, what they prefer, what they are working on, and what was said in earlier chats. The
+memory lives only on the user's device, in a SQLite file under `memory_path`. Talk2View's
+engine keeps no memory content: it reads what a call carries while the call runs, and
+answers with changes for your app to apply. There is no sync in this version, so another
+device, or another `memory_path`, has a memory of its own. Memory must also be turned on
+for your partner. Until it is, the engine answers the memory calls with
+`403 memory_disabled`, ignores each turn's `memory` field and gives the agent no memory
+tools, and the SDK goes on recording the log of the chats. Without `memory_path` (the
+default) memory is off and nothing changes.
+
+```python
+from pathlib import Path
+from talk2view import Talk2View
+
+app_dir = Path.home() / ".config" / "myapp"        # a directory your app has made already
+t2v = Talk2View(partner_key="pk_live_...", memory_path=app_dir / "talk2view-memory")
+t2v.auth.login("user@example.com", "password")
+
+for event in t2v.chat("Remember that I prefer metric units"):
+    ...                      # memory is wired into chat(): there is nothing else to call
+
+memory = t2v.memory          # the signed-in user's T2VMemory
+```
+
+`memory_path` is a directory (a `str` or any path-like). Each user, a guest included, keeps
+a file of their own in it, so accounts that share a device never see each other's memory.
+`t2v.memory` is the signed-in user's memory, a `T2VMemory`, opened on first use. It is
+`None` without `memory_path`, with nobody signed in, and after `close()`. Signing out, or
+in as someone else, closes the previous user's memory at once: its queued engine calls are
+dropped, and one already in flight is not waited for. Reading `t2v.memory` raises when the
+file cannot be opened; `chat()` then logs one line and goes on without memory for that turn.
+
+The memory types are in `talk2view.memory`, not at the top level: `T2VMemory`
+(`t2v.memory`), `MemoryStore` (`t2v.memory.store`, the user's file), and the records they
+return, `MemoryEntry`, `Fact`, `SearchHit` and `AppliedBatch`.
+
+#### What it keeps
+
+The file holds three things. Every character count in this section, caps and limits
+included, is in Unicode code points, not bytes or graphemes.
+
+- **Entries**: short statements about the user, each with a topic (`identity`, `work`,
+  `people`, `preferences`, `ongoing` or `instructions`) and, optionally, a `valid_until`
+  date. Every turn sends the entries not past their date, up to 40 of them and 6,000
+  characters in all. The agent adds and changes entries when the user says "remember..."
+  or "forget...", and extraction does too.
+- **Facts**: dated statements that extraction draws from conversations. A fact that
+  changes is superseded, not deleted. Search finds facts; a turn never sends them all.
+- **The log of the chats**: each round (what the user said, and the reply) of every
+  conversation that is not incognito, with a summary once extraction has read it. Search
+  runs over the facts and these rounds.
+
+#### Each turn, with no code from you
+
+`memory_path` sets the `memory` and `memory_search` flags of `Capabilities` on top of the
+`capabilities` you pass, and keeps them across `set_chat_defaults`. Then every `chat()`:
+
+1. calls `run_due()`, which only queues work (see Triggers);
+2. sends the turn's `memory` field with the message: `status: "on"`, the user's `entries`,
+   the `recent` conversations and the `recalled` passages from older ones that match the
+   message (Privacy, below, lists what goes). The same field rides every `/resume` of the
+   turn, and the resend after a lost session;
+3. answers the agent's `search_memory` calls from the store (the tool is the engine's own,
+   so you register nothing); a malformed argument gets a short `{"error": ...}` result;
+4. applies each `memory` event, the agent's changes to the user's entries (`add`,
+   `update`, `remove` or `forget`), before passing the event on to you, so a UI only has to
+   show it (see "Showing a change, and undoing it");
+5. records the round in the store's log when the turn is `done`. A turn that ended in an
+   error, was stopped, or applied a `forget` or `remove` records none: a forget's own words
+   would name what was forgotten.
+
+Set `Capabilities(timezone=...)`: memory reads the user's day from it (when an entry
+expires, the date shown on a fact) and falls back to the system's zone.
+
+#### Showing a change, and undoing it
+
+A `memory` event reaches you after the SDK has applied it, and `t2v.memory.last_applied`
+is that event's `AppliedBatch`: `applied` lists the changes that took effect, `dropped`
+names the rules that refused the others. Read it as the event arrives, because the next
+`memory` event replaces it and each turn starts with `None`. The batch can be taken back
+for 30 seconds:
+
+```python
+for event in t2v.chat("Remember that I prefer metric units"):
+    if event.type == "memory":
+        batch = t2v.memory.last_applied                    # None: nothing was applied
+        if batch is not None and batch.applied:
+            show_memory_updated(batch.id, batch.applied)   # your UI, with an Undo button
+
+# When the user taps Undo: True if taken back. False, and never an exception, after the
+# 30 seconds, for a batch undone already or overtaken by a later change, and once closed.
+undone = t2v.memory.undo(batch_id)
+```
+
+#### Triggers: when memory learns
+
+The engine turns conversations into facts, entry changes and a summary (extraction,
+`POST /v1/memory/extract`) and tidies the entries (consolidation,
+`POST /v1/memory/consolidate`). The SDK makes both calls in the background (you can also
+call them directly, see below), and nothing runs on a timer unless you start one:
+
+| Trigger | What it queues |
+|---|---|
+| `chat()`, before every turn | `run_due()`: the purge of removed or forgotten items past their 30 s undo window, extraction of each conversation with unread rounds that has been idle for 10 minutes, and consolidation when it is due |
+| The first `run_due()` after the memory opens | Extraction of every conversation with unread rounds, idle or not, so a chat cut short by quitting is not lost |
+| `t2v.clear_session()`, `t2v.detach_session()` | A new conversation (`t2v.memory.conversation_id` changes) and extraction of the one that ended. `ChatController.clear()` calls the first; `restore_conversation` and `exchange_conversation`, which the chat page's New chat and its list of chats use, call the second |
+| `t2v.memory.start_background(interval_s=60.0)` | `run_due()` every `interval_s` seconds on a daemon thread, until `t2v.memory.stop_background()` or the memory closes (a sign-out, or another user signing in: start it again for the next user). For a host that can sit idle after the last message, where no `chat()` would extract that conversation |
+
+The chat page's list of chats and the memory's conversations are not linked in this release:
+switching chats starts a new memory conversation, even back to a chat that had one, and
+deleting a chat from the list leaves its rounds in memory
+(`t2v.memory.store.delete_conversation` deletes them; `t2v.memory.store.reset()` deletes
+everything).
+
+Consolidation is due when the entries are over their caps (more than 40, or more than
+6,000 characters), when 10 changes have built up and 7 days have passed since the last
+one (or since the file was created), when the last one could not take every entry, and
+right after an import. One that has been applied is not repeated until memory has
+changed. `run_due()` never waits and never raises; it returns the keys it queued
+(`"extract:<conversation id>"`, `"consolidate"`). `t2v.memory.wait_idle(timeout)` waits
+for the queue, for tests and shutdown. A conversation still unextracted when the app
+quits is extracted at the next launch.
+
+#### Incognito, paused, and guests
+
+An **incognito** conversation uses no memory and adds none. Mark it before its first
+message:
+
+```python
+t2v.clear_session()              # a new conversation...
+t2v.memory.incognito = True      # ...marked incognito before its first message
+```
+
+`t2v.memory.new_conversation(incognito=True)` starts the memory's conversation incognito in
+one step (it does not clear the engine session, as `clear_session()` does). An incognito
+turn sends only `{"status": "incognito"}`, applies no `memory` events, records no rounds
+and finds nothing when the agent searches, and extraction never reads the conversation.
+`clear_session()` and `detach_session()` end it: the next conversation is not incognito,
+nor is a chat switched back to, so a host that keeps a list of chats marks one again when
+it puts it back on screen. Setting `incognito` after the first message deletes the rounds
+recorded so far.
+
+**Paused** is the user's switch for all memory, kept in the file
+(`t2v.memory.store.paused = True`). A paused turn sends only `{"status": "paused"}`, applies
+and records nothing and finds nothing, and no extraction, consolidation or import goes out;
+only the purge still runs.
+
+A **guest** (an anonymous demo session) has a memory of their own, and the turn field,
+`memory` events, search and rounds all work. Automatic memory needs an account (the engine
+answers a guest's memory calls with `403 memory_requires_account`), so the SDK makes no
+extraction, consolidation or import call for a guest. A guest who converts to an account
+keeps the user id, so the file carries over and their conversations are extracted then.
+
+#### What the user controls
+
+`t2v.memory.store` is the user's `MemoryStore`. A memory screen is built over it:
+
+```python
+store = t2v.memory.store
+
+entries = store.entries()                  # MemoryEntry: id, topic, text, valid_until, source, locked, ...
+facts = store.facts()                      # Fact (include_superseded=True adds the replaced ones)
+hits = store.search("kayaking", limit=5)   # SearchHit: kind, date, conversation, text, score, ref
+
+entry_id = entries[0].id
+store.edit_entry(entry_id, text="Prefers metric units")   # locks it: the engine's changes never touch it
+batch_id = store.delete_entry(entry_id)    # hidden for 30 seconds...
+store.undo(batch_id)                       # ...so the user can take it back
+store.forget("Sam")                        # hides every unlocked entry and every fact that holds the phrase
+
+store.paused = True                        # the pause switch
+store.include_sensitive = True             # lets an import keep sensitive topics (off by default)
+
+markdown = store.export_markdown(timezone="Australia/Perth")   # or store.export_json()
+ok = t2v.memory.import_text(pasted_text)   # memory the user exported from another assistant
+store.reset()                              # forget everything
+```
+
+- **Edit and delete.** `edit_entry` raises `KeyError` for an entry that is not there, and
+  `ValueError` naming the rule for text over 300 characters, a topic outside the six, or a
+  date that is not `YYYY-MM-DD`. A locked entry is passed by `forget` too, and by the
+  agent's `update` and `remove`; `delete_entry`, the user's own delete, removes it all the
+  same. It returns the batch id for `undo`, or `None` for an entry that is not there.
+- **Forget.** `forget(phrase)` matches whole words ("Sam" finds "Sam's", never "Samsung"),
+  also clears the phrase from the log of the chats, and returns an `AppliedBatch`; its
+  `id` is for `undo`. A removed or forgotten item stays hidden for 30 seconds, so `undo`
+  can bring it back, then the next purge (every turn runs one) deletes it.
+  `store.delete_conversation(conversation_id)` deletes one chat's log; the facts and
+  entries drawn from it stay until the user deletes them.
+- **Export** holds every entry and fact (replaced facts too, marked), not the log of the
+  chats, and nothing removed or forgotten.
+- **Import.** `import_text` sends the text to extraction in import mode and keeps what comes
+  back as imported, then queues a consolidation. It returns `True` when applied, and `False`
+  when the call failed or was refused (a guest, memory off for the partner, memory paused),
+  for text that is blank or over 200,000 characters, and when something was forgotten,
+  deleted, undone or reset while the call ran: its result could bring that back, so it is
+  discarded, and the import can be tried again. `import_text`, `extract` and `consolidate`
+  wait for the engine, up to 180 seconds, in the calling thread: call them from a worker
+  thread, never a UI thread.
+- **Reset** deletes every entry, fact, conversation record, round and undo batch, and
+  scrubs the file. The switches (`paused`, `include_sensitive`) stay.
+
+#### Failures, and never waiting
+
+Memory never makes `chat()` raise, and a failed engine call is silent: it returns `False`
+(a direct call) and logs one WARNING line on the `talk2view.memory` logger, with the HTTP
+status and the engine's error type or the exception's class, never any memory text. The
+next trigger tries again once the cooldown has run:
+
+- After a failed call, the calls the SDK queues itself (from `run_due()`, a new
+  conversation or an import) make no engine call for 60 seconds, twice as long after each
+  further failure in a row, at most an hour. Each checks again as it starts, so a backlog
+  meeting a failing engine makes one call, not one each. A `Retry-After` from the engine
+  makes the wait at least that long, still at most an hour. A call that succeeds ends the
+  cooldown. Direct calls (`extract()`, `consolidate()`, `import_text()`) ignore it, and
+  their outcome still updates it. The cooldown is not saved: after a relaunch the first
+  `run_due()` tries again at once.
+- A conversation whose extraction keeps failing (a firewall blocking what it holds, say)
+  never holds the others back. A failure that may be the request's own doing makes that
+  conversation wait on its own: 1 hour before its next automatic try, then 4, 16 and at
+  most 64 hours after each further failure in a row, while conversations with fewer
+  failures go first. A failure about the account or the service doesn't count: no answer
+  at all, 401, 402, 404, 429, 503, a 409 `retention_disclaimer_required`, or a 403
+  `memory_disabled`, `memory_requires_account`, `no_api_key`, `zdr_mode_blocked` or
+  `origin_not_allowed`. From the fifth failure in a row, if the engine has answered any
+  memory call (another conversation's extraction, a consolidation, an import) since the
+  failure before, extraction skips the rounds that kept failing: they are marked
+  extracted and never sent again, not even as context, and they stay in the log and in
+  search. While every call fails, nothing is skipped. The store keeps these counts, so
+  they hold across relaunches; `extract()` goes out regardless, and its outcome counts.
+- Extraction, consolidation and imports are charged to the end-user's own budget, as a
+  chat turn is. The engine refuses them with `402 memory_budget_low` while the user has
+  less than a floor left (currently 10% of their budget or $0.10, whichever is more),
+  which the SDK treats as any other failed call: silent, logged once, retried after the
+  cooldown.
+- A `403 memory_disabled` (memory is not turned on for the partner) turns the engine calls
+  off for the rest of the process: `t2v.memory.enabled`, a read-only property, becomes
+  `False` and stays that way for this `Talk2View`. It is also `False` once the memory is
+  closed. Chat is unaffected.
+
+The calls `run_due()` and a new conversation queue run one at a time on one daemon thread,
+`talk2view-memory`, so a chat never waits for one. That thread can also meet a rejected
+refresh token, so an `on_auth_state_change` listener can run on it (see the note on
+listener callbacks above). `T2VMemory(client, store, inline=True)` runs the calls in the
+caller, in order, for tests and evals that build their own `T2VMemory`; `Talk2View` never
+does.
+
+`chat()` and `respond_to_approval()` pass the turn's events through
+`t2v.memory.observe_turn` and `t2v.memory.observe_approval` for you, which is how `memory`
+events are applied and rounds recorded. Only a host that drives `T2VSession` itself calls
+them, together with `run_due`, `turn_payload` and `handle_search`.
+
+#### The file, its permissions and the SQLite backend
+
+- **One file per user**: `<memory_path>/<user id>.sqlite3`. An id of lowercase letters,
+  digits, `_` and `-` (1 to 128 of them; an engine UUID is one) names its file as it is.
+  Any other id is named by the first 32 hex characters of its SHA-256, so no id makes an
+  unsafe file name, and two ids that differ only in case never share a file.
+- **Permissions.** Nothing is created until the memory is first used. When the SDK has to
+  create the `memory_path` directory it makes it `0700`; a parent it has to create too
+  gets the default mode, and an existing directory is left as found, so point
+  `memory_path` at a directory under one that already exists. The file is created `0600`
+  before SQLite opens it, and SQLite gives its `-wal` and `-shm` files the same mode. On
+  Windows the permission calls are skipped, as `FileStorage`'s are: keep `memory_path` in
+  a folder only the user can read.
+- **Deleted text is scrubbed** from the file once its undo window has passed (at once for
+  a reset or a chat deleted with `store.delete_conversation`).
+- **Search** runs on SQLite's FTS5 where it can, and the store picks a backend when it
+  opens: the standard library's `sqlite3` when it was built with FTS5; else `apsw`, which
+  bundles a SQLite with FTS5; else `scan`, which needs no FTS5, keeps the index in plain
+  tables and scores it in Python, so a very large memory searches more slowly. Memory works
+  on all three, `t2v.memory.store.backend` says which is in use, and a file can move between
+  them (the store rebuilds the index when it opens a file indexed the other way). To have
+  `apsw` (3.54 or later), install the `[memory]` extra; apsw needs Python 3.11, so on 3.10
+  the extra adds nothing:
+
+```bash
+pip install 'talk2view[memory]'
+```
+
+#### Privacy
+
+Memory is kept only on the device: one file per user, readable only by that user where the
+platform allows, and the engine keeps no memory content. There is no sync in this version.
+What leaves the device is what the engine needs to use it, and it reaches the AI providers
+as a message does, so [Intended use and data handling](#intended-use-and-data-handling)
+applies to it too:
+
+- with every turn: the entries, the titles and summaries of recent conversations, and up
+  to four recalled passages;
+- when the agent searches: the results of that search;
+- extraction: a conversation's new rounds with up to six messages of context before them,
+  the entries and the facts related to what the user said. Consolidation: the entries, the
+  facts and the conversation summaries. An import: the text the user gives it, with the
+  entries and related facts as an extraction has;
+- an incognito or paused turn sends only its status.
+
+Tell your users that memory lives on their device and is sent to the AI with each message,
+and how to pause it. A sign-out closes the memory and leaves the file: to make the app
+forget a user, call `t2v.memory.store.reset()` first, or delete their file.
+
 ### `t2v.voice`
 
 ```python
@@ -1170,6 +1489,7 @@ Events yielded by `chat()` / `send_message()`.
 | `"approval_result"` | `tool_name`, `tool_call_id`, `decision` | The decision that was applied (`"once"`, `"always"` or `"deny"`) |
 | `"status"` | `status`, `message` | Agent status update (e.g., "thinking", "planning") |
 | `"todos"` | `todos` | Agent's task plan |
+| `"memory"` | `tool_call_id`, `memory_ops` | Changes the agent asked to make to the user's memory (needs `Capabilities(memory=True)`, which `memory_path` sets). The SDK has applied them before you see the event, unless memory is paused, the chat incognito or `memory_path` is unset; `t2v.memory.last_applied` is what it applied |
 | `"error"` | `message`, `error_type`, `detail` | A failure reported inside the stream (e.g. `"session_lost"`, a budget error). Never rendered as text |
 | `"done"` | `thread_id` | Stream complete |
 
@@ -1459,6 +1779,8 @@ the real client. See [`embed/README.md`](embed/README.md) and
 
 - Python >= 3.10
 - Single runtime dependency: `httpx >= 0.27`
+- Optional: `apsw >= 3.54` on Python 3.11+, through the `[memory]` extra
+  (`pip install 'talk2view[memory]'`), for on-device memory on a host whose `sqlite3` lacks FTS5
 
 ## License
 

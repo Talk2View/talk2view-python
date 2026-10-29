@@ -1,0 +1,8 @@
+data: {"id":"chatcmpl-contract","object":"chat.completion.chunk","created":1700000000,"model":"contract-model","choices":[{"index":0,"message":null,"delta":{"role":null,"content":"Noted. ","tool_calls":null,"annotations":null,"reasoning_content":null},"finish_reason":null}],"thread_id":"thread_contract","interrupt":null,"approval":null,"status":null,"tool_event":null,"todos":null,"error":null}
+
+data: {"id":"chatcmpl-contract","object":"chat.completion.chunk","created":1700000000,"model":"contract-model","choices":[{"index":0,"delta":{}}],"thread_id":"thread_contract","memory":{"ops":[{"op":"add","topic":"preferences","text":"Prefers metric units"},{"op":"remove","id":"e7"}],"tool_call_id":"call_contract_3"}}
+
+data: {"id":"chatcmpl-contract","object":"chat.completion.chunk","created":1700000000,"model":"contract-model","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"thread_id":"thread_contract"}
+
+data: [DONE]
+
