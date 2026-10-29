@@ -24,7 +24,10 @@ based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `detach_session()`, which the chat page's New chat and its list of chats use,
   `start_background()` for a host that can sit idle) and never hold up a chat. A failed
   call is silent: one log line, then a cooldown of 60 s that doubles up to an hour, which
-  every queued call checks again as it starts. Incognito conversations and a pause switch
+  every queued call checks again as it starts. A conversation whose extraction keeps
+  failing waits on its own (1, 4, 16, then 64 hours) and holds no other back; from its
+  fifth failure in a row, while other calls succeed, its failing rounds are skipped,
+  though they stay searchable. Incognito conversations and a pause switch
   send nothing, a guest's memory makes no engine call, and the user can export
   (`store.export_markdown()`, `store.export_json()`), import (`t2v.memory.import_text()`)
   and reset (`store.reset()`) their memory. The engine keeps no memory content, and there

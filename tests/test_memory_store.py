@@ -713,6 +713,74 @@ def test_incognito_conversation_records_nothing(store: MemoryStore) -> None:
     assert store.record_round("c1", "Public now", "OK.", at=T0) == 1
 
 
+def test_extraction_failures_count_until_extraction_moves_on(
+    store: MemoryStore, clock: FakeClock
+) -> None:
+    """R122: each failure counts one more in a row and keeps the rounds the first was
+    reading, and unextracted() puts the conversation after those with fewer. Skipping the
+    rounds marks them extracted and keeps them out of later requests' context; extraction
+    moving on, or the conversation turning incognito, clears the count. A conversation
+    marked incognito, or with no record, counts none."""
+    store.record_round("c1", "q1", "a", at=T0 - timedelta(minutes=30))
+    store.record_round("c2", "q", "a", at=T0 - timedelta(minutes=20))
+    assert store.extraction_failed("c1", 1, at=T0) == 1
+    store.record_round("c1", "q2", "a", at=T0)
+    assert store.extraction_failed("c1", 2, at=T0 + timedelta(hours=1)) == 2
+    record = _conversation(store, "c1")
+    assert (record.extract_failures, record.extract_failed_at, record.extract_failed_through) == (
+        2,
+        "2026-10-21T11:00:00Z",
+        1,
+    )
+    assert _ids(store.unextracted()) == ["c2", "c1"]
+
+    store.skip_failed_rounds("c1")
+    record = _conversation(store, "c1")
+    assert (record.extracted_through, record.extract_skipped_through) == (1, 1)
+    assert (record.extract_failures, record.extract_failed_at, record.extract_failed_through) == (
+        0,
+        None,
+        None,
+    )
+    assert store.rounds("c1", after=record.extracted_through) == [
+        (2, "q2", "a", "2026-10-21T10:00:00Z")
+    ]
+
+    assert store.extraction_failed("c2", 1, at=T0) == 1
+    store.mark_extracted("c2", 1)
+    assert _conversation(store, "c2").extract_failures == 0
+
+    assert store.extraction_failed("c1", 2, at=T0) == 1
+    store.set_incognito("c1", True)
+    record = _conversation(store, "c1")
+    assert (record.extract_failures, record.extract_failed_through) == (0, None)
+    assert record.extract_skipped_through == 0
+    assert store.extraction_failed("c1", 2, at=T0) == 0
+    assert store.extraction_failed("gone", 1, at=T0) == 0
+
+
+def test_last_answered_at_records_the_engines_last_good_answer(
+    tmp_path: Path, backend: str, clock: FakeClock
+) -> None:
+    """R122: when the engine last answered a memory call well, kept across launches. Each
+    answer's time replaces the one before, even an earlier time, so a stamp from a clock
+    that ran ahead lasts only until the next answer."""
+    path = tmp_path / "u1.sqlite3"
+    memory = MemoryStore(path, backend=backend, clock=clock)  # type: ignore[arg-type]
+    try:
+        assert memory.last_answered_at() is None
+        memory.mark_answered(T0 + timedelta(days=30))
+        memory.mark_answered(T0)
+        assert memory.last_answered_at() == "2026-10-21T10:00:00Z"
+    finally:
+        memory.close()
+    memory = MemoryStore(path, backend=backend, clock=clock)  # type: ignore[arg-type]
+    try:
+        assert memory.last_answered_at() == "2026-10-21T10:00:00Z"
+    finally:
+        memory.close()
+
+
 def test_unextracted_lists_conversations_with_new_rounds(
     store: MemoryStore, clock: FakeClock
 ) -> None:

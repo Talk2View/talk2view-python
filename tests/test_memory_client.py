@@ -818,6 +818,38 @@ def test_extracted_through_counts_the_context_messages(
     assert record is not None and record.extracted_through == 8
 
 
+def test_no_request_carries_rounds_extraction_gave_up_on(tmp_path: Path, clock: FakeClock) -> None:
+    """R122: rounds extraction skipped (extract_skipped_through) go in no later request,
+    not even as context: the context is what it read after them."""
+    store = MemoryStore(tmp_path / "user-ann.sqlite3", clock=clock)
+    try:
+        for n in range(1, 6):
+            store.record_round("c1", "User message {}.".format(n), "Reply {}.".format(n))
+        assert store.extraction_failed("c1", 2, at=T0) == 1
+        store.skip_failed_rounds("c1")
+        store.mark_extracted("c1", 3)
+        record = store.conversation("c1")
+        assert record is not None
+        assert (record.extracted_through, record.extract_skipped_through) == (3, 2)
+
+        body, through = bodies.extract_body(
+            store, record, mode="conversation", today="2026-10-21", timezone=None
+        )
+    finally:
+        store.close()
+
+    assert body is not None and through == 5
+    assert [m["text"] for m in body["conversation"]["messages"]] == [
+        "User message 3.",
+        "Reply 3.",
+        "User message 4.",
+        "Reply 4.",
+        "User message 5.",
+        "Reply 5.",
+    ]
+    assert body["extracted_through"] == 2
+
+
 def test_extraction_keeps_within_the_engine_caps(
     engine: MemoryCallsEngine, memory: T2VMemory
 ) -> None:
@@ -1037,19 +1069,48 @@ def test_one_extraction_per_conversation_in_flight(
 
 
 @pytest.mark.parametrize(
-    ("failure", "logged"),
+    ("failure", "logged", "waits"),
     [
-        ((402, "memory_budget_low"), "HTTP 402 memory_budget_low"),
-        ((403, "memory_requires_account"), "HTTP 403 memory_requires_account"),
-        ((429, "rate_limit_exceeded"), "HTTP 429 rate_limit_exceeded"),
-        ((503, "credit_check_unavailable"), "HTTP 503 credit_check_unavailable"),
-        ((504, "timeout"), "HTTP 504 timeout"),
-        (1.0, "network_error"),  # the client's own timeout
-        ({"summary": None, "facts": "none", "entry_ops": []}, "malformed answer"),
-        ([], "malformed answer"),
-        (lambda body: Response("not JSON"), "JSONDecodeError"),
+        ((402, "memory_budget_low"), "HTTP 402 memory_budget_low", False),
+        ((403, "memory_requires_account"), "HTTP 403 memory_requires_account", False),
+        ((403, "no_api_key"), "HTTP 403 no_api_key", False),
+        ((403, "zdr_mode_blocked"), "HTTP 403 zdr_mode_blocked", False),
+        ((403, "origin_not_allowed"), "HTTP 403 origin_not_allowed", False),
+        ((404, "not_found"), "HTTP 404 not_found", False),
+        (
+            (409, "retention_disclaimer_required"),
+            "HTTP 409 retention_disclaimer_required",
+            False,
+        ),
+        ((429, "rate_limit_exceeded"), "HTTP 429 rate_limit_exceeded", False),
+        ((503, "credit_check_unavailable"), "HTTP 503 credit_check_unavailable", False),
+        (1.0, "network_error", False),  # the client's own timeout
+        ((502, "upstream_error"), "HTTP 502 upstream_error", True),
+        ((504, "timeout"), "HTTP 504 timeout", True),
+        # A firewall's block: its page is no JSON.
+        (lambda body: Response("Forbidden", status=403), "HTTP 403 unknown_error", True),
+        ({"summary": None, "facts": "none", "entry_ops": []}, "malformed answer", True),
+        ([], "malformed answer", True),
+        (lambda body: Response("not JSON"), "JSONDecodeError", True),
     ],
-    ids=["402", "403", "429", "503", "504", "timeout", "malformed", "not-an-object", "not-json"],
+    ids=[
+        "402",
+        "403-guest",
+        "403-no-key",
+        "403-zdr",
+        "403-origin",
+        "404",
+        "409-disclaimer",
+        "429",
+        "503",
+        "timeout",
+        "502",
+        "504",
+        "403-firewall",
+        "malformed",
+        "not-an-object",
+        "not-json",
+    ],
 )
 def test_extract_failures_are_silent_and_retried_later(
     engine: MemoryCallsEngine,
@@ -1059,9 +1120,11 @@ def test_extract_failures_are_silent_and_retried_later(
     monkeypatch: pytest.MonkeyPatch,
     failure: Any,
     logged: str,
+    waits: bool,
 ) -> None:
     """False and one WARNING with the status or kind only; nothing moves, and a later
-    trigger tries again."""
+    trigger tries again: once the cooldown is over, or, after failures that may be the
+    request's own doing, once the conversation's wait is (R122: 4 hours after two)."""
     monkeypatch.setattr(memory_client, "CALL_TIMEOUT_S", 0.2)
     memory.store.record_round("c1", "I moved to Perth", "Noted.")
     engine.replies["extract"][:] = [failure, failure]
@@ -1076,6 +1139,9 @@ def test_extract_failures_are_silent_and_retried_later(
     assert _conversation_mark(memory.store, "c1") == 0
     assert memory.store.facts() == [] and memory.store.entries() == []
     clock.now = T0 + timedelta(minutes=10)
+    if waits:
+        assert memory.run_due() == []
+        clock.now = T0 + timedelta(hours=4)
     assert memory.run_due() == ["extract:c1"]
     assert _conversation_mark(memory.store, "c1") == 1
     assert memory.enabled is True
@@ -1288,6 +1354,238 @@ def test_queued_jobs_check_the_cooldown_as_they_start(
     assert extracted == ["c1"] + conversations
     failed = (logging.WARNING, "Memory: extraction failed (HTTP 503 credit_check_unavailable)")
     assert _logged(caplog) == [failed]
+
+
+def _fails_on(text: str, failure: Any = (502, "upstream_error")) -> Callable[..., Any]:
+    """An extract reply that fails a request carrying ``text`` in any message, as a firewall
+    or the model may for what one conversation holds, and answers any other as usual."""
+
+    def reply(body: Dict[str, Any]) -> Any:
+        messages = body["conversation"]["messages"]
+        return failure if any(text in message["text"] for message in messages) else None
+
+    return reply
+
+
+def _carried(engine: MemoryCallsEngine) -> List[List[str]]:
+    """The texts of the messages each extract request carried, context included."""
+    return [
+        [message["text"] for message in body["conversation"]["messages"]]
+        for body in engine.bodies_of("extract")
+    ]
+
+
+def test_a_conversation_that_keeps_failing_holds_no_other_back(
+    engine: MemoryCallsEngine, memory: T2VMemory, clock: FakeClock
+) -> None:
+    """R122: a failure that may be the request's own doing makes that conversation wait an
+    hour for its next automatic try, while the others go once the cooldown is over. When
+    its wait is over, it goes after those with fewer failures."""
+    store = memory.store
+    store.record_round("c1", "Why does 1=1 match?", "Always.", at=T0 - timedelta(hours=3))
+    for hours, conversation in ((2, "c2"), (1, "c3")):
+        store.record_round(conversation, "I like tea", "Noted.", at=T0 - timedelta(hours=hours))
+    engine.replies["extract"][:] = [_fails_on("1=1")] * 10
+
+    assert memory.run_due() == ["extract:c1", "extract:c2", "extract:c3"]  # c1 fails first
+    assert [_conversation_mark(store, c) for c in ("c1", "c2", "c3")] == [0, 0, 0]
+    clock.now = T0 + timedelta(seconds=60)  # the cooldown is over
+    assert memory.run_due() == ["extract:c2", "extract:c3"]
+    assert [_conversation_mark(store, c) for c in ("c1", "c2", "c3")] == [0, 1, 1]
+
+    store.record_round("c4", "I like coffee", "Noted.", at=T0)
+    clock.now = T0 + timedelta(hours=1)  # c1's wait is over
+    assert memory.run_due() == ["extract:c4", "extract:c1"]
+    assert [_conversation_mark(store, c) for c in ("c1", "c4")] == [0, 1]
+    extracted = [body["conversation"]["id"] for body in engine.bodies_of("extract")]
+    assert extracted == ["c1", "c2", "c3", "c4", "c1"]
+
+
+def test_new_conversation_leaves_a_conversation_to_its_wait(
+    engine: MemoryCallsEngine, memory: T2VMemory, clock: FakeClock
+) -> None:
+    """R122: new_conversation extracts the conversation that ended unless its extraction is
+    waiting after a failure; run_due extracts it once the wait is over."""
+    conversation = memory.conversation_id
+    memory.store.record_round(conversation, "I moved to Perth", "Noted.", at=T0)
+    engine.replies["extract"][:] = [(502, "upstream_error")]
+
+    assert memory.run_due() == ["extract:" + conversation]  # at launch: it fails at T0
+    clock.now = T0 + timedelta(minutes=30)
+    memory.new_conversation()
+    assert engine.kinds() == ["extract"]
+    clock.now = T0 + timedelta(hours=1)
+    assert memory.run_due() == ["extract:" + conversation]
+    assert _conversation_mark(memory.store, conversation) == 1
+
+
+def test_rounds_that_keep_failing_are_skipped_once_other_calls_succeed(
+    engine: MemoryCallsEngine,
+    memory: T2VMemory,
+    clock: FakeClock,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """R122: a conversation waits 1, 4, 16 and 64 hours after failures in a row. Its fifth,
+    with another memory call answered since the fourth, skips the rounds the first failure
+    carried: they are marked extracted and never sent again, not even as context, so a
+    round recorded after them is extracted. They stay searchable."""
+    store = memory.store
+    poison = ["Why does 1=1 match?", "It is always true."]
+    store.record_round("c1", *poison, at=T0 - timedelta(hours=1))
+    engine.replies["extract"][:] = [_fails_on("1=1", (403, "unknown_error"))] * 20
+
+    with caplog.at_level(logging.INFO, logger="talk2view"):
+        assert memory.run_due() == ["extract:c1"]  # the first failure, at T0
+        store.record_round("c1", "I moved to Perth", "Noted.", at=T0)
+        for hours in (1, 5, 21):  # 1, 4 and 16 hours after the failure before
+            clock.now = T0 + timedelta(hours=hours, seconds=-1)
+            assert memory.run_due() == []
+            clock.now = T0 + timedelta(hours=hours)
+            assert memory.run_due() == ["extract:c1"]
+        store.record_round("c2", "I like tea", "Noted.", at=T0 + timedelta(hours=22))
+        clock.now = T0 + timedelta(hours=23)
+        assert memory.run_due() == ["extract:c2"]  # answered: the engine works
+        clock.now = T0 + timedelta(hours=85, seconds=-1)
+        assert memory.run_due() == []
+        clock.now = T0 + timedelta(hours=85)  # 64 hours after the fourth failure
+        assert memory.run_due() == ["extract:c1"]
+        assert _conversation_mark(store, "c1") == 1  # round 1 skipped
+        clock.now = T0 + timedelta(hours=85, seconds=60)  # the cooldown is over
+        assert memory.run_due() == ["extract:c1"]
+        assert _conversation_mark(store, "c1") == 2
+
+    both = poison + ["I moved to Perth", "Noted."]
+    assert _carried(engine) == [poison] + [both] * 3 + [["I like tea", "Noted."], both] + [
+        ["I moved to Perth", "Noted."]
+    ]
+    assert engine.bodies_of("extract")[-1]["extracted_through"] == 0  # no context
+    assert ["always true" in hit.text for hit in store.search("always true")] == [True]
+    failed = (logging.WARNING, "Memory: extraction failed (HTTP 403 unknown_error)")
+    skipped = (
+        logging.WARNING,
+        "Memory: extraction failed 5 times in a row on the same rounds while other memory"
+        " calls succeeded, so it skips them; they stay searchable",
+    )
+    assert _logged(caplog) == [failed] * 5 + [skipped]
+
+
+def test_rounds_are_never_skipped_while_every_memory_call_fails(
+    engine: MemoryCallsEngine,
+    memory: T2VMemory,
+    clock: FakeClock,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """R122: with nothing answered since its last failure, a conversation's fifth and later
+    failures skip nothing, since every call failing points at the engine or its model, not
+    at the rounds. It waits 64 hours between tries at most, and is extracted once the
+    engine answers."""
+    store = memory.store
+    store.record_round("c1", "I moved to Perth", "Noted.", at=T0 - timedelta(hours=1))
+    engine.replies["extract"][:] = [(502, "upstream_error")] * 6
+
+    with caplog.at_level(logging.INFO, logger="talk2view"):
+        for hours in (0, 1, 5, 21, 85, 149):  # waits of 1, 4, 16, 64 and 64 hours
+            clock.now = T0 + timedelta(hours=hours, seconds=-1)
+            assert hours == 0 or memory.run_due() == []
+            clock.now = T0 + timedelta(hours=hours)
+            assert memory.run_due() == ["extract:c1"]
+        assert _conversation_mark(store, "c1") == 0
+        clock.now = T0 + timedelta(hours=213)
+        assert memory.run_due() == ["extract:c1"]  # the engine answers
+
+    assert _conversation_mark(store, "c1") == 1
+    assert len(engine.calls) == 7
+    failed = (logging.WARNING, "Memory: extraction failed (HTTP 502 upstream_error)")
+    assert _logged(caplog) == [failed] * 6
+
+
+def test_only_an_answer_since_the_failure_before_skips_rounds(
+    engine: MemoryCallsEngine,
+    memory: T2VMemory,
+    clock: FakeClock,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """R122: the answer that lets a fifth or later failure in a row skip rounds must come
+    after the failure before it. A consolidation answered between the third and the fourth
+    lets the fifth skip nothing; one answered after the fifth lets the sixth skip. Any
+    memory call's answer counts, not only another conversation's extraction."""
+    store = memory.store
+    store.record_round("c1", "Why does 1=1 match?", "Always.", at=T0 - timedelta(hours=1))
+    engine.replies["extract"][:] = [(502, "upstream_error")] * 6
+
+    with caplog.at_level(logging.INFO, logger="talk2view"):
+        for hours in (0, 1, 5):  # the first three failures
+            clock.now = T0 + timedelta(hours=hours)
+            assert memory.run_due() == ["extract:c1"]
+        clock.now = T0 + timedelta(hours=6)
+        assert memory.consolidate() is True
+        for hours in (21, 85):  # the fourth, and the fifth with nothing answered since
+            clock.now = T0 + timedelta(hours=hours)
+            assert memory.run_due() == ["extract:c1"]
+        assert _conversation_mark(store, "c1") == 0
+        clock.now = T0 + timedelta(hours=86)
+        assert memory.consolidate() is True
+        clock.now = T0 + timedelta(hours=149)  # 64 hours after the fifth
+        assert memory.run_due() == ["extract:c1"]
+        assert _conversation_mark(store, "c1") == 1
+
+    assert engine.kinds() == ["extract"] * 3 + ["consolidate"] + ["extract"] * 2 + [
+        "consolidate",
+        "extract",
+    ]
+    failed = (logging.WARNING, "Memory: extraction failed (HTTP 502 upstream_error)")
+    skipped = (
+        logging.WARNING,
+        "Memory: extraction failed 6 times in a row on the same rounds while other memory"
+        " calls succeeded, so it skips them; they stay searchable",
+    )
+    assert _logged(caplog) == [failed] * 6 + [skipped]
+
+
+def test_a_failure_stamped_ahead_of_the_clock_holds_nothing(
+    engine: MemoryCallsEngine, memory: T2VMemory, clock: FakeClock
+) -> None:
+    """R122: a failure stamped after now, as when the device's clock ran ahead, makes the
+    conversation wait for nothing. The next try goes, and failing, stamps the failure
+    afresh: the wait runs from then."""
+    store = memory.store
+    store.record_round("c1", "I moved to Perth", "Noted.", at=T0 - timedelta(hours=1))
+    assert store.extraction_failed("c1", 1, at=T0 + timedelta(days=7)) == 1
+    engine.replies["extract"][:] = [(502, "upstream_error")]
+
+    assert memory.run_due() == ["extract:c1"]  # fails at T0: two in a row, a 4-hour wait
+    record = store.conversation("c1")
+    assert record is not None
+    assert (record.extract_failures, record.extract_failed_at) == (2, "2026-10-21T10:00:00Z")
+    clock.now = T0 + timedelta(hours=4, seconds=-1)
+    assert memory.run_due() == []
+    clock.now = T0 + timedelta(hours=4)
+    assert memory.run_due() == ["extract:c1"]
+    assert _conversation_mark(store, "c1") == 1
+
+
+def test_an_answer_stamped_ahead_of_the_clock_lets_nothing_be_skipped(
+    engine: MemoryCallsEngine, memory: T2VMemory, clock: FakeClock
+) -> None:
+    """R122: an answer stamped after the failure it would let skip rounds, as when the
+    device's clock ran ahead, lets it skip nothing. The next answer's time replaces it, so
+    a later failure skips as usual."""
+    store = memory.store
+    store.record_round("c1", "Why does 1=1 match?", "Always.", at=T0 - timedelta(hours=1))
+    for count, hours in enumerate((0, 1, 5, 21), start=1):  # four failures in a row
+        assert store.extraction_failed("c1", 1, at=T0 + timedelta(hours=hours)) == count
+    store.mark_answered(T0 + timedelta(days=30))
+    engine.replies["extract"][:] = [(502, "upstream_error")] * 2
+
+    clock.now = T0 + timedelta(hours=85)
+    assert memory.run_due() == ["extract:c1"]  # the fifth
+    assert _conversation_mark(store, "c1") == 0
+    clock.now = T0 + timedelta(hours=86)
+    assert memory.consolidate() is True
+    assert store.last_answered_at() == "2026-10-25T00:00:00Z"
+    clock.now = T0 + timedelta(hours=149)
+    assert memory.run_due() == ["extract:c1"]  # the sixth
+    assert _conversation_mark(store, "c1") == 1
 
 
 def test_a_guest_makes_no_memory_calls(engine: MemoryCallsEngine, tmp_path: Path) -> None:

@@ -1345,6 +1345,19 @@ next trigger tries again once the cooldown has run:
   cooldown. Direct calls (`extract()`, `consolidate()`, `import_text()`) ignore it, and
   their outcome still updates it. The cooldown is not saved: after a relaunch the first
   `run_due()` tries again at once.
+- A conversation whose extraction keeps failing (a firewall blocking what it holds, say)
+  never holds the others back. A failure that may be the request's own doing makes that
+  conversation wait on its own: 1 hour before its next automatic try, then 4, 16 and at
+  most 64 hours after each further failure in a row, while conversations with fewer
+  failures go first. A failure about the account or the service doesn't count: no answer
+  at all, 401, 402, 404, 429, 503, a 409 `retention_disclaimer_required`, or a 403
+  `memory_disabled`, `memory_requires_account`, `no_api_key`, `zdr_mode_blocked` or
+  `origin_not_allowed`. From the fifth failure in a row, if the engine has answered any
+  memory call (another conversation's extraction, a consolidation, an import) since the
+  failure before, extraction skips the rounds that kept failing: they are marked
+  extracted and never sent again, not even as context, and they stay in the log and in
+  search. While every call fails, nothing is skipped. The store keeps these counts, so
+  they hold across relaunches; `extract()` goes out regardless, and its outcome counts.
 - Extraction, consolidation and imports are charged to the end-user's own budget, as a
   chat turn is. The engine refuses them with `402 memory_budget_low` while the user has
   less than a floor left (currently 10% of their budget or $0.10, whichever is more),

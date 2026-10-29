@@ -39,6 +39,13 @@ UNDO_WINDOW_S = 30
 IDLE_EXTRACT_S = 600
 CONSOLIDATE_EVERY_S = 7 * 86400
 CONSOLIDATE_MIN_CHANGES = 10
+# After a failed extraction that may be the request's own doing, the conversation's next
+# automatic try waits EXTRACT_RETRY_S, four times as long after each further failure in a
+# row, at most EXTRACT_RETRY_MAX_S (1, 4, 16, then 64 hours). From the EXTRACT_FAILURES_MAX-th
+# failure in a row, extraction may skip the rounds (T2VMemory.run_due says when).
+EXTRACT_RETRY_S = 3600
+EXTRACT_RETRY_MAX_S = 64 * 3600
+EXTRACT_FAILURES_MAX = 5
 
 
 @dataclass(frozen=True)
@@ -83,7 +90,13 @@ class Fact:
 class ConversationRecord:
     """The store's own record of a conversation (its rounds come from
     ``MemoryStore.rounds``). ``extracted_through`` is the last round extraction has seen;
-    an ``incognito`` conversation's rounds are never written."""
+    an ``incognito`` conversation's rounds are never written.
+
+    ``extract_failures`` counts the extractions in a row that failed in a way that may be the
+    request's own doing, since extraction last moved on; ``extract_failed_at`` is when the
+    last of them failed, and ``extract_failed_through`` the last round the first of them
+    carried. ``extract_skipped_through`` is the last round extraction gave up on: no extract
+    request carries a round up to it again, not even as context."""
 
     id: str
     title: Optional[str]
@@ -93,6 +106,10 @@ class ConversationRecord:
     summary_text: Optional[str]
     extracted_through: int
     incognito: bool
+    extract_failures: int = 0
+    extract_failed_at: Optional[str] = None
+    extract_failed_through: Optional[int] = None
+    extract_skipped_through: int = 0
 
 
 @dataclass(frozen=True)
@@ -148,6 +165,9 @@ __all__ = [
     "ENTRIES_CHARS_MAX",
     "ENTRY_MAX",
     "ENTRY_TEXT_MAX",
+    "EXTRACT_FAILURES_MAX",
+    "EXTRACT_RETRY_MAX_S",
+    "EXTRACT_RETRY_S",
     "FACT_TEXT_MAX",
     "FORGET_TEXT_MIN",
     "IDLE_EXTRACT_S",

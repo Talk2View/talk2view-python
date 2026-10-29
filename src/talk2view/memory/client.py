@@ -25,7 +25,15 @@ from ..client import T2VClient
 from ..errors import T2VError
 from ..types import ChatEvent
 from . import bodies, days
-from .models import IDLE_EXTRACT_S, RESULT_LIMIT_DEFAULT, AppliedBatch
+from .models import (
+    EXTRACT_FAILURES_MAX,
+    EXTRACT_RETRY_MAX_S,
+    EXTRACT_RETRY_S,
+    IDLE_EXTRACT_S,
+    RESULT_LIMIT_DEFAULT,
+    AppliedBatch,
+    ConversationRecord,
+)
 from .ops import date_problem
 from .search import result_json, result_limit
 from .store import MemoryStore, _timestamp, _utc, utc_now
@@ -88,9 +96,12 @@ class T2VMemory:
     down (``worker.Cooldown``): none goes out for 60 s, twice as long after each
     further failure in a row, at most an hour and never less than the engine's
     ``Retry-After``; a call that succeeds ends the cooldown. Each queued call checks it
-    when it starts. It runs on ``clock``, or on the ``now`` given to ``run_due``. A
-    guest (``is_anonymous()`` true) makes no call: the engine refuses them to guests. After
-    a 403 ``memory_disabled`` none goes out through this client again in this process.
+    when it starts. It runs on ``clock``, or on the ``now`` given to ``run_due``. An
+    extraction that fails in a way that may be the request's own doing also makes its
+    conversation wait for its next automatic try, so it holds no other back (see
+    ``run_due``). A guest (``is_anonymous()`` true) makes no call: the engine refuses them
+    to guests. After a 403 ``memory_disabled`` none goes out through this client again in
+    this process.
 
     Thread-safe. ``close`` stops it and closes the store.
     """
@@ -387,7 +398,9 @@ class T2VMemory:
         - The store's purge, always: hidden entries and rounds past the undo window go.
         - Extraction of each conversation with rounds extraction hasn't read that has been
           idle IDLE_EXTRACT_S (10 minutes) by ``now`` (the clock's by default); at the first
-          check, at launch, of every one, idle or not. Never one queued or running already.
+          check, at launch, of every one, idle or not. Never one queued or running already,
+          nor one still waiting after failures (below). Those with the fewest failures in a
+          row go first.
         - Consolidation, when the store says it is due (``needs_consolidation``) or an import
           wants one, unless memory hasn't changed since the last one.
 
@@ -395,7 +408,20 @@ class T2VMemory:
         memory off, or while a failed call's cooldown runs at ``now``. Each job it
         queues checks the cooldown again when it starts, and makes no call while it runs:
         the conversation stays due. A call that fails starts the cooldown at ``now``
-        when it was given, so a simulated clock never mixes with the real one."""
+        when it was given, so a simulated clock never mixes with the real one.
+
+        An extraction that fails in a way that may be the request's own doing counts against
+        its conversation: any failure but no answer at all and those about the account or
+        the service (401, 402, 404, 429, 503, a 409 ``retention_disclaimer_required``, and a
+        403 ``memory_disabled``, ``memory_requires_account``, ``no_api_key``,
+        ``zdr_mode_blocked`` or ``origin_not_allowed``). The conversation then waits
+        EXTRACT_RETRY_S (an hour) from ``now`` for its next automatic try, four times as
+        long after each further failure in a row, at most EXTRACT_RETRY_MAX_S (64 hours).
+        From the EXTRACT_FAILURES_MAX-th (fifth) failure in a row, when the engine has
+        answered another memory call since the one before, extraction skips the rounds the
+        first failure carried (``MemoryStore.skip_failed_rounds``), which stay searchable,
+        and goes on to the conversation's later ones. While every call fails, the engine or
+        its model is at fault rather than the rounds, so nothing is skipped."""
         try:
             return self._run_due(now)
         except Exception as error:
@@ -417,7 +443,7 @@ class T2VMemory:
             idle = [
                 record.id
                 for record in self.store.unextracted()
-                if launch or record.last_active_at <= cutoff
+                if (launch or record.last_active_at <= cutoff) and not _waiting(record, moment)
             ]
         due = [key for key in (self._queue_extract(cid, now) for cid in idle) if key is not None]
         with self._lock:
@@ -458,13 +484,19 @@ class T2VMemory:
             ticker.stop()
 
     def _queue_extraction(self, conversation_id: str) -> None:
-        """Queue the extraction of the conversation that just ended (new_conversation)."""
+        """Queue the extraction of the conversation that just ended (new_conversation),
+        unless it is waiting after failures (see run_due)."""
         try:
             with self._lock:
                 if self._closed or self.store.paused:
                     return
                 record = self.store.conversation(conversation_id)
-            if record is not None and not record.incognito and self._may_call():
+            if (
+                record is not None
+                and not record.incognito
+                and not _waiting(record, self._moment(None))
+                and self._may_call()
+            ):
                 self._queue_extract(conversation_id, None)
         except Exception as error:
             logger.warning("Memory: queueing an extraction failed (%s)", _name(error))
@@ -528,7 +560,8 @@ class T2VMemory:
         nothing new from the user to send. False when the call failed (logged) or is
         refused (a guest, the partner's memory off, memory paused), when the conversation
         is unknown or incognito, or while another extraction of it is queued or running.
-        It goes out during a failed call's cooldown too, and its outcome updates it.
+        It goes out during a failed call's cooldown, and while the conversation waits after
+        failures, too; its outcome updates both, and may skip rounds (see run_due).
 
         A result that arrives once the conversation has turned incognito is applied
         without its entry ops (the store drops the rest). One that arrives once memory is
@@ -574,10 +607,44 @@ class T2VMemory:
                 if through > record.extracted_through:
                     self.store.mark_extracted(record.id, through)
                 return True
-        data = self._call("extraction", "/v1/memory/extract", body, _extraction_answer, since)
-        return data is not None and self._apply_extraction(
-            data, record.id, through, mode, forget_revision
+        data, blamed = self._call(
+            "extraction", "/v1/memory/extract", body, _extraction_answer, since
         )
+        if data is None:
+            if blamed:
+                self._extraction_failed(record.id, through, since)
+            return False
+        return self._apply_extraction(data, record.id, through, mode, forget_revision)
+
+    def _extraction_failed(
+        self, conversation_id: str, through: int, since: Optional[datetime]
+    ) -> None:
+        """Count an extraction's failure that may be the request's own doing against the
+        conversation, at ``since`` or else now, and from the EXTRACT_FAILURES_MAX-th in a row
+        skip the rounds its failures were reading, when the engine has answered another
+        memory call since the failure before, and not after this one (see run_due)."""
+        with self._lock:
+            if self._closed or self.store.paused:
+                return
+            moment = self._moment(since)
+            before = self.store.conversation(conversation_id)
+            failures = self.store.extraction_failed(conversation_id, through, at=moment)
+            answered = self.store.last_answered_at()
+            skip = (
+                failures >= EXTRACT_FAILURES_MAX
+                and before is not None
+                and before.extract_failed_at is not None
+                and answered is not None
+                and before.extract_failed_at < answered <= _timestamp(moment)
+            )
+            if skip:
+                self.store.skip_failed_rounds(conversation_id)
+        if skip:
+            logger.warning(
+                "Memory: extraction failed %d times in a row on the same rounds while other"
+                " memory calls succeeded, so it skips them; they stay searchable",
+                failures,
+            )
 
     def _apply_extraction(
         self,
@@ -671,7 +738,7 @@ class T2VMemory:
                 return False
             snapshot = self.store.consolidation_snapshot()
         body = bodies.consolidate_body(snapshot, today=self._today(timezone), timezone=timezone)
-        data = self._call(
+        data, _ = self._call(
             "consolidation", "/v1/memory/consolidate", body, _consolidation_answer, since
         )
         if data is None:
@@ -747,7 +814,7 @@ class T2VMemory:
                 today=self._today(timezone),
                 timezone=timezone,
             )
-        data = self._call("import", "/v1/memory/extract", body, _extraction_answer, None)
+        data, _ = self._call("import", "/v1/memory/extract", body, _extraction_answer, None)
         if data is None or not self._apply_extraction(data, None, 0, "import", forget_revision):
             return False
         with self._lock:
@@ -762,8 +829,10 @@ class T2VMemory:
         body: Dict[str, Any],
         well_formed: Callable[[Dict[str, Any]], bool],
         since: Optional[datetime],
-    ) -> Optional[Dict[str, Any]]:
-        """POST ``body`` to an engine memory route: its JSON answer, or None.
+    ) -> Tuple[Optional[Dict[str, Any]], bool]:
+        """POST ``body`` to an engine memory route: its JSON answer, or None; and whether a
+        failure may be the request's own doing (``_blames_request``: an answer that can't be
+        used is), which counts against the conversation an extraction reads.
 
         Once closed, None at once and nothing sent: the body may hold the memory of a
         user who has just signed out. A failure (an error, a timeout, or an answer that is
@@ -771,10 +840,11 @@ class T2VMemory:
         the error type, or the exception's class, never its message, which could quote the
         request, and counts against the cooldown at ``since``, run_due's ``now``, or else
         now; a 403 ``memory_disabled`` turns memory calls off instead. A success ends the
-        cooldown. A call the close cut off changes nothing and logs nothing."""
+        cooldown, and the store records it (``mark_answered``). A call the close cut off
+        changes nothing and logs nothing."""
         if self._closed:
-            return None
-        cools, retry_after = True, None
+            return None, False
+        cools, blamed, retry_after = True, True, None
         try:
             data = self._client.request(endpoint, method="POST", body=body, timeout=CALL_TIMEOUT_S)
         except T2VError as error:
@@ -783,6 +853,7 @@ class T2VMemory:
                 with _partner_memory_off_lock:
                     _partner_memory_off.add(self._client)
             problem, retry_after = _failure(error), error.retry_after
+            blamed = _blames_request(error)
         except Exception as error:
             problem = _name(error)
         else:
@@ -790,15 +861,21 @@ class T2VMemory:
                 with self._lock:
                     if not self._closed:
                         self._cooldown.recovered()
-                return data
+                        try:
+                            self.store.mark_answered(self._moment(since))
+                        except Exception as error:  # the answer is paid for: keep it
+                            logger.warning(
+                                "Memory: recording the engine's answer failed (%s)", _name(error)
+                            )
+                return data, False
             problem = "malformed answer"
         with self._lock:
             if self._closed:
-                return None
+                return None, False
             if cools:
                 self._cooldown.failed(self._moment(since), retry_after)
         logger.warning("Memory: %s failed (%s)", what, problem)
-        return None
+        return None, blamed
 
 
 def _extraction_answer(data: Dict[str, Any]) -> bool:
@@ -847,6 +924,48 @@ def _failure(error: T2VError) -> str:
     if error.status_code is None:
         return error.type or _name(error)
     return "HTTP {} {}".format(error.status_code, error.type or "error")
+
+
+# Failed memory calls that say nothing about the request, only about the account or the
+# service: the partner's memory off, a guest, no key, an exhausted budget, a sign-in to
+# renew, a rate limit, a route the engine lacks, an outage; and the user's ZDR mode
+# refusing the memory model, a retention disclaimer to accept, or an origin the partner
+# doesn't allow.
+_NOT_THE_REQUEST_STATUSES = frozenset({401, 402, 404, 429, 503})
+_NOT_THE_REQUEST_TYPES = frozenset(
+    {
+        "memory_disabled",
+        "memory_requires_account",
+        "no_api_key",
+        "zdr_mode_blocked",
+        "retention_disclaimer_required",
+        "origin_not_allowed",
+    }
+)
+
+
+def _blames_request(error: T2VError) -> bool:
+    """Whether a failed memory call may be the request's own doing, as when a firewall
+    blocks what it carries or the model fails on it: anything but no answer at all
+    (offline, or the device's own timeout) and the failures about the account or the
+    service."""
+    return (
+        error.status_code is not None
+        and error.status_code not in _NOT_THE_REQUEST_STATUSES
+        and error.type not in _NOT_THE_REQUEST_TYPES
+    )
+
+
+def _waiting(record: ConversationRecord, moment: datetime) -> bool:
+    """Whether the conversation's next automatic extraction still waits at ``moment``
+    after failures in a row (see run_due): EXTRACT_RETRY_S after the last, four times as
+    long after each further one, at most EXTRACT_RETRY_MAX_S. A failure stamped after
+    ``moment``, while the clock ran ahead, holds nothing: the next try stamps it afresh."""
+    if not record.extract_failures or record.extract_failed_at is None:
+        return False
+    wait = min(EXTRACT_RETRY_S * 4 ** (record.extract_failures - 1), EXTRACT_RETRY_MAX_S)
+    since = _timestamp(moment - timedelta(seconds=wait))
+    return since < record.extract_failed_at <= _timestamp(moment)
 
 
 def _reasons(dropped: List[str]) -> str:

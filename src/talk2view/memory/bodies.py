@@ -44,13 +44,16 @@ def extract_body(
     the user said: there is nothing to extract.
 
     ``messages`` holds up to CONTEXT_MESSAGES messages from the rounds extraction has read,
-    then the new rounds', a round at a time while they fit the caps: a user message and an
-    assistant message per round, each only when it has text. ``extracted_through`` counts
-    the context messages, so the engine reads every message after them as new: a
-    count of messages, where the index returned counts rounds, as ``mark_extracted`` takes
-    it. Rounds the caps leave out wait for the next request."""
+    never one it gave up on (``extract_skipped_through``), then the new rounds', a round at
+    a time while they fit the caps: a user message and an assistant message per round, each
+    only when it has text. ``extracted_through`` counts the context messages, so the engine
+    reads every message after them as new: a count of messages, where the index returned
+    counts rounds, as ``mark_extracted`` takes it. Rounds the caps leave out wait for the
+    next request."""
     start = record.extracted_through
-    rounds = store.rounds(record.id, after=max(0, start - CONTEXT_MESSAGES))
+    rounds = store.rounds(
+        record.id, after=max(record.extract_skipped_through, start - CONTEXT_MESSAGES)
+    )
     context: List[Dict[str, Any]] = []
     for idx, user_text, reply, at in rounds:
         if idx <= start:

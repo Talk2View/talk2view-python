@@ -233,7 +233,10 @@ _TABLES = (
         summary_text TEXT,
         extracted_through INTEGER NOT NULL DEFAULT 0,
         incognito INTEGER NOT NULL DEFAULT 0,
-        extracting INTEGER NOT NULL DEFAULT 0
+        extract_failures INTEGER NOT NULL DEFAULT 0,
+        extract_failed_at TEXT,
+        extract_failed_through INTEGER,
+        extract_skipped_through INTEGER NOT NULL DEFAULT 0
     )""",
     """CREATE TABLE IF NOT EXISTS rounds (
         conversation_id TEXT NOT NULL REFERENCES conversations (id) ON DELETE CASCADE,
@@ -397,6 +400,10 @@ def _conversation_from_row(row: Sequence[Any]) -> ConversationRecord:
         summary_text=row[5],
         extracted_through=row[6],
         incognito=bool(row[7]),
+        extract_failures=row[8],
+        extract_failed_at=row[9],
+        extract_failed_through=row[10],
+        extract_skipped_through=row[11],
     )
 
 
@@ -439,7 +446,8 @@ _SELECT_NEWEST_FACTS = (
 )
 _SELECT_NEWEST_SUMMARIES = (
     "SELECT id, title, started_at, last_active_at, summary_title, summary_text,"
-    " extracted_through, incognito FROM conversations"
+    " extracted_through, incognito, extract_failures, extract_failed_at,"
+    " extract_failed_through, extract_skipped_through FROM conversations"
     " WHERE incognito = 0 AND (summary_title IS NOT NULL OR summary_text IS NOT NULL)"
     " ORDER BY last_active_at DESC, rowid DESC LIMIT ?"
 )
@@ -1316,6 +1324,16 @@ class MemoryStore:
             self._set_meta("last_consolidated_at", now)
             self._set_meta("changes_since_consolidation", "0")
 
+    def mark_answered(self, at: datetime) -> None:
+        """Record that the engine answered a memory call well at ``at``: the latest
+        answer's time replaces the one before, so a stamp from a clock that ran ahead lasts
+        only until the next answer."""
+        self._set_meta("last_answered_at", _timestamp(at))
+
+    def last_answered_at(self) -> Optional[str]:
+        """When the engine last answered a memory call well (``mark_answered``), or None."""
+        return self._meta_value("last_answered_at")
+
     # ── conversations ──
 
     def record_round(
@@ -1366,7 +1384,8 @@ class MemoryStore:
     def conversation(self, conversation_id: str) -> Optional[ConversationRecord]:
         rows = self._query(
             "SELECT id, title, started_at, last_active_at, summary_title, summary_text,"
-            " extracted_through, incognito FROM conversations WHERE id = ?",
+            " extracted_through, incognito, extract_failures, extract_failed_at,"
+            " extract_failed_through, extract_skipped_through FROM conversations WHERE id = ?",
             (conversation_id,),
         )
         return _conversation_from_row(rows[0]) if rows else None
@@ -1378,7 +1397,8 @@ class MemoryStore:
         a tie), leaving out incognito ones and ``exclude``, the current conversation."""
         rows = self._query(
             "SELECT id, title, started_at, last_active_at, summary_title, summary_text,"
-            " extracted_through, incognito FROM conversations"
+            " extracted_through, incognito, extract_failures, extract_failed_at,"
+            " extract_failed_through, extract_skipped_through FROM conversations"
             " WHERE incognito = 0 AND id IS NOT ?"
             " ORDER BY last_active_at DESC, rowid DESC LIMIT ?",
             (exclude, limit),
@@ -1399,13 +1419,49 @@ class MemoryStore:
 
     def mark_extracted(self, conversation_id: str, through: int) -> None:
         """Record that extraction has seen the conversation's rounds up to index
-        ``through``. It never moves back, and stays put for a conversation marked
-        incognito."""
+        ``through``, which ends its failures in a row. It never moves back, and stays put
+        for a conversation marked incognito."""
         with self._write():
             self._db.execute(
-                "UPDATE conversations SET extracted_through = max(extracted_through, ?)"
+                "UPDATE conversations SET extracted_through = max(extracted_through, ?),"
+                " extract_failures = 0, extract_failed_at = NULL, extract_failed_through = NULL"
                 " WHERE id = ? AND incognito = 0",
                 (through, conversation_id),
+            )
+
+    def extraction_failed(self, conversation_id: str, through: int, *, at: datetime) -> int:
+        """Record a failed extraction of the conversation that may be the request's own doing
+        (see T2VMemory.run_due), one that carried its rounds up to index ``through``: one
+        more failure in a row, the last at ``at``. The first in a row keeps ``through`` as
+        the rounds ``skip_failed_rounds`` gives up on. Returns the failures in a row, or 0
+        for a conversation with no record or marked incognito, which counts none."""
+        with self._write():
+            self._db.execute(
+                "UPDATE conversations SET extract_failures = extract_failures + 1,"
+                " extract_failed_at = ?,"
+                " extract_failed_through = COALESCE(extract_failed_through, ?)"
+                " WHERE id = ? AND incognito = 0",
+                (_timestamp(at), through, conversation_id),
+            )
+            rows = self._db.execute(
+                "SELECT extract_failures FROM conversations WHERE id = ? AND incognito = 0",
+                (conversation_id,),
+            )
+        return int(rows[0][0]) if rows else 0
+
+    def skip_failed_rounds(self, conversation_id: str) -> None:
+        """Give up on the rounds the conversation's failures in a row were extracting (see
+        ``extraction_failed``): mark them extracted, and keep them out of every later
+        extract request, even as context, which ends the failures. They stay in the log
+        and the search index. Nothing changes for a conversation with no failures."""
+        with self._write():
+            self._db.execute(
+                "UPDATE conversations"
+                " SET extracted_through = max(extracted_through, extract_failed_through),"
+                " extract_skipped_through = max(extract_skipped_through, extract_failed_through),"
+                " extract_failures = 0, extract_failed_at = NULL, extract_failed_through = NULL"
+                " WHERE id = ? AND incognito = 0 AND extract_failed_through IS NOT NULL",
+                (conversation_id,),
             )
 
     def set_incognito(self, conversation_id: str, incognito: bool) -> None:
@@ -1413,9 +1469,10 @@ class MemoryStore:
         an unknown conversation creates its record; unmarking one does nothing.
 
         Marking one that has rounds already deletes them, with their index rows, and its
-        summary, and starts its log over (``extracted_through`` 0), then scrubs the file of
-        their text, since the words of an incognito chat are never kept. Its title stays;
-        facts and entries drawn from it stay, as they do when the chat is deleted."""
+        summary, and starts its log over (``extracted_through`` 0, and no extraction
+        failures or skipped rounds), then scrubs the file of their text, since the words of
+        an incognito chat are never kept. Its title stays; facts and entries drawn from it
+        stay, as they do when the chat is deleted."""
         now = _timestamp(self._clock())
         with self._write():
             if incognito:
@@ -1437,7 +1494,9 @@ class MemoryStore:
                     )
                     self._db.execute(
                         "UPDATE conversations SET summary_title = NULL, summary_text = NULL,"
-                        " extracted_through = 0 WHERE id = ?",
+                        " extracted_through = 0, extract_failures = 0, extract_failed_at = NULL,"
+                        " extract_failed_through = NULL, extract_skipped_through = 0"
+                        " WHERE id = ?",
                         (conversation_id,),
                     )
                     self._scrub()  # once this write has committed
@@ -1457,9 +1516,10 @@ class MemoryStore:
             self._scrub()
 
     def unextracted(self, *, idle_for_s: Optional[float] = None) -> List[ConversationRecord]:
-        """Conversations with rounds extraction has not seen, least recently active first.
-        Rounds with neither text, as a forget leaves them, don't count. With
-        ``idle_for_s``, only those idle at least that long by the clock."""
+        """Conversations with rounds extraction has not seen: those with the fewest
+        extraction failures in a row first, then the least recently active. Rounds with
+        neither text, as a forget leaves them, don't count. With ``idle_for_s``, only those
+        idle at least that long by the clock."""
         cutoff = (
             _timestamp(self._clock() - timedelta(seconds=idle_for_s))
             if idle_for_s is not None
@@ -1467,12 +1527,13 @@ class MemoryStore:
         )
         rows = self._query(
             "SELECT id, title, started_at, last_active_at, summary_title, summary_text,"
-            " extracted_through, incognito FROM conversations AS c"
+            " extracted_through, incognito, extract_failures, extract_failed_at,"
+            " extract_failed_through, extract_skipped_through FROM conversations AS c"
             " WHERE incognito = 0 AND (? IS NULL OR last_active_at <= ?)"
             " AND EXISTS (SELECT 1 FROM rounds AS r"
             " WHERE r.conversation_id = c.id AND r.idx > c.extracted_through"
             " AND (r.user_text != '' OR r.assistant_text != ''))"
-            " ORDER BY c.last_active_at, c.rowid",
+            " ORDER BY c.extract_failures, c.last_active_at, c.rowid",
             (cutoff, cutoff),
         )
         return [_conversation_from_row(row) for row in rows]
