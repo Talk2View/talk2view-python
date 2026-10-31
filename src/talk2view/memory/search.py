@@ -1,0 +1,732 @@
+"""Memory search, the algorithm every client's store follows: query terms, the FTS5 query,
+BM25 for the scan backend, fusion, the pre-selection floor, excerpts and the
+``search_memory`` result.
+
+Pure functions: ``MemoryStore`` reads the rows and calls these, so every port can copy them
+and the contract fixtures can pin them. Text never reaches a log here.
+"""
+
+from __future__ import annotations
+
+import json
+import math
+import re
+import unicodedata
+from typing import (
+    Any,
+    Callable,
+    Dict,
+    FrozenSet,
+    Iterator,
+    List,
+    Mapping,
+    Optional,
+    Sequence,
+    Set,
+    Tuple,
+)
+
+from .models import (
+    RESULT_CHARS_MAX,
+    RESULT_LIMIT_DEFAULT,
+    RESULT_LIMIT_MAX,
+    RESULT_LIMIT_MIN,
+    SUMMARY_TITLE_MAX,
+    SearchHit,
+)
+from .text import (
+    SEPARATOR,
+    STOP_WORDS,
+    fold_latin,
+    fts_tokens,
+    index_token_spans,
+    is_segmented,
+    is_token_char,
+)
+
+#: The most words a query keeps, its terms in every script but CJK and Thai: the first 12
+#: distinct ones.
+QUERY_TERMS_MAX = 12
+#: The most CJK and Thai terms a query keeps: the first 24 distinct ones, bigrams and
+#: lone characters, in the order they appear.
+QUERY_BIGRAMS_MAX = 24
+#: Chinese and Japanese function bigrams a query leaves out, as it leaves out STOP_WORDS:
+#: question words, pronouns, conjunctions and verb endings, which nearly every round holds.
+#: 么时, 为什, 是什, 么样, 是不 and 有没 are on it so that these question words give no term
+#: at all: 什么时候 ("when"), 为什么 ("why"), 是什么 ("what is"), 怎么样 and 什么样 ("how",
+#: "what kind of"), 是不是 ("is it") and 有没有 ("is there"). Each pair is written as its
+#: code points, with the bigram in the comment.
+CJK_STOP_BIGRAMS: FrozenSet[str] = frozenset(
+    chr(first) + chr(second)
+    for first, second in (
+        # Chinese
+        (0x4EC0, 0x4E48),  # 什么 what
+        (0x4E48, 0x65F6),  # 么时, in 什么时候
+        (0x65F6, 0x5019),  # 时候 time, when
+        (0x4E3A, 0x4EC0),  # 为什, in 为什么
+        (0x662F, 0x4EC0),  # 是什, in 是什么
+        (0x4E48, 0x6837),  # 么样, in 怎么样 and 什么样
+        (0x662F, 0x4E0D),  # 是不, in 是不是
+        (0x6709, 0x6CA1),  # 有没, in 有没有
+        (0x600E, 0x4E48),  # 怎么 how
+        (0x54EA, 0x91CC),  # 哪里 where
+        (0x591A, 0x5C11),  # 多少 how many
+        (0x6211, 0x4EEC),  # 我们 we
+        (0x4F60, 0x4EEC),  # 你们 you
+        (0x4ED6, 0x4EEC),  # 他们 they
+        (0x8FD9, 0x4E2A),  # 这个 this
+        (0x90A3, 0x4E2A),  # 那个 that
+        (0x4E00, 0x4E2A),  # 一个 a, one
+        (0x6CA1, 0x6709),  # 没有 haven't
+        (0x53EF, 0x4EE5),  # 可以 can
+        (0x4E0D, 0x662F),  # 不是 isn't
+        (0x5C31, 0x662F),  # 就是 just
+        (0x8FD8, 0x662F),  # 还是 or, still
+        (0x7684, 0x8BDD),  # 的话 if
+        (0x56E0, 0x4E3A),  # 因为 because
+        (0x6240, 0x4EE5),  # 所以 so
+        (0x4F46, 0x662F),  # 但是 but
+        (0x5982, 0x679C),  # 如果 if
+        (0x5DF2, 0x7ECF),  # 已经 already
+        # Japanese
+        (0x3067, 0x3059),  # です
+        (0x307E, 0x3059),  # ます
+        (0x307E, 0x3057),  # まし, in ました
+        (0x3057, 0x305F),  # した
+        (0x3057, 0x3066),  # して
+        (0x3066, 0x3044),  # てい, in ている
+        (0x3044, 0x308B),  # いる
+        (0x306A, 0x3044),  # ない
+        (0x3059, 0x304B),  # すか, in ですか
+        (0x306E, 0x3067),  # ので
+        (0x304B, 0x3089),  # から
+        (0x3053, 0x308C),  # これ
+        (0x305D, 0x308C),  # それ
+        (0x3053, 0x306E),  # この
+    )
+)
+#: Reciprocal rank fusion's k, the usual 60, for fusing the facts' and the rounds' lists.
+RRF_K = 60
+#: Pre-selection's floor. A hit goes with a turn only when its fused score is at least
+#: 1 / (60 + 4), rank 4 or better in its list, and at least PRESELECT_MIN_TERMS units of its
+#: text match (``matched_units``): pairs of a query word and a word of the text it begins,
+#: each word in one pair at most, and CJK or Thai terms. PRESELECT_MIN_TERMS counts those
+#: units, whatever its name says. Module constants, so the ablation can tune them.
+PRESELECT_FLOOR = 1 / 64
+PRESELECT_MIN_TERMS = 2
+#: A round excerpt's width in code points, ellipses aside.
+EXCERPT_WIDTH = 600
+#: The width of a round excerpt's second window, around the reply's best match that the
+#: first window misses, in code points, ellipses and labels aside. With EXCERPT_WIDTH it
+#: keeps an excerpt within RECALLED_TEXT_MAX (1,000): at most 988 code points.
+REPLY_EXCERPT_WIDTH = 360
+ELLIPSIS = chr(0x2026)
+#: The note a ``search_memory`` result carries when results were dropped to fit.
+TRUNCATED = "truncated"
+#: The note a ``search_memory`` result carries when its dates matched nothing and its
+#: results come from a search without them.
+ANY_DATE = "nothing matched on those dates, so these results are from any date"
+
+# FTS5's bm25() constants.
+_K1 = 1.2
+_B = 0.75
+
+_SPACE = re.compile(r"\s")
+
+
+# ── the query ──
+
+
+def query_terms(text: str) -> List[str]:
+    """The terms a search for ``text`` looks for, each once, in the order they first
+    appear: at most QUERY_TERMS_MAX (12) words and QUERY_BIGRAMS_MAX (24) CJK or Thai terms.
+
+    The tokens are the index's own (``index_tokens``: NFKC, casefolded, no combining marks,
+    no Latin diacritics). A run of n CJK or Thai characters written together, with nothing
+    but combining marks between them, gives its n - 1 overlapping bigrams: phrases of
+    two characters between a space, matched whole, so "东京行程" gives "东 京", "京 行" and
+    "行 程". One of CJK_STOP_BIGRAMS is left out. A run of one character is a term of one.
+    Any other token is a word, matched as a prefix, unless it is one of STOP_WORDS or a
+    single character, which would match nearly everything. A Latin word written against CJK
+    text is a word of its own."""
+    terms: List[str] = []
+    seen: Set[str] = set()
+    words = bigrams = 0
+    for term in _terms(unicodedata.normalize("NFKC", text)):
+        if term in seen:
+            continue
+        if is_phrase(term):
+            if bigrams == QUERY_BIGRAMS_MAX:
+                continue
+            bigrams += 1
+        else:
+            if words == QUERY_TERMS_MAX:
+                continue
+            words += 1
+        seen.add(term)
+        terms.append(term)
+        if words == QUERY_TERMS_MAX and bigrams == QUERY_BIGRAMS_MAX:
+            break
+    return terms
+
+
+def _terms(text: str) -> Iterator[str]:
+    """``text``'s terms in order, repeats included, lazily. ``text`` is in NFKC already, so
+    ``index_token_spans`` gives ``index_tokens``' own tokens."""
+    last = ""  # the open run's last CJK or Thai character
+    alone = False  # whether it is the run's only one so far
+    last_end = 0
+    for token, start, end in index_token_spans(text):
+        if len(token) == 1 and is_segmented(token):
+            if last and not _parted(text[last_end:start]):
+                if last + token not in CJK_STOP_BIGRAMS:
+                    yield last + " " + token
+                alone = False
+            else:
+                if alone:
+                    yield last
+                alone = True
+            last, last_end = token, end
+            continue
+        if alone:
+            yield last
+        last, alone = "", False
+        if len(token) > 1 and token not in STOP_WORDS:
+            yield token
+    if alone:
+        yield last
+
+
+def _parted(between: str) -> bool:
+    """Whether the text ``between`` two tokens parts them: anything but combining marks,
+    which normalisation removes."""
+    return any(unicodedata.category(ch) != "Mn" for ch in between)
+
+
+def is_phrase(term: str) -> bool:
+    """Whether ``term`` (one of ``query_terms``') is matched whole, as a phrase: a CJK or
+    Thai bigram, or a lone character. Any other term is a word, matched as a prefix."""
+    return " " in term or (len(term) == 1 and is_segmented(term))
+
+
+def build_fts_query(text: str) -> Optional[str]:
+    """The FTS5 query a search for ``text`` runs, or None when ``text`` has no terms (stop
+    words only, say): each of ``query_terms`` quoted, ``"tok"*`` for a prefix term and
+    ``"东 京"`` for a phrase, joined with `` OR ``.
+
+    Nothing in ``text`` can become FTS5 syntax. A term is made of token characters only, so
+    quotes, parentheses, ``*``, ``^``, ``:`` and ``+`` never reach the query, and a word such
+    as NEAR, AND or NOT stays a quoted string, which FTS5 reads as text. A ``"`` would be
+    doubled, as FTS5 escapes it, though no term holds one."""
+    terms = query_terms(text)
+    return fts_query(terms) if terms else None
+
+
+def fts_query(terms: Sequence[str]) -> str:
+    """``query_terms``' terms as an FTS5 query: each one quoted, ``*`` after a prefix term,
+    joined with `` OR ``."""
+    return " OR ".join(fts_term(term) for term in terms)
+
+
+def fts_term(term: str) -> str:
+    """One term as FTS5 query syntax: a quoted string, followed by ``*`` for a prefix
+    term."""
+    quoted = '"' + term.replace('"', '""') + '"'
+    return quoted if is_phrase(term) else quoted + "*"
+
+
+# ── matching and BM25 (the scan backend's FTS5) ──
+
+
+def term_frequency(tokens: Sequence[str], term: str) -> int:
+    """How often ``term`` occurs in a text with the index tokens ``tokens``, as FTS5 counts
+    a query phrase's instances: a prefix term once for each token it begins, a phrase once
+    for each place its tokens stand in a row."""
+    if not is_phrase(term):
+        return sum(1 for token in tokens if token.startswith(term))
+    parts = term.split(" ")
+    size = len(parts)
+    return sum(
+        1
+        for at in range(len(tokens) - size + 1)
+        if tokens[at] == parts[0] and list(tokens[at : at + size]) == parts
+    )
+
+
+def matched_units(tokens: Sequence[str], terms: Sequence[str]) -> int:
+    """How many units of a text with the index tokens ``tokens`` match ``terms``, as
+    pre-selection's floor counts them. Each phrase, a CJK or Thai bigram or lone
+    character, that occurs is one unit. The words, prefix terms, make as many units as
+    a maximum matching pairs them with the text's distinct tokens: a word with a token it
+    begins, each word and each token in one pair at most. So "kayak" and "kayaking" in a
+    query make one unit with a text's "kayaking", "kayak" makes one with a text's "kayak"
+    and "kayaking", and "go golfing" makes two with "going golfing". No word begins a CJK or
+    Thai token, so a pair and a phrase never share one."""
+    words = tuple(dict.fromkeys(term for term in terms if not is_phrase(term)))
+    begun = [token for token in dict.fromkeys(tokens) if token.startswith(words)]
+    edges = [[token for token in begun if token.startswith(word)] for word in words]
+    phrases = dict.fromkeys(term for term in terms if is_phrase(term))
+    return _maximum_matching(edges) + sum(1 for term in phrases if term_frequency(tokens, term))
+
+
+def _maximum_matching(edges: Sequence[Sequence[str]]) -> int:
+    """The size of a maximum matching of a bipartite graph whose left vertex ``i`` joins the
+    right vertices ``edges[i]``. Each left vertex in turn looks, breadth first, for a path
+    to a free right vertex that passes from each taken right vertex to its partner; along
+    it, every pair shifts by one, so one more pair is made and none is lost. A left vertex
+    with no such path has none later either, so one turn each makes the matching maximum
+    (Kuhn's algorithm). The ablation may raise the floor above 2, so it is exact, not
+    greedy."""
+    partner: Dict[str, int] = {}  # each taken right vertex's left one
+    paired: Dict[int, str] = {}  # each taken left vertex's right one
+    for start in range(len(edges)):
+        reached: Dict[str, int] = {}  # each right vertex reached, by way of which left one
+        free: Optional[str] = None
+        queue = [start]
+        for left in queue:  # the queue grows as it is read
+            for right in edges[left]:
+                if right in reached:
+                    continue
+                reached[right] = left
+                if right not in partner:
+                    free = right
+                    break
+                queue.append(partner[right])
+            if free is not None:
+                break
+        while free is not None:  # shift the pairs along the path, back to ``start``
+            left = reached[free]
+            before = paired.get(left)
+            partner[free], paired[left] = left, free
+            free = before
+    return len(paired)
+
+
+def _counter(term: str) -> Callable[[str], int]:
+    """What counts ``term``'s instances, as ``term_frequency`` counts them, in index text
+    with its diacritics folded (``fold_latin`` of a ``seg_text``), without tokenizing it: a
+    prefix term where it starts a token, a phrase where its first character is followed by
+    the rest, each apart from the one before by separators only. In ``seg_text`` a CJK or
+    Thai character is always a token of its own."""
+    if not is_phrase(term):
+        return lambda text: _token_starts(text, term)
+    first, *rest = term.split(" ")
+    following = "".join(SEPARATOR + "+" + re.escape(part) for part in rest)
+    pattern = re.compile(re.escape(first) + ("(?=" + following + ")" if rest else ""))
+    return lambda text: len(pattern.findall(text))
+
+
+def _token_starts(text: str, term: str) -> int:
+    """How many tokens of ``text`` start with ``term``, a run of token characters: no
+    token can start inside one of its instances, so each search goes on after it."""
+    count = 0
+    at = text.find(term)
+    while at >= 0:
+        if at == 0 or not is_token_char(text[at - 1]):
+            count += 1
+        at = text.find(term, at + len(term))
+    return count
+
+
+def bm25_scan(
+    docs: Sequence[Tuple[str, str]],
+    terms: Sequence[str],
+    *,
+    cache: Optional[Dict[str, Tuple[int, str]]] = None,
+) -> List[Tuple[str, float]]:
+    """FTS5's ``bm25()`` without FTS5, for the scan backend: the ``(key, score)`` of each row
+    of ``docs``, ``(key, seg_text)`` pairs, that matches any of ``terms``, best (lowest)
+    score first, a tie in ``docs``' order. It is what ``SELECT key, bm25(t) FROM t WHERE t
+    MATCH ?`` gives, with ``build_fts_query``'s query, on an FTS5 table holding ``docs``.
+
+    So pass every row of the index, as FTS5 measures the whole table: the row count, the
+    average row length in tokens and each term's count of rows. The constants are FTS5's
+    (k1 = 1.2, b = 0.75; an IDF at or under 0 counts as 1e-6) and so is the order of the
+    arithmetic, though FTS5 may round its last bit differently where its build fuses a
+    multiply and an add. A substring test of each row's diacritic-folded text finds the
+    rows that may match; ``cache`` keeps each row's token count and folded text, keyed by
+    its text, from one call to the next, and is left holding this call's rows only."""
+    if not terms:
+        return []
+    known = cache if cache is not None else {}
+    wanted = [term.split(" ") for term in terms]
+    rows: Dict[str, Tuple[int, str]] = {}
+    total = 0
+    candidates: List[Tuple[str, str, int]] = []
+    for key, seg_text in docs:
+        measured = known.get(seg_text)
+        if measured is None:
+            measured = (len(fts_tokens(seg_text)), fold_latin(seg_text))
+        rows[seg_text] = measured
+        size, folded = measured
+        total += size
+        if any(all(part in folded for part in parts) for parts in wanted):
+            candidates.append((key, folded, size))
+    if cache is not None:
+        cache.clear()
+        cache.update(rows)
+    counters = [_counter(term) for term in terms]
+    matches: List[Tuple[str, int, List[int]]] = []
+    for key, folded, size in candidates:
+        freqs = [count(folded) for count in counters]
+        if any(freqs):
+            matches.append((key, size, freqs))
+    if not matches:
+        return []
+    rows_in_table = len(docs)
+    average = total / rows_in_table
+    idf: List[float] = []
+    for position in range(len(terms)):
+        hits = sum(1 for _, _, freqs in matches if freqs[position])
+        weight = math.log((rows_in_table - hits + 0.5) / (hits + 0.5))
+        idf.append(weight if weight > 0.0 else 1e-6)
+    scored: List[Tuple[str, float]] = []
+    for key, size, freqs in matches:
+        score = 0.0
+        for weight, freq in zip(idf, freqs):
+            score += weight * ((freq * (_K1 + 1.0)) / (freq + _K1 * (1 - _B + _B * size / average)))
+        scored.append((key, -1.0 * score))
+    scored.sort(key=lambda item: item[1])
+    return scored
+
+
+# ── ranking, fusion and the floor ──
+
+
+def round_ref(conversation_id: str, idx: int) -> str:
+    """A round's id among search hits: ``r:<conversation_id>:<idx>``. A fact's is its own
+    id, which never starts with ``r:``."""
+    return "r:" + conversation_id + ":" + str(idx)
+
+
+def best_first(rows: List[Tuple[float, str, int, str]], limit: int) -> List[Tuple[str, str]]:
+    """The first ``limit`` of one list's matching rows, ``(score, time, rowid, id)``, as
+    ``(id, time)``: by bm25 score (lower is better), then the newer (ISO 8601 times sort as
+    text), then the later row, as the FTS5 backends' SQL orders them."""
+    rows.sort(key=lambda row: row[2], reverse=True)
+    rows.sort(key=lambda row: row[1], reverse=True)
+    rows.sort(key=lambda row: row[0])
+    return [(ref, time) for _, time, _, ref in rows[:limit]]
+
+
+def rrf(lists: Sequence[Sequence[str]], *, k: int = RRF_K) -> Dict[str, float]:
+    """Reciprocal rank fusion: each id's sum, over the lists it is in, of 1 / (k + its
+    rank), ranks counted from 1."""
+    scores: Dict[str, float] = {}
+    for ranked in lists:
+        for rank, ref in enumerate(ranked, start=1):
+            scores[ref] = scores.get(ref, 0.0) + 1.0 / (k + rank)
+    return scores
+
+
+def fuse(
+    lists: Sequence[Sequence[str]], recency: Mapping[str, str], *, k: int = RRF_K
+) -> List[Tuple[str, float]]:
+    """The ids of ``lists`` with their ``rrf`` scores, best first. A tie goes to the newer,
+    by ``recency`` (each id's ISO 8601 time, which sorts as text), then to the id that
+    comes first in ``lists`` read in order."""
+    scores = rrf(lists, k=k)
+    order = list(dict.fromkeys(ref for ranked in lists for ref in ranked))
+    order.sort(key=lambda ref: recency.get(ref, ""), reverse=True)
+    order.sort(key=lambda ref: scores[ref], reverse=True)
+    return [(ref, scores[ref]) for ref in order]
+
+
+def strong_match(tokens: Sequence[str], terms: Sequence[str]) -> bool:
+    """Whether a text with the index tokens ``tokens`` matches enough of ``terms`` to be
+    pre-selected: PRESELECT_MIN_TERMS (2) ``matched_units``, in every script. A CJK
+    or Thai bigram is one unit, so a two-character CJK or Thai run (one bigram) alone
+    is not enough, as one word of the query or of the text is not, however many words it
+    pairs with."""
+    return matched_units(tokens, terms) >= PRESELECT_MIN_TERMS
+
+
+def preselected(score: float, tokens: Sequence[str], terms: Sequence[str]) -> bool:
+    """Whether a hit clears pre-selection's floor: a fused ``score`` of at least
+    PRESELECT_FLOOR and a ``strong_match``."""
+    return score >= PRESELECT_FLOOR and strong_match(tokens, terms)
+
+
+# ── hits and excerpts ──
+
+
+def conversation_title(title: Optional[str], summary_title: Optional[str]) -> str:
+    """What a conversation is called in what the engine is sent: its own title, else its
+    summary's, cut to SUMMARY_TITLE_MAX (120) code points; "" when it has neither, or only
+    blank ones, as when a forget has cleared them."""
+    for name in (title, summary_title):
+        if name and name.strip():
+            return name[:SUMMARY_TITLE_MAX]
+    return ""
+
+
+_USER_LABEL = "User: "
+_ASSISTANT_LABEL = "Assistant: "
+
+
+def round_text(user_text: str, assistant_text: str) -> str:
+    """A round as a search hit shows it, saying who said what."""
+    return _labelled(user_text, assistant_text, _USER_LABEL, _ASSISTANT_LABEL)
+
+
+def _labelled(user_text: str, assistant_text: str, user_label: str, assistant_label: str) -> str:
+    parts = []
+    if user_text:
+        parts.append(user_label + user_text)
+    if assistant_text:
+        parts.append(assistant_label + assistant_text)
+    return "\n".join(parts)
+
+
+def first_match(text: str, terms: Sequence[str]) -> Optional[Tuple[int, int]]:
+    """The span of ``text``, in code points, where a term first occurs as the index would
+    match it, or None. A phrase is found where its last token is."""
+    found = next(_matches(text, terms), None)
+    return None if found is None else (found[0], found[1])
+
+
+def _matches(text: str, terms: Sequence[str]) -> Iterator[Tuple[int, int, int]]:
+    """Every place in ``text`` a term occurs as the index would match it, as ``(start,
+    end, term)``, ``term`` its index in ``terms``: token by token, and at one token in the
+    order of ``terms``. A phrase is found where its last token is, its span from its first."""
+    wanted = [(term.split(" "), not is_phrase(term)) for term in terms]
+    if not wanted:
+        return
+    longest = max(len(parts) for parts, _ in wanted)
+    recent: List[Tuple[str, int]] = []  # the last tokens, with where each starts
+    for token, start, end in index_token_spans(text):
+        recent = (recent + [(token, start)])[-longest:]
+        for number, (parts, prefix) in enumerate(wanted):
+            if prefix:
+                if token.startswith(parts[0]):
+                    yield start, end, number
+            elif len(recent) >= len(parts) and [t for t, _ in recent[-len(parts) :]] == parts:
+                yield recent[-len(parts)][1], end, number
+
+
+def excerpt(
+    text: str,
+    terms: Sequence[str],
+    *,
+    width: int = EXCERPT_WIDTH,
+    find_in: Optional[str] = None,
+) -> str:
+    """``text`` whole when it is at most ``width`` code points; else ``width`` of them
+    around the first place a term occurs, half before it (the start of the text when none
+    does). A cut that falls inside a word moves inward to the nearest whitespace between it
+    and the match, when there is any, and each end that was cut gets an ellipsis (U+2026),
+    so the excerpt is at most ``width`` + 2 code points.
+
+    ``find_in``, text of the same length, is where to look for the term instead of
+    ``text``: ``round_hit`` passes the round's text with its labels blanked."""
+    start, end = _window(text, terms, width, find_in)
+    return _shown(text, start, end)
+
+
+def _window(text: str, terms: Sequence[str], width: int, find_in: Optional[str]) -> Tuple[int, int]:
+    """Where ``excerpt`` cuts ``text``, as ``(start, end)``."""
+    if len(text) <= width:
+        return 0, len(text)
+    found = first_match(text if find_in is None else find_in, terms)
+    begin, finish = found if found is not None else (0, 0)
+    start = max(0, min(begin - width // 2, len(text) - width))
+    return _off_words(text, start, start + width, begin, finish)
+
+
+def _off_words(text: str, start: int, end: int, begin: int, finish: int) -> Tuple[int, int]:
+    """A cut of ``text`` from ``start`` to ``end`` around a match from ``begin`` to
+    ``finish``, moved off the middle of words: a start that doesn't follow whitespace moves
+    forward to just past the next whitespace, never past ``begin``; an end that isn't on
+    whitespace moves back to the last whitespace, never before ``finish``."""
+    if start > 0 and not text[start - 1].isspace():
+        space = _SPACE.search(text, start, max(begin, start))
+        if space is not None:
+            start = space.end()
+    if end < len(text) and not text[end].isspace():
+        for position in range(end - 1, max(finish, start) - 1, -1):
+            if text[position].isspace():
+                end = position
+                break
+    return start, end
+
+
+def _shown(text: str, start: int, end: int, label: str = "") -> str:
+    """``text`` cut at ``start`` and ``end``, an ellipsis at each end that was cut, the
+    first followed by ``label``."""
+    head = ELLIPSIS + label if start > 0 else ""
+    return head + text[start:end].strip() + (ELLIPSIS if end < len(text) else "")
+
+
+def fact_hit(
+    ref: str, score: float, text: str, date: str, title: str, valid_until: Optional[str] = None
+) -> SearchHit:
+    """A fact as a search result: its text whole, dated ``date``, the user's day it was
+    recorded (``days.day``). A fact with a ``valid_until`` gives it before its text, as the
+    engine shows an entry's: "(until 2026-11-10) Flies home on 10 November.". One past
+    it is a hit still, true as history. The bound's 19 code points and FACT_TEXT_MAX (400)
+    keep within RECALLED_TEXT_MAX (1,000)."""
+    shown = "(until " + valid_until + ") " + text if valid_until else text
+    return SearchHit(kind="fact", date=date, conversation=title, text=shown, score=score, ref=ref)
+
+
+def round_hit(
+    ref: str,
+    score: float,
+    user_text: str,
+    assistant_text: str,
+    date: str,
+    title: str,
+    terms: Sequence[str],
+) -> SearchHit:
+    """A round as a search result: an ``excerpt`` of its ``round_text``, dated ``date``, the
+    user's day it was said (``days.day``). The excerpt is centred on a term in what was
+    said, never in a label: "use" begins "User". One cut after the round's start gives the
+    label of the side it starts in after the ellipsis, "… Assistant: …", so whose words
+    they are is never lost; its width is excerpt's.
+
+    When the reply holds a match that window doesn't show whole, a second window of
+    REPLY_EXCERPT_WIDTH shows the best of them (``_reply_window``), after a space, an
+    ellipsis and "Assistant: ", the first window's closing ellipsis left out: "…User: …
+    … Assistant: …". Two windows that would overlap or touch are one, from the first's
+    start to the second's end."""
+    text = round_text(user_text, assistant_text)
+    said = _labelled(user_text, assistant_text, " " * len(_USER_LABEL), " " * len(_ASSISTANT_LABEL))
+    start, end = _window(text, terms, EXCERPT_WIDTH, said)
+    reply = _reply_window(text, said, terms, assistant_text, end)
+    if reply is not None and reply[0] <= end:
+        start, end, reply = start, reply[1], None
+    label = " " + _side_label(text, start, end, user_text, assistant_text)
+    shown = _shown(text, start, end, label)
+    if reply is not None:
+        # The first window ends before the second starts, so its end was cut: the
+        # second's ellipsis marks the gap instead.
+        second = _shown(text, reply[0], reply[1], " " + _ASSISTANT_LABEL)
+        shown = shown[: -len(ELLIPSIS)] + " " + second
+    return SearchHit(
+        kind="excerpt", date=date, conversation=title, text=shown, score=score, ref=ref
+    )
+
+
+def _reply_window(
+    text: str, said: str, terms: Sequence[str], assistant_text: str, shown_end: int
+) -> Optional[Tuple[int, int]]:
+    """Where a round excerpt's second window cuts ``text``, a ``round_text``, as ``(start,
+    end)``, or None. ``said`` is ``text`` with its labels blanked, and ``shown_end`` where
+    the first window ends.
+
+    The window is around the reply's best match among those that end after ``shown_end``:
+    the place where the most distinct terms occur within REPLY_EXCERPT_WIDTH code points,
+    counted from a match's start; the earliest on a tie. It centres those matches, within
+    the reply, and moves off the middle of words as ``excerpt`` does. None when the round
+    has no reply or the reply has no such match."""
+    if not assistant_text:
+        return None
+    begins = len(text) - len(assistant_text)  # where the reply's own text starts
+    found = [hit for hit in _matches(said, terms) if hit[0] >= begins and hit[1] > shown_end]
+    best: Optional[Tuple[int, int, int]] = None  # (distinct terms, start, end)
+    for number, (first, _, _) in enumerate(found):
+        reach = first + REPLY_EXCERPT_WIDTH
+        near = [found[number]] + [
+            hit for hit in found[number + 1 :] if hit[0] >= first and hit[1] <= reach
+        ]
+        distinct = len({term for _, _, term in near})
+        if best is None or distinct > best[0]:
+            best = (distinct, first, max(hit[1] for hit in near))
+    if best is None:
+        return None
+    _, begin, finish = best
+    room = max(0, REPLY_EXCERPT_WIDTH - (finish - begin))
+    start = max(begins, min(begin - room // 2, len(text) - REPLY_EXCERPT_WIDTH))
+    return _off_words(text, start, min(len(text), start + REPLY_EXCERPT_WIDTH), begin, finish)
+
+
+def _side_label(text: str, start: int, end: int, user_text: str, assistant_text: str) -> str:
+    """The label of the side of ``text``, a ``round_text``, that the excerpt from ``start``
+    to ``end`` begins in: "" when it begins with that label already."""
+    cut = text[start:end]
+    first = start + len(cut) - len(cut.lstrip())  # where the excerpt's text begins
+    reply = len(_USER_LABEL) + len(user_text) + 1 if user_text else 0  # the reply's label
+    if not assistant_text or first < reply:
+        return _USER_LABEL if first > 0 else ""
+    return _ASSISTANT_LABEL if first > reply else ""
+
+
+# ── the search_memory result ──
+
+
+def result_limit(limit: Optional[int]) -> int:
+    """How many results a ``search_memory`` call gets: RESULT_LIMIT_DEFAULT (12) when it
+    names no ``limit``, else its ``limit``, as a whole number, kept within RESULT_LIMIT_MIN
+    (8) and RESULT_LIMIT_MAX (20). A model that asks for a few would miss what a few more
+    hold."""
+    if limit is None:
+        return RESULT_LIMIT_DEFAULT
+    return max(RESULT_LIMIT_MIN, min(int(limit), RESULT_LIMIT_MAX))
+
+
+def search_memory_result(
+    search: Callable[[Optional[str], Optional[str]], Sequence[SearchHit]],
+    from_date: Optional[str],
+    to_date: Optional[str],
+) -> str:
+    """The ``search_memory`` tool's result for ``search(from_date, to_date)``, a search
+    with those dates: ``result_json`` of its hits. When the dates find nothing, the search
+    runs again without them, and what it finds comes with ``"note"`` ANY_DATE, saying so.
+    A date the model gives is a guess at when something was said, and a wrong one would
+    otherwise read as nothing remembered."""
+    hits = search(from_date, to_date)
+    if hits or (from_date is None and to_date is None):
+        return result_json(hits)
+    hits = search(None, None)
+    return result_json(hits, notes=[ANY_DATE] if hits else [])
+
+
+def result_json(hits: Sequence[SearchHit], notes: Sequence[str] = ()) -> str:
+    """The ``search_memory`` tool's result: ``{"results": [{"date", "conversation", "kind",
+    "text"}]}`` as compact JSON, at most RESULT_CHARS_MAX (12,000) code points, with
+    ``"note"`` giving ``notes`` joined by "; " when there are any. Results that would take
+    it over are dropped from the end, and the note's last part, "truncated", says so."""
+    results = [
+        {"date": hit.date, "conversation": hit.conversation, "kind": hit.kind, "text": hit.text}
+        for hit in hits
+    ]
+    document = _document(results, notes)
+    while len(document) > RESULT_CHARS_MAX and results:
+        results.pop()
+        document = _document(results, [*notes, TRUNCATED])
+    return document
+
+
+def _document(results: List[Dict[str, str]], notes: Sequence[str]) -> str:
+    value: Dict[str, Any] = {"results": results}
+    if notes:
+        value["note"] = "; ".join(notes)
+    return _dumps(value)
+
+
+def _dumps(value: Dict[str, Any]) -> str:
+    # Characters as themselves, not \u escapes: the cap counts code points.
+    return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+
+
+# The search steps, and what the other memory modules use.
+__all__ = [
+    "PRESELECT_FLOOR",
+    "PRESELECT_MIN_TERMS",
+    "best_first",
+    "bm25_scan",
+    "build_fts_query",
+    "conversation_title",
+    "excerpt",
+    "fact_hit",
+    "fts_query",
+    "fuse",
+    "preselected",
+    "query_terms",
+    "result_json",
+    "result_limit",
+    "round_hit",
+    "round_ref",
+    "rrf",
+    "search_memory_result",
+]

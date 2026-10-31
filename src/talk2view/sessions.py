@@ -58,12 +58,16 @@ class T2VSession:
         self._tools = tools
         self._default_model = default_model
         self._capabilities = capabilities
+        # The memory object of the turn in progress (send_message's ``memory``).
+        self._memory: Optional[Dict[str, Any]] = None
 
     def _capability_fields(self, resume: bool) -> Dict[str, Any]:
         """Opt-in request flags. Empty by default, so the body is unchanged.
 
         ``supports_approval`` is a /messages-only field: the engine keeps it in
-        the run's state, and its ResumeRequest schema has no such field.
+        the run's state, and its ResumeRequest schema has no such field. The
+        memory flags go on /resume too: the engine checks search_memory's gate
+        against the resume body again.
         """
         caps = self._capabilities
         if caps is None:
@@ -77,10 +81,26 @@ class T2VSession:
             fields["supports_reasoning"] = True
         if caps.image_generation:
             fields["supports_image_generation"] = True
+        if caps.memory:
+            fields["supports_memory"] = True
+        if caps.memory_search:
+            fields["supports_memory_search"] = True
         if caps.timezone:
             fields["timezone"] = caps.timezone
         if caps.surface:
             fields["surface"] = caps.surface
+        return fields
+
+    def _turn_fields(self, resume: bool) -> Dict[str, Any]:
+        """The capability flags, plus the turn's ``memory`` object when it has one.
+
+        Every request of the turn carries the same object: on /resume LangGraph
+        replays the interrupted tool, and without it the engine's search_memory
+        gate would refuse, dropping the device's answer.
+        """
+        fields = self._capability_fields(resume)
+        if self._memory is not None:
+            fields["memory"] = self._memory
         return fields
 
     def _resume_endpoint(self) -> str:
@@ -93,7 +113,7 @@ class T2VSession:
             "result": result,
             "is_error": is_error,
         }
-        body.update(self._capability_fields(resume=True))
+        body.update(self._turn_fields(resume=True))
         return body
 
     def _approved_body(self, tool_call_id: str, approved: bool) -> Dict[str, Any]:
@@ -103,7 +123,7 @@ class T2VSession:
         so this body must never carry a ``result`` key.
         """
         body: Dict[str, Any] = {"tool_call_id": tool_call_id, "approved": approved}
-        body.update(self._capability_fields(resume=True))
+        body.update(self._turn_fields(resume=True))
         return body
 
     def send_message(
@@ -113,6 +133,7 @@ class T2VSession:
         history: Optional[List[ChatMessage]] = None,
         attachments: Optional[List[Attachment]] = None,
         cancel: Optional[CancelToken] = None,
+        memory: Optional[Dict[str, Any]] = None,
     ) -> Iterator[ChatEvent]:
         """Send a message and stream the response.
 
@@ -124,7 +145,11 @@ class T2VSession:
                 Talk2View.upload_attachment() to attach to this message.
             cancel: ``cancel.cancel()`` from any thread aborts the stream; the
                 iterator then raises ``Cancelled``.
+            memory: This turn's memory object (``status``, ``entries``,
+                ``recent``, ``recalled``), sent as is on /messages and on every
+                /resume of the turn, until the next send_message() replaces it.
         """
+        self._memory = memory
         messages: List[Dict[str, Any]] = []
 
         if system_prompt:
@@ -142,7 +167,7 @@ class T2VSession:
         body: Dict[str, Any] = {"messages": messages, "stream": True}
         if self._default_model:
             body["model"] = self._default_model
-        body.update(self._capability_fields(resume=False))
+        body.update(self._turn_fields(resume=False))
 
         yield from self._process_stream(
             "/v1/sessions/{}/messages".format(self.id),
@@ -245,6 +270,12 @@ class T2VSession:
                 tool_name=chunk.tool_event.tool_name,
                 tool_call_id=chunk.tool_event.tool_call_id,
                 tool_event=chunk.tool_event,
+            )
+        if chunk.memory:
+            yield ChatEvent(
+                type="memory",
+                tool_call_id=chunk.memory.tool_call_id,
+                memory_ops=chunk.memory.ops,
             )
 
     def _content_events(self, chunk: ChatCompletionChunk) -> Iterator[ChatEvent]:

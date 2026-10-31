@@ -1171,7 +1171,9 @@ class ChatController:
         self._end_dropped_turns()
         detach = getattr(self._t2v, "detach_session", None)  # absent on older test fakes
         if callable(detach):
-            detach()  # field writes only: no request, no listener
+            # No request, no listener: field writes and, with memory, a new memory
+            # conversation (a store read; the extraction is only queued).
+            detach()
         self._flush()
 
     # ── Identity ────────────────────────────────────────────────────────────

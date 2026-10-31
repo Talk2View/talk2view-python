@@ -62,6 +62,8 @@ def normalise_event(event: ChatEvent) -> Dict[str, Any]:
             out["status"] = tool_event.status
         if tool_event.display is not None:
             out["display"] = tool_event.display
+    elif event.type == "memory":
+        out.update(toolCallId=event.tool_call_id, ops=event.memory_ops)
     elif event.type == "status":
         out.update(status=event.status, message=event.message)
     elif event.type == "todos":

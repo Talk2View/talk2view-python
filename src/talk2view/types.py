@@ -175,6 +175,20 @@ class ToolEvent:
 
 
 @dataclass
+class MemoryEvent:
+    """The changes one ``update_memory`` call asks the device to make to the user's
+    memory (``memory`` field).
+
+    Only sent when the request set ``supports_memory``. It never ends the stream, which
+    goes on to ``stop`` and ``[DONE]``. Each op holds only the fields it uses:
+    ``{"op": "add"|"update"|"remove"|"forget", "id"?, "topic"?, "text"?, "valid_until"?}``.
+    """
+
+    ops: List[Dict[str, Any]]
+    tool_call_id: str
+
+
+@dataclass
 class StreamError:
     """Structured error on an SSE chunk (``error`` field).
 
@@ -203,6 +217,7 @@ class ChatCompletionChunk:
     approval: Optional[ApprovalRequest] = None
     tool_event: Optional[ToolEvent] = None
     error: Optional[StreamError] = None
+    memory: Optional[MemoryEvent] = None
 
 
 # ── Chat Events (public API) ──
@@ -213,7 +228,8 @@ class ChatEvent:
     """A high-level event yielded by chat() / send_message().
 
     type is one of: "text", "reasoning", "tool_call", "tool_event",
-    "approval_required", "approval_result", "done", "error", "status", "todos"
+    "approval_required", "approval_result", "done", "error", "status", "todos",
+    "memory"
     """
 
     type: str
@@ -259,6 +275,10 @@ class ChatEvent:
     # tool_event event (platform tool lifecycle; needs Capabilities.tool_events)
     tool_event: Optional[ToolEvent] = None
 
+    # memory event: the ops of one update_memory call (tool_call_id), for the device to
+    # apply to the user's memory (needs Capabilities.memory)
+    memory_ops: Optional[List[Dict[str, Any]]] = None
+
 
 # ── Human-in-the-loop ──
 
@@ -297,6 +317,10 @@ class Capabilities:
     image_generation: generated-image tool events.
     timezone: the user's IANA timezone, e.g. "Australia/Perth".
     surface: "keyboard" or "app" — the engine rejects any other value.
+    memory: the user's memory, kept on the device (``memory`` chunks). Without it the
+        engine ignores the ``memory`` object send_message() sends.
+    memory_search: the engine-defined ``search_memory`` client tool, answered from
+        the device's memory.
     """
 
     approval: bool = False
@@ -305,6 +329,8 @@ class Capabilities:
     image_generation: bool = False
     timezone: Optional[str] = None
     surface: Optional[Literal["keyboard", "app"]] = None
+    memory: bool = False
+    memory_search: bool = False
 
 
 class _DefaultModel:

@@ -14,6 +14,7 @@ from .types import (
     ChatCompletionChunk,
     ChatCompletionChunkChoice,
     ChatCompletionChunkDelta,
+    MemoryEvent,
     StreamError,
     ToolCallInterrupt,
     ToolEvent,
@@ -76,6 +77,16 @@ def _parse_tool_event(raw: Dict[str, Any]) -> ToolEvent:
     )
 
 
+def _parse_memory(raw: Dict[str, Any]) -> MemoryEvent:
+    # The ops pass through as sent: the store that applies them judges each one, and
+    # counts what it drops.
+    ops = raw.get("ops")
+    return MemoryEvent(
+        ops=ops if isinstance(ops, list) else [],
+        tool_call_id=raw.get("tool_call_id") or "",
+    )
+
+
 def _parse_chunk(data: Dict[str, Any]) -> ChatCompletionChunk:
     choices: List[ChatCompletionChunkChoice] = []
     for raw_choice in data.get("choices") or []:
@@ -108,6 +119,11 @@ def _parse_chunk(data: Dict[str, Any]) -> ChatCompletionChunk:
     if data.get("tool_event"):
         tool_event = _parse_tool_event(_as_dict(data["tool_event"]))
 
+    # Read from its own key: the engine's memory chunk has no finish_reason.
+    memory = None
+    if data.get("memory"):
+        memory = _parse_memory(_as_dict(data["memory"]))
+
     error = None
     if data.get("error"):
         raw_error = _as_dict(data["error"])
@@ -133,6 +149,7 @@ def _parse_chunk(data: Dict[str, Any]) -> ChatCompletionChunk:
         approval=approval,
         tool_event=tool_event,
         error=error,
+        memory=memory,
     )
 
 
