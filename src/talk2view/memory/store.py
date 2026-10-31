@@ -14,6 +14,10 @@ Three backends, chosen when the store opens (``MemoryStore.backend`` says which)
 A file can move between them: ``meta`` records the kind of index the file holds, ``fts5`` or
 ``scan``, and a store that opens a file indexed the other way rebuilds the index for its own
 kind from the facts and rounds.
+
+``meta`` also records the file's schema version. A store that opens a file an older version
+wrote upgrades it in place; one of a version it doesn't read (a newer talk2view's) raises
+``UnsupportedMemoryFileError`` and leaves the file as it was.
 """
 
 from __future__ import annotations
@@ -191,8 +195,11 @@ def _choose_backend() -> Backend:
     return "scan"
 
 
-# ── schema (version 1): times are ISO 8601 text, dates YYYY-MM-DD ──
+# ── schema (version 2): times are ISO 8601 text, dates YYYY-MM-DD ──
 # Every primary key is NOT NULL: SQLite otherwise lets a text key hold NULL.
+
+_SCHEMA_VERSION = 2
+_READABLE_SCHEMA_VERSIONS = tuple(str(version) for version in range(1, _SCHEMA_VERSION + 1))
 
 _TABLES = (
     "CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY NOT NULL, value TEXT NOT NULL)",
@@ -254,12 +261,32 @@ _TABLES = (
 )
 
 _META_DEFAULTS = (
-    ("schema_version", "1"),
+    ("schema_version", str(_SCHEMA_VERSION)),
     ("paused", "0"),
     ("include_sensitive", "0"),
     ("changes_since_consolidation", "0"),
     ("revision", "0"),
     ("forget_revision", "0"),
+)
+
+# Version 1 to 2: the four extraction-failure columns of conversations, added while the
+# version stayed 1. CREATE TABLE IF NOT EXISTS leaves an older table as it was, so a version 1
+# file written before them lacks them and one written after has them: each is added only
+# where missing.
+_VERSION_2_COLUMNS = (
+    (
+        "extract_failures",
+        "ALTER TABLE conversations ADD COLUMN extract_failures INTEGER NOT NULL DEFAULT 0",
+    ),
+    ("extract_failed_at", "ALTER TABLE conversations ADD COLUMN extract_failed_at TEXT"),
+    (
+        "extract_failed_through",
+        "ALTER TABLE conversations ADD COLUMN extract_failed_through INTEGER",
+    ),
+    (
+        "extract_skipped_through",
+        "ALTER TABLE conversations ADD COLUMN extract_skipped_through INTEGER NOT NULL DEFAULT 0",
+    ),
 )
 
 # The search index, kept by the store (no triggers): one row per fact and per round with
@@ -338,6 +365,11 @@ def _fact_text(text: str) -> str:
 def _round_text(user_text: str, assistant_text: str) -> str:
     """A round's ``seg_text``."""
     return normalise_for_index(user_text + "\n" + assistant_text)
+
+
+class UnsupportedMemoryFileError(RuntimeError):
+    """The memory file records a schema version this store doesn't read: a newer talk2view
+    wrote it, or it isn't a memory file. The store leaves it as it was."""
 
 
 def _create_private_file(path: Path) -> None:
@@ -1886,8 +1918,21 @@ class MemoryStore:
         self._db.execute("PRAGMA journal_mode = WAL")
         self._db.execute("PRAGMA foreign_keys = ON")
         with self._write():
+            version = self._recorded_schema_version()
+            if version is not None and version not in _READABLE_SCHEMA_VERSIONS:
+                raise UnsupportedMemoryFileError(
+                    "{}: schema version {!r} isn't one this talk2view reads (1 to {}); a newer"
+                    " talk2view may have written the file".format(
+                        self.path, version, _SCHEMA_VERSION
+                    )
+                )
             for statement in _TABLES + self._index.create:
                 self._db.execute(statement)
+            if version == "1":
+                self._upgrade_to_version_2()
+            self._db.execute(
+                "UPDATE meta SET value = ? WHERE key = 'schema_version'", (str(_SCHEMA_VERSION),)
+            )
             self._db.executemany(
                 "INSERT OR IGNORE INTO meta (key, value) VALUES (?, ?)",
                 _META_DEFAULTS
@@ -1902,6 +1947,24 @@ class MemoryStore:
                 self._rebuild_index()
                 # The cleared index's segments still hold its old text, deleted rows' included.
                 self._scrub()
+
+    def _recorded_schema_version(self) -> Optional[str]:
+        """The schema version ``meta`` records, or None for a file that records none: a new
+        file, which has no ``meta`` table yet."""
+        if not self._db.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'meta'"
+        ):
+            return None
+        rows = self._db.execute("SELECT value FROM meta WHERE key = 'schema_version'")
+        return str(rows[0][0]) if rows else None
+
+    def _upgrade_to_version_2(self) -> None:
+        """Add the columns a version 1 file may lack (``_VERSION_2_COLUMNS``), in the
+        caller's transaction."""
+        present = {row[1] for row in self._db.execute("PRAGMA table_info(conversations)")}
+        for column, statement in _VERSION_2_COLUMNS:
+            if column not in present:
+                self._db.execute(statement)
 
     def _rebuild_index(self) -> None:
         """Fill this store's kind of index afresh from ``facts`` and ``rounds``, in the

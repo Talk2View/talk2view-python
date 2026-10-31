@@ -17,7 +17,7 @@ from .models import (
     MemoryEntry,
     SearchHit,
 )
-from .store import Backend, MemoryStore
+from .store import Backend, MemoryStore, UnsupportedMemoryFileError
 from .text import (
     STOP_WORDS,
     code_points,
@@ -40,6 +40,7 @@ __all__ = [
     "MemoryStore",
     "SearchHit",
     "T2VMemory",
+    "UnsupportedMemoryFileError",
     "code_points",
     "index_tokens",
     "normalise_dedupe",

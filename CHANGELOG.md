@@ -40,6 +40,9 @@ based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - The `memory` extra, `pip install 'talk2view[memory]'`: `apsw`, which bundles a SQLite
   with FTS5, on Python 3.11 and newer, for a host whose `sqlite3` lacks FTS5. Without
   either, the store keeps its search index in plain tables (`store.backend == "scan"`).
+- The memory file records its schema version. Opening a file an older talk2view wrote
+  upgrades it in place; a file a newer talk2view wrote is left as it was, and `t2v.memory`
+  raises `UnsupportedMemoryFileError`, so chats go on without memory.
 
 ### Security
 

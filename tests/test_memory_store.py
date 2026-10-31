@@ -29,6 +29,7 @@ from talk2view.memory import (
     Fact,
     MemoryEntry,
     MemoryStore,
+    UnsupportedMemoryFileError,
     code_points,
     index_tokens,
     normalise_dedupe,
@@ -298,7 +299,7 @@ def test_schema_version_and_meta_defaults(tmp_path: Path, backend: str) -> None:
     path = tmp_path / "u1.sqlite3"
     MemoryStore(path, backend=backend, clock=FakeClock()).close()  # type: ignore[arg-type]
     assert _meta(path) == {
-        "schema_version": "1",
+        "schema_version": "2",
         "paused": "0",
         "include_sensitive": "0",
         "changes_since_consolidation": "0",
@@ -316,6 +317,113 @@ def test_schema_version_and_meta_defaults(tmp_path: Path, backend: str) -> None:
     MemoryStore(path, backend=backend, clock=later).close()  # type: ignore[arg-type]
     assert _meta(path)["paused"] == "1"
     assert _meta(path)["last_consolidated_at"] == "2026-10-21T10:00:00Z"
+
+
+# The four extraction-failure columns, added to conversations while the schema version
+# stayed 1.
+_FAILURE_COLUMNS = (
+    "extract_failures",
+    "extract_failed_at",
+    "extract_failed_through",
+    "extract_skipped_through",
+)
+_DROP_FAILURE_COLUMNS = (
+    "ALTER TABLE conversations DROP COLUMN extract_failures",
+    "ALTER TABLE conversations DROP COLUMN extract_failed_at",
+    "ALTER TABLE conversations DROP COLUMN extract_failed_through",
+    "ALTER TABLE conversations DROP COLUMN extract_skipped_through",
+)
+needs_drop_column = pytest.mark.skipif(
+    sqlite3.sqlite_version_info < (3, 35, 0), reason="DROP COLUMN needs SQLite 3.35"
+)
+
+
+def _conversation_columns(path: Path) -> List[str]:
+    with closing(sqlite3.connect(str(path))) as conn:
+        return [row[1] for row in conn.execute("PRAGMA table_info(conversations)")]
+
+
+def _version_1_file(path: Path, backend: str, *, without_failure_columns: bool) -> None:
+    """A file as a version 1 store left it, holding one conversation of two rounds, the
+    first extracted. Before the extraction-failure columns its conversations table lacked
+    them; after, it had them, and still said version 1."""
+    store = MemoryStore(path, backend=backend, clock=FakeClock())  # type: ignore[arg-type]
+    store.record_round("c1", "I moved to Perth", "Noted.")
+    store.record_round("c1", "I work at the hospital", "Noted.")
+    store.mark_extracted("c1", 1)
+    store.close()
+    with closing(sqlite3.connect(str(path))) as conn:
+        conn.execute("UPDATE meta SET value = '1' WHERE key = 'schema_version'")
+        if without_failure_columns:
+            for statement in _DROP_FAILURE_COLUMNS:
+                conn.execute(statement)
+        conn.commit()
+
+
+@needs_drop_column
+def test_a_version_1_file_without_the_failure_columns_gains_them(
+    tmp_path: Path, backend: str
+) -> None:
+    """CREATE TABLE IF NOT EXISTS leaves an older table as it was, so a file written before
+    the extraction-failure columns lacks columns every conversation query reads. Opening it
+    adds them with their defaults, keeps what the file holds, and records version 2."""
+    path = tmp_path / "u1.sqlite3"
+    _version_1_file(path, backend, without_failure_columns=True)
+    assert not set(_FAILURE_COLUMNS) & set(_conversation_columns(path))
+
+    store = MemoryStore(path, backend=backend, clock=FakeClock())  # type: ignore[arg-type]
+    try:
+        record = _conversation(store, "c1")
+        assert record.extracted_through == 1
+        assert (record.extract_failures, record.extract_failed_at) == (0, None)
+        assert (record.extract_failed_through, record.extract_skipped_through) == (None, 0)
+        assert [user for _, user, _, _ in store.rounds("c1")] == [
+            "I moved to Perth",
+            "I work at the hospital",
+        ]
+        assert store.extraction_failed("c1", 2, at=T0) == 1
+    finally:
+        store.close()
+    assert _meta(path)["schema_version"] == "2"
+    assert set(_FAILURE_COLUMNS) <= set(_conversation_columns(path))
+
+
+def test_a_version_1_file_with_the_failure_columns_only_records_version_2(
+    tmp_path: Path, backend: str
+) -> None:
+    """A file written after the extraction-failure columns still said version 1 but has
+    them: opening it adds none a second time (SQLite refuses a duplicate column) and records
+    version 2."""
+    path = tmp_path / "u1.sqlite3"
+    _version_1_file(path, backend, without_failure_columns=False)
+
+    store = MemoryStore(path, backend=backend, clock=FakeClock())  # type: ignore[arg-type]
+    try:
+        assert _conversation(store, "c1").extracted_through == 1
+    finally:
+        store.close()
+    assert _meta(path)["schema_version"] == "2"
+
+
+@pytest.mark.parametrize("version", ["3", "0", "two"])
+def test_a_file_of_a_version_this_store_cannot_read_is_left_as_it_was(
+    tmp_path: Path, backend: str, version: str
+) -> None:
+    """A file a later SDK wrote may hold what this one can't keep, and a version that isn't
+    one this store wrote says the file isn't one it knows: opening raises and writes
+    nothing, not even the meta defaults every open fills in."""
+    path = tmp_path / "u1.sqlite3"
+    MemoryStore(path, backend=backend, clock=FakeClock()).close()  # type: ignore[arg-type]
+    with closing(sqlite3.connect(str(path))) as conn:
+        conn.execute("UPDATE meta SET value = ? WHERE key = 'schema_version'", (version,))
+        conn.execute("DELETE FROM meta WHERE key = 'paused'")
+        conn.commit()
+    before = _meta(path)
+
+    with pytest.raises(UnsupportedMemoryFileError, match=f"schema version '{version}'"):
+        MemoryStore(path, backend=backend, clock=FakeClock())  # type: ignore[arg-type]
+
+    assert _meta(path) == before
 
 
 def test_index_tables_are_fts5_or_plain_by_backend(store: MemoryStore, backend: str) -> None:

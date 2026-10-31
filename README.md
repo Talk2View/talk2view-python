@@ -1395,6 +1395,10 @@ them, together with `run_due`, `turn_payload` and `handle_search`.
   a folder only the user can read.
 - **Deleted text is scrubbed** from the file once its undo window has passed (at once for
   a reset or a chat deleted with `store.delete_conversation`).
+- **Versions.** The file records its schema version. Opening a file an older talk2view
+  wrote upgrades it in place. A file a newer talk2view wrote is left as it was:
+  `t2v.memory` raises `UnsupportedMemoryFileError` (in `talk2view.memory`), and chats go
+  on without memory, with a warning each turn, until the host updates talk2view.
 - **Search** runs on SQLite's FTS5 where it can, and the store picks a backend when it
   opens: the standard library's `sqlite3` when it was built with FTS5; else `apsw`, which
   bundles a SQLite with FTS5; else `scan`, which needs no FTS5, keeps the index in plain
