@@ -1313,13 +1313,16 @@ class SlicerTools:
 
 Slicer runs on the Qt event loop. Run the stream in a thread to avoid blocking
 the UI, and pass `qt_dispatcher(qt.QTimer)` so your tool handlers still run on
-Slicer's main thread, where MRML access is legal:
+Slicer's main thread, where MRML access is legal. Your own UI updates from that
+thread go through the same dispatcher: `t2v.tools.dispatcher.post(fn)` queues
+`fn` for the main thread.
 
 ```python
 import threading
+from functools import partial
 import qt
 import slicer
-from talk2view import qt_dispatcher
+from talk2view import Talk2View, qt_dispatcher
 
 class Talk2ViewWidget:
     def __init__(self):
@@ -1350,18 +1353,21 @@ class Talk2ViewWidget:
 
     def _stream_chat(self, message):
         """Runs in a background thread."""
+        # Qt widgets belong to the main thread: queue every UI call for it.
+        on_main = self.t2v.tools.dispatcher.post
         try:
             for event in self.t2v.chat(message):
                 if event.type == "text":
                     self.response_text += event.content
-                    # Update UI on the main thread
-                    slicer.util.mainWindow().statusBar().showMessage(
-                        self.response_text[:100]
-                    )
+                    on_main(partial(self._show_status, self.response_text[:100]))
                 elif event.type == "done":
-                    slicer.util.mainWindow().statusBar().showMessage("Done")
+                    on_main(partial(self._show_status, "Done"))
         except Exception as e:
-            slicer.util.errorDisplay(f"Talk2View error: {e}")
+            on_main(partial(slicer.util.errorDisplay, f"Talk2View error: {e}"))
+
+    def _show_status(self, text):
+        """Runs on Slicer's main thread."""
+        slicer.util.mainWindow().statusBar().showMessage(text)
 ```
 
 > **Important:** without a dispatcher, `@tool` handlers execute on the
