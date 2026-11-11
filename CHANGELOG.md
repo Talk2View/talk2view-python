@@ -5,6 +5,12 @@ based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## Unreleased
 
+### Fixed
+
+- README: the 3D Slicer "Streaming in a Qt App" example now imports `Talk2View`, and
+  posts its status-bar updates and its error dialog to Slicer's main thread with
+  `t2v.tools.dispatcher.post()`. It used to call Qt from the streaming thread.
+
 ### Security
 
 - The chat page bundles `dompurify` 3.4.17 and `zod` 4.6.6, past DOMPurify's
