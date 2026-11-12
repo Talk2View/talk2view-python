@@ -230,6 +230,29 @@ def test_start_binds_loopback_and_returns_the_tokened_url(rig: Rig) -> None:
     assert bound is not None and bound.server_address[0] == "127.0.0.1"
 
 
+def test_a_burst_of_simultaneous_connections_is_all_served(rig: Rig) -> None:
+    # A browser opens up to six connections to the page's host at once, the event stream
+    # included. With the standard library's listen backlog of 5, macOS resets the ones
+    # that arrive before the server accepts the others.
+    count = 16
+    start = threading.Barrier(count)
+    statuses: List[Any] = []
+
+    def load() -> None:
+        try:
+            start.wait(5)
+            statuses.append(rig.request("GET", "/", auth=False)[0])
+        except Exception as exc:  # pragma: no cover - failure detail only
+            statuses.append(repr(exc))
+
+    workers = [threading.Thread(target=load) for _ in range(count)]
+    for worker in workers:
+        worker.start()
+    for worker in workers:
+        worker.join(10)
+    assert statuses == [200] * count
+
+
 def test_url_before_start_start_twice_and_start_after_stop_raise() -> None:
     server = UIServer(FakeController(), GenericHost(), static_dir=STUB)
     assert server.port == 0

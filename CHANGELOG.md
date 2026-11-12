@@ -7,6 +7,9 @@ based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- The chat page's server (`UIServer`) listens with a backlog of 64, not the standard
+  library's 5. On macOS, connections over the backlog are reset, so a page that opened
+  six or more at once could lose a file or a request.
 - README: the 3D Slicer "Streaming in a Qt App" example now imports `Talk2View`, and
   posts its status-bar updates and its error dialog to Slicer's main thread with
   `t2v.tools.dispatcher.post()`. It used to call Qt from the streaming thread.

@@ -71,6 +71,9 @@ Route = Callable[[BaseHTTPRequestHandler], None]
 
 
 class _QuietHTTPServer(ThreadingHTTPServer):
+    #: Six threads connect at once; past the standard library's backlog of 5, macOS resets.
+    request_queue_size = 64
+
     def handle_error(self, request: Any, client_address: Any) -> None:
         """A client that aborts a stream resets the socket the handler waits on for its
         next request: expected here, so not printed. Anything else still is."""
