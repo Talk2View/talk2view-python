@@ -1,5 +1,5 @@
 // vendored-from: Talk2View/talk2view-typescript src/constants.ts
-// vendored-commit: a30eeae4b42bcc44ccaaf29701f568c7c3b33f6a
+// vendored-commit: 741b084383751a22e34674b0604797c452bdab39
 // local-delta: none
 //
 // A copy of the public TS SDK's attachment constants (the page's upload `accept` list).
@@ -16,6 +16,8 @@
  */
 
 /** MIME whitelist (mirrors the server). Also drives the file input's `accept`. */
+import type { VoiceModelId } from './types.js';
+
 export const ATTACHMENT_ACCEPT = 'image/png,image/jpeg,image/webp,image/gif,application/pdf';
 
 /** The same whitelist as a Set, for O(1) membership checks. */
@@ -34,3 +36,10 @@ export function isAllowedAttachmentType(type: string): boolean {
  * their Profile page on the Talk2View dashboard.
  */
 export const VOICE_PREFERENCE_URL = 'https://dashboard.talk2view.com/enduser/profile#voice';
+
+/** Each voice model's name, as the engine's notes and the call panel say it. */
+export const VOICE_MODEL_NAMES: Record<VoiceModelId, string> = {
+  'gemini-live': 'Gemini Live',
+  elevenlabs: 'ElevenLabs',
+  'elevenlabs-medical': 'ElevenLabs Medical',
+};

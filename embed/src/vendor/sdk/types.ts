@@ -1,5 +1,5 @@
 // vendored-from: Talk2View/talk2view-typescript src/types.ts
-// vendored-commit: 12d09ce551ab1fb048bfdb65651c1e9aa6826e06
+// vendored-commit: 741b084383751a22e34674b0604797c452bdab39
 // local-delta: types.ts.delta.diff
 //
 // A copy of the public TS SDK's types, plus one local delta, declared in full in
@@ -591,14 +591,57 @@ export interface VoiceIceServer {
   credential?: string | null;
 }
 
-/** Engine response to `POST /v1/voice/sessions`. The ticket is single-use and short-lived. */
+/** What runs a voice call. */
+export type VoiceModelId = 'gemini-live' | 'elevenlabs' | 'elevenlabs-medical';
+
+/** Body of `POST /v1/voice/sessions`. Every field is optional. */
+export interface VoiceSessionRequest {
+  /** The integrator's instructions for the page the call starts on. */
+  system_prompt?: string;
+  /** The voice models the SDK can run. Absent: Gemini Live only, as SDK 0.22.0 and older. */
+  voice_models?: VoiceModelId[];
+  /** The browser's language tag, which picks the greeting and language of an ElevenLabs call. */
+  language?: string;
+}
+
+/** One thing the app's agent can do: a client tool's name and the first line of its description. */
+export interface VoiceCapability {
+  name: string;
+  description: string;
+}
+
+/**
+ * What starts an ElevenLabs call: the conversation token, the call's time
+ * limit, the app's capabilities, the notice to give when credit runs out, and
+ * the call's greeting and language.
+ */
+export interface ElevenLabsCallInfo {
+  token: string;
+  conversation_id: string;
+  agent_id: string;
+  time_limit_seconds: number;
+  capabilities: VoiceCapability[];
+  budget_notice: string;
+  greeting: string;
+  language: string;
+}
+
+/**
+ * Engine response to `POST /v1/voice/sessions`: the voice model that takes the
+ * call, the note to show once at its start, and what starts the call. A Gemini
+ * Live call carries `ticket` (single-use and short-lived), `voice_url` and
+ * `ice_servers`; an ElevenLabs call carries `elevenlabs` instead.
+ */
 export interface VoiceSessionResponse {
-  ticket: string;
-  voice_url: string;
+  voice_model: VoiceModelId;
+  note: string | null;
   session_id: string;
-  ice_servers: VoiceIceServer[];
   expires_in: number;
   model: string;
+  ticket?: string;
+  voice_url?: string;
+  ice_servers?: VoiceIceServer[];
+  elevenlabs?: ElevenLabsCallInfo | null;
 }
 
 export type VoiceState = 'idle' | 'connecting' | 'listening' | 'ended' | 'error';
@@ -628,7 +671,8 @@ export interface VoiceError {
    * Why voice failed.
    * - Minting the call (engine): `voice_disabled`, `account_required`,
    *   `no_api_key`, `insufficient_credit`, `credit_check_unavailable`,
-   *   `service_unavailable`, `upstream_error`.
+   *   `voice_model_unavailable` (no voice model this app allows can take the
+   *   call), `upstream_error`.
    * - Connecting (voice service): `voice_at_capacity`, `voice_ticket_invalid`,
    *   `voice_offer_invalid`, `service_unavailable`, `upstream_error`.
    * - The SDK and the browser: `auth_expired` (the sign-in expired, before or
@@ -646,6 +690,12 @@ export interface VoiceTranscript {
   role: 'user' | 'bot';
   text: string;
   final: boolean;
+  /**
+   * This line replaces the same side's previous line: an ElevenLabs agent line
+   * cut short by the end-user, with only the words the agent said. Its text is
+   * empty when the agent was cut off before its first word.
+   */
+  replaces?: boolean;
 }
 
 export interface VoiceToolCall {
@@ -668,4 +718,11 @@ export interface VoiceEventMap {
   approvalChange: [VoicePendingApproval | null];
   error: [VoiceError];
   ended: [VoiceEndReason];
+  /**
+   * The engine's note on the voice model the call runs on, such as why it
+   * isn't the end-user's preferred one. Once, at the start; show it verbatim.
+   */
+  note: [string];
+  /** The call is up: the voice model it runs on, and its greeting (an ElevenLabs call's; null otherwise). */
+  callStarted: [{ voiceModel: VoiceModelId; greeting: string | null }];
 }
