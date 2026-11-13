@@ -158,6 +158,9 @@ class _Server(ThreadingHTTPServer):
     daemon_threads = True
     #: Never share the port: with SO_REUSEADDR another process could bind it on Windows.
     allow_reuse_address = False
+    #: The listen backlog. The standard library's 5 is fewer than the connections a browser
+    #: opens to one host at once, and macOS resets the ones over it instead of retrying.
+    request_queue_size = 64
 
     def server_bind(self) -> None:
         exclusive = getattr(socket, "SO_EXCLUSIVEADDRUSE", None)  # Windows only
