@@ -8,10 +8,16 @@ collide with these). Shapes reuse the TypeScript SDK's types where one exists:
   null}`` (TS ``User``). ``oauthPending`` is the provider sign-in waiting in the browser
   (``ProviderSignIn``); ``oauthError`` the last attempt's failure (a cancel is not one),
   kept until the next ``oauthStart`` or an ``oauthDismissError``, across auth changes;
-- ``models``: ``{"list": [TS Model: id, object, created, owned_by, name], "selected":
-  id | null}``; ``selected`` is the end-user's own choice when it is listed, else null
-  (the host's or the partner's default applies). Every auth change empties it until the
-  refresh lists the new identity's models;
+- ``models``: ``{"list": [TS Model: id, object, created, owned_by, name,
+  reasoning_efforts, default_reasoning_effort, gated_reasoning_efforts], "selected": id |
+  null, "selectedEffort": effort | null}``; the three effort keys are always present, null
+  for a model with no effort control. ``selected`` is the end-user's own choice when it is
+  listed, else null (the host's or the partner's default applies); a stored pick of an
+  older id that named its effort (``X-thinking``) shows as ``X`` once only ``X`` is
+  listed (``model_pick.resolve_pick``). ``selectedEffort`` is the effort the pick runs
+  at: the stored one when the model offers it, else the model's default; null when
+  nothing is selected or the model has no effort control. Every auth change empties it
+  until the refresh lists the new identity's models;
 - ``audioModels``: ``{"list": [TS AudioModel: id, name, supported_languages,
   description], "state": "loading" | "ready" | "error"}``, the speech-to-text models
   Settings offers ("Voice model"); read alongside ``models`` (signed in only, emptied and
@@ -32,8 +38,8 @@ collide with these). Shapes reuse the TypeScript SDK's types where one exists:
   row; a 404, an engine without the route, is never asked again). ``oauthProviders``
   lists them in display order, ``[]`` when ``oauth`` is false;
 - ``theme``: ``{"mode": "light" | "dark", "tokens": {...}}``;
-- ``preferences``: TS ``UserPreferences`` (``model``, ``sttModel``, ``sttLanguage``,
-  ``fontSize``; a key is absent when unset);
+- ``preferences``: TS ``UserPreferences`` (``model``, ``reasoningEffort``, ``sttModel``,
+  ``sttLanguage``, ``fontSize``; a key is absent when unset);
 - ``results``: the last 20 command results, oldest first (see ``wire.py``);
 - ``options`` and ``tools``: the integrator's ``ChatOptions``, read-only (``options.py``);
 - ``limits``: ``{"demoLimitReached": bool, "anonymousUnavailable": null | {"type"}}``, the
@@ -89,9 +95,10 @@ from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple
 from ..controller import DEMO_LIMIT_REACHED
 from ..errors import T2VError
 from ..preferences import UserPreferences
-from ..types import DEFAULT_MODEL, AudioModel, Model, User
+from ..types import DEFAULT_MODEL, AudioModel, Model, User, _check_reasoning_effort
 from .host import HostAdapter, Theme
 from .hub import EventHub
+from .model_pick import ResolvedPick, legacy_model_effort, resolve_pick
 from .options import ChatOptions
 from .wire import CommandFailure
 
@@ -177,7 +184,26 @@ def _model(model: Model) -> Dict[str, Any]:
         "created": model.created,
         "owned_by": model.owned_by,
         "name": model.name,
+        "reasoning_efforts": _copy(model.reasoning_efforts),
+        "default_reasoning_effort": model.default_reasoning_effort,
+        "gated_reasoning_efforts": _copy(model.gated_reasoning_efforts),
     }
+
+
+def _copy(values: Optional[List[str]]) -> Optional[List[str]]:
+    return list(values) if values is not None else None
+
+
+def _stored_pick(t2v: Optional["Talk2View"]) -> Tuple[Optional[str], Optional[str]]:
+    """The stored ``(model, reasoning effort)``; the effort trimmed and lower-cased, and a
+    blank one read as none. ``(None, None)`` when there is none or it cannot be read."""
+    if t2v is None:
+        return None, None
+    try:
+        prefs = t2v.preferences.get()
+        return prefs.model, _check_reasoning_effort(prefs.reasoning_effort)
+    except Exception:
+        return None, None
 
 
 def _audio_model(model: AudioModel) -> Dict[str, Any]:
@@ -234,7 +260,9 @@ class AppState:
         #: as "still loading" forever).
         self._audio_models_state = "loading"
         self._selected: Optional[str] = None
-        self._applied: Optional[str] = None  # the model this object last handed to Talk2View
+        self._selected_effort: Optional[str] = None  # models.selectedEffort
+        #: The (model, effort) this object last handed to Talk2View.
+        self._applied: Optional[Tuple[str, Optional[str]]] = None
         self._generation = 0  # +1 per auth change: a refresh from before it is dropped
         self._shown: Any = _SIGNED_OUT  # the `_identity` the auth slice last recorded
         self._demo_limit = False  # the `limits` slice
@@ -374,46 +402,65 @@ class AppState:
         """Re-read config and models on the refresh thread (coalesced; never blocks)."""
         self._wake.set()
 
-    def select_model(self, model_id: str) -> None:
+    def select_model(self, model_id: str, reasoning_effort: Optional[str] = None) -> None:
         """The end-user's pick: must be in their list, and the page must show the account
         that is signed in (another one's tokens can be stored before this object is told
-        of them). Remembered as a preference, then applied to the session defaults. An
-        auth change that took the list away meanwhile refuses it too: nothing is applied,
-        and the remembered model is put back as it was. Router thread only (it notifies
+        of them). ``reasoning_effort`` must be one the model declares
+        (``CommandFailure("reasoning_effort_not_supported")`` otherwise, before anything is
+        stored); a gated one is taken like any other, since the engine decides at the turn
+        whether this end-user may use it. None picks the model at its default effort, so
+        another model's effort is never carried over. Remembered as a preference (the
+        model and the effort together), then applied to the session defaults. An auth
+        change that took the list away meanwhile refuses it too: nothing is applied, and
+        the remembered pick is put back as it was. Router thread only (it notifies
         listeners)."""
         t2v = self._t2v
+        effort = _check_reasoning_effort(reasoning_effort)
         with self._lock:
-            listed = self._listed_locked(model_id) and self._shows_live_locked()
-        if t2v is None or not listed:
+            entry = self._entry_locked(model_id) if self._shows_live_locked() else None
+        if t2v is None or entry is None:
             raise UnknownModelError(model_id)
-        previous = t2v.preferences.get().model
-        t2v.preferences.update(model=model_id)  # runs our listener: not under _lock
+        if effort is not None and effort not in (entry.get("reasoning_efforts") or ()):
+            raise CommandFailure(
+                "reasoning_effort_not_supported",
+                "That thinking level is not available for this model.",
+            )
+        stored = t2v.preferences.get()
+        previous = (stored.model, stored.reasoning_effort)
+        # Runs our listener: not under _lock.
+        t2v.preferences.update(model=model_id, reasoning_effort=effort)
         with self._lock:
             taken = self._listed_locked(model_id) and self._shows_live_locked()
             if taken:
-                t2v.set_chat_defaults(model=model_id)
-                self._applied = self._selected = model_id
+                t2v.set_chat_defaults(model=model_id, reasoning_effort=effort)
+                self._applied = (model_id, effort)
+                self._selected = model_id
+                self._selected_effort = (
+                    effort if effort is not None else entry.get("default_reasoning_effort")
+                )
                 self._record_models_locked()
         if not taken:
-            self._forget_pick(t2v, model_id, previous)
+            self._forget_pick(t2v, (model_id, effort), previous)
             raise UnknownModelError(model_id)
 
     def select_default_model(self) -> None:
-        """The end-user's "Default": their pick is forgotten, and a model this object
-        applied goes too (``DEFAULT_MODEL``: the next turn starts on a fresh engine
-        session, on the partner's default). So does the model in use when it is the pick
-        being forgotten: another ``AppState`` over this ``Talk2View`` applied it (a server
-        the host rebuilt), and it is this end-user's all the same. A model the host itself
-        set, which no stored pick names, stays. Always allowed: it shows nothing of any
+        """The end-user's "Default": their pick (model and effort) is forgotten, and a
+        model this object applied goes too (``DEFAULT_MODEL``: the next turn starts on a
+        fresh engine session, on the partner's default). So does the model in use when it
+        is the pick being forgotten, or the model an older id like ``X-thinking`` stands
+        for: another ``AppState`` over this ``Talk2View`` applied it (a server the host
+        rebuilt), and it is this end-user's all the same. A model the host itself set,
+        which no stored pick names, stays. Always allowed: it shows nothing of any
         account. Router thread only (it notifies listeners)."""
         t2v = self._t2v
         if t2v is None:
             return
         forgotten = t2v.preferences.get().model
-        t2v.preferences.update(model=None)  # runs our listener: not under _lock
+        # Runs our listener: not under _lock.
+        t2v.preferences.update(model=None, reasoning_effort=None)
         with self._lock:
             self._reset_applied_locked(t2v, forgotten)
-            self._selected = None
+            self._selected = self._selected_effort = None
             self._record_models_locked()
 
     def select_stt_model(self, model_id: Optional[str]) -> None:
@@ -480,15 +527,20 @@ class AppState:
             self._record_capabilities_locked()
 
     @staticmethod
-    def _forget_pick(t2v: "Talk2View", refused: str, previous: Optional[str]) -> None:
-        """Put the remembered model back as it was before a refused pick — unless something
-        changed it since — so a later refresh never restores what was refused. Notifies
-        listeners: never under ``_lock``."""
+    def _forget_pick(
+        t2v: "Talk2View",
+        refused: Tuple[str, Optional[str]],
+        previous: Tuple[Optional[str], Optional[str]],
+    ) -> None:
+        """Put the remembered pick (model and effort) back as it was before a refused pick
+        — unless something changed it since — so a later refresh never restores what was
+        refused. Notifies listeners: never under ``_lock``."""
         if previous == refused:
             return
         try:
-            if t2v.preferences.get().model == refused:
-                t2v.preferences.update(model=previous)
+            stored = t2v.preferences.get()
+            if (stored.model, stored.reasoning_effort) == refused:
+                t2v.preferences.update(model=previous[0], reasoning_effort=previous[1])
         except Exception:
             logger.warning("could not put the remembered model back after a refused pick",
                            exc_info=True)
@@ -503,7 +555,7 @@ class AppState:
                 # First, whatever the new state turns out to be: any change may be a new
                 # identity (a switch signs no one out first), so nothing of the previous
                 # one stays on show, or selectable, until the refresh lists the new one's.
-                self._models, self._selected = [], None
+                self._models, self._selected, self._selected_effort = [], None, None
                 self._record_models_locked()
                 self._audio_models = []
                 self._audio_models_state = "loading"
@@ -609,15 +661,24 @@ class AppState:
 
     def _reset_applied_locked(self, t2v: "Talk2View", forgotten: Optional[str] = None) -> None:
         """Take back a model this object applied, or ``forgotten`` (the end-user's pick that
-        "Default" just cleared) while it is the model in use, so the partner's default
-        applies again (``DEFAULT_MODEL``: field writes only)."""
-        if self._applied is not None or (forgotten is not None and t2v.model == forgotten):
+        "Default" just cleared, or the model an older id like ``X-thinking`` stands for)
+        while it is the model in use, so the partner's default applies again
+        (``DEFAULT_MODEL``: field writes only, and it drops the effort too)."""
+        in_use = False
+        if forgotten is not None:
+            legacy = legacy_model_effort(forgotten)
+            in_use = t2v.model in (forgotten, legacy[0] if legacy is not None else None)
+        if self._applied is not None or in_use:
             t2v.set_chat_defaults(model=DEFAULT_MODEL)
             self._applied = None
 
     def _record_models_locked(self) -> None:
         if self._hub is not None:
-            self._hub.set_slice("models", {"list": list(self._models), "selected": self._selected})
+            self._hub.set_slice("models", {
+                "list": list(self._models),
+                "selected": self._selected,
+                "selectedEffort": self._selected_effort,
+            })
 
     def _record_audio_models_locked(self) -> None:
         if self._hub is not None:
@@ -636,6 +697,7 @@ class AppState:
             else:
                 for key, value in (
                     ("model", prefs.model),
+                    ("reasoningEffort", prefs.reasoning_effort),
                     ("sttModel", prefs.stt_model),
                     ("sttLanguage", prefs.stt_language),
                     ("fontSize", prefs.font_size),
@@ -646,7 +708,13 @@ class AppState:
             self._hub.set_slice("preferences", wire)
 
     def _listed_locked(self, model_id: Optional[str]) -> bool:
-        return model_id is not None and any(m["id"] == model_id for m in self._models)
+        return self._entry_locked(model_id) is not None
+
+    def _entry_locked(self, model_id: Optional[str]) -> Optional[Dict[str, Any]]:
+        """The ``models.list`` entry for ``model_id``; None when it is not listed."""
+        if model_id is None:
+            return None
+        return next((m for m in self._models if m["id"] == model_id), None)
 
     def _shows_live_locked(self) -> bool:
         """Whether the auth slice shows who the token store has signed in now."""
@@ -714,12 +782,16 @@ class AppState:
             if signed_in_now:
                 self._audio_models_state = "ready" if audio_listed else "error"
             self._record_audio_models_locked()
-            preferred = self._preferred_model_locked()
-            self._selected = preferred if self._listed_locked(preferred) else None
-            if t2v is not None and self._selected is not None and self._selected != self._applied:
-                t2v.set_chat_defaults(model=self._selected)
-                self._applied = self._selected
-            elif t2v is not None and listed and self._selected is None:
+            stored = _stored_pick(t2v)
+            pick = resolve_pick(models, *stored)
+            self._selected = pick.model if pick is not None else None
+            self._selected_effort = pick.shown_effort if pick is not None else None
+            if t2v is not None and pick is not None:
+                if (pick.model, pick.effort) != self._applied:
+                    # Always the pair: a model named alone runs at its default effort.
+                    t2v.set_chat_defaults(model=pick.model, reasoning_effort=pick.effort)
+                    self._applied = (pick.model, pick.effort)
+            elif t2v is not None and listed:
                 # The list no longer has the end-user's model: one this object applied
                 # goes, so the partner's default applies again. A
                 # list that could not be read proves nothing, and changes nothing.
@@ -727,6 +799,23 @@ class AppState:
             self._record_models_locked()
             if self._hub is not None:
                 self._hub.set_slice("config", config)
+        if t2v is not None and pick is not None and pick.drop_stored_effort:
+            self._drop_stored_effort(t2v, stored, pick)
+
+    @staticmethod
+    def _drop_stored_effort(
+        t2v: "Talk2View", stored: Tuple[Optional[str], Optional[str]], pick: ResolvedPick
+    ) -> None:
+        """The stored effort is no longer offered for its model: store the model alone, so
+        the model's default applies from now on. Only while the preferences still hold the
+        pick this pass resolved (a newer pick wins). Notifies listeners: never under
+        ``_lock``."""
+        try:
+            if _stored_pick(t2v) == stored:
+                t2v.preferences.update(model=pick.model, reasoning_effort=None)
+        except Exception:
+            logger.warning("could not forget a stored reasoning effort the model no longer "
+                           "offers", exc_info=True)
 
     def _probe_providers(self, t2v: "Talk2View") -> None:
         """Partner-level, not the end-user's: read signed in or not (a signed-out form
@@ -768,14 +857,6 @@ class AppState:
             timer.daemon = True
             self._probe_timer = timer
             timer.start()
-
-    def _preferred_model_locked(self) -> Optional[str]:
-        if self._t2v is None:
-            return None
-        try:
-            return self._t2v.preferences.get().model
-        except Exception:
-            return None
 
     @staticmethod
     def _signed_in(t2v: "Talk2View") -> bool:

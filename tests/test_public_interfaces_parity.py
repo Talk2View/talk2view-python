@@ -70,5 +70,5 @@ def test_ui_surface_the_parity_code_extends() -> None:
     for name in ("execute", "_send", "_start_anonymous"):
         assert callable(getattr(CommandRouter, name, None)), name
     assert _openable("https://example.com/reset") and not _openable("javascript:alert(1)")
-    assert set(COMMANDS["selectModel"]) == {"modelId"}
+    assert set(COMMANDS["selectModel"]) == {"modelId", "reasoningEffort"}
     assert {"unknown_model", "account_unavailable", "internal_error"} <= ERROR_TYPES

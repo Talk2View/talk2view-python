@@ -483,11 +483,11 @@ class CommandRouter:
         self._controller.approve(decision, tool_call_id=args["toolCallId"])
 
     def _select_model(self, args: Dict[str, Any]) -> None:
-        if args["modelId"] is None:  # "Default": the partner's model
+        if args["modelId"] is None:  # "Default": the partner's model, at its effort
             self._account()
             self._app.select_default_model()
         else:
-            self._app.select_model(args["modelId"])
+            self._app.select_model(args["modelId"], args["reasoningEffort"])
 
     def _edit(self, args: Dict[str, Any]) -> None:
         try:
