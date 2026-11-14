@@ -95,8 +95,17 @@ class FakeT2V:
         self.cleared = 0
         self.detached = 0
 
-    def set_chat_defaults(self, *, model: Optional[str] = None, capabilities: Any = None) -> None:
-        self.defaults.append({"model": model, "capabilities": capabilities})
+    def set_chat_defaults(
+        self,
+        *,
+        model: Optional[str] = None,
+        capabilities: Any = None,
+        reasoning_effort: Optional[str] = None,
+    ) -> None:
+        call: Dict[str, Any] = {"model": model, "capabilities": capabilities}
+        if reasoning_effort is not None:  # recorded only when given: older calls read as before
+            call["reasoning_effort"] = reasoning_effort
+        self.defaults.append(call)
 
     def chat(
         self,

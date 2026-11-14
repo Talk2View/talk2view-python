@@ -49,6 +49,8 @@ class CreateSessionResponse:
     session_id: str
     thread_id: str
     model: str
+    # The effort the session runs at; None from an engine that does not send it.
+    reasoning_effort: Optional[str] = None
 
 
 @dataclass
@@ -328,6 +330,23 @@ def _refuse_default_model(model: object, where: str) -> None:
             "{} takes a model id, not DEFAULT_MODEL. For the partner's default chat model, "
             "call set_chat_defaults(model=DEFAULT_MODEL).".format(where)
         )
+
+
+def _check_reasoning_effort(value: object) -> Optional[str]:
+    """A reasoning effort as it is kept and sent: trimmed and lower-cased. ``TypeError`` for
+    anything but a string or None, ``ValueError`` for a blank string. It is not checked
+    against the catalogue: the engine decides what a model accepts. Called before anything
+    is written or sent."""
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise TypeError(
+            "reasoning_effort must be a string or None, not {}".format(type(value).__name__)
+        )
+    effort = value.strip().lower()
+    if not effort:
+        raise ValueError("reasoning_effort must not be empty")
+    return effort
 
 
 @dataclass(frozen=True)

@@ -124,6 +124,7 @@ from .types import (
     ToolEvent,
     TranscriptionResponse,
     User,
+    _check_reasoning_effort,
     _DefaultModel,
     _refuse_default_model,
 )
@@ -252,6 +253,12 @@ class Talk2View:
             up to 300 s between bytes, whatever this is.
         upload_timeout: Seconds for an upload: attachments and audio (default 120, as
             the TypeScript SDK).
+        reasoning_effort: How long ``model`` thinks before it answers, one of that model's
+            ``Model.reasoning_efforts`` (e.g. "low", "medium", "high"). Sent next to
+            ``model``, trimmed and lower-cased, and not checked against the catalogue:
+            the engine refuses an effort the model does not accept
+            (``reasoning_effort_not_supported``). Needs ``model`` (``ValueError``
+            without one). Left out, the model runs at its default effort.
     """
 
     def __init__(
@@ -266,8 +273,12 @@ class Talk2View:
         anonymous_auto_start: bool = False,
         request_timeout: float = DEFAULT_TIMEOUT,
         upload_timeout: float = DEFAULT_UPLOAD_TIMEOUT,
+        reasoning_effort: Optional[str] = None,
     ) -> None:
         _refuse_default_model(model, "Talk2View(model=...)")
+        effort = _check_reasoning_effort(reasoning_effort)
+        if effort is not None and not model:
+            raise ValueError("reasoning_effort needs a model")
         if storage is None:
             storage = MemoryStorage()
         self._storage = storage
@@ -282,6 +293,13 @@ class Talk2View:
             upload_timeout=upload_timeout,
         )
         self._model = model
+        # The effort of the pick, as (the model it was chosen for, effort): it applies only
+        # while _model is that model. set_chat_defaults writes it before _model, and a
+        # reader reads _model first, so a reader racing a model change never pairs the new
+        # model with the old model's effort (it gets that model's default instead).
+        self._effort_pick: Optional[Tuple[str, str]] = (
+            (model, effort) if model and effort is not None else None
+        )
         self._capabilities = capabilities
         self._current_session: Optional[T2VSession] = None
         # set_chat_defaults(model=DEFAULT_MODEL) replaced a model: chat() starts a fresh
@@ -292,11 +310,12 @@ class Talk2View:
         # started on the partner's default). The engine session keeps it after the session
         # object is dropped; set_chat_defaults(model=DEFAULT_MODEL) reads it.
         self._named_session_model: Optional[str] = None
-        # +1 whenever set_chat_defaults changes the model or capabilities or the end-user
-        # changes, and the count the current session's create started under. A session whose
-        # count differs was built on the old settings or for the previous end-user (also one
-        # whose create was in flight then): chat() does not reuse it, while
-        # respond_to_approval still answers on it. No lock: only these int fields are written.
+        # +1 whenever set_chat_defaults changes the model, its effort or capabilities or the
+        # end-user changes, and the count the current session's create started under. A
+        # session whose count differs was built on the old settings or for the previous
+        # end-user (also one whose create was in flight then): chat() does not reuse it,
+        # while respond_to_approval still answers on it. No lock: only these int fields are
+        # written.
         self._defaults_version = 0
         self._session_version = 0
         # +1 on every session delete (clear_session, a recycle, a fresh-session reset). The
@@ -390,6 +409,19 @@ class Talk2View:
         return self._model
 
     @property
+    def reasoning_effort(self) -> Optional[str]:
+        """The reasoning effort new turns send next to ``model``: the constructor's or the
+        last ``set_chat_defaults``'s. None when none was chosen (the model runs at its
+        default effort), and always None while ``model`` is None. Read-only: change it
+        with ``set_chat_defaults``."""
+        return self._effort_for(self._model)
+
+    def _effort_for(self, model: Optional[str]) -> Optional[str]:
+        """The chosen effort when it was chosen for ``model`` (read ``_model`` first)."""
+        pick = self._effort_pick
+        return pick[1] if pick is not None and model and pick[0] == model else None
+
+    @property
     def anonymous_auto_start(self) -> bool:
         """Whether a signed-out ``chat()``, upload, model list, voice call
         (``voice.transcribe``, ``voice.list_models``) or warm-up starts an anonymous demo
@@ -406,7 +438,9 @@ class Talk2View:
         """The store for skills and preferences (``storage`` unless one was given)."""
         return self._data_storage
 
-    def create_session(self, model: Optional[str] = None) -> T2VSession:
+    def create_session(
+        self, model: Optional[str] = None, reasoning_effort: Optional[str] = None
+    ) -> T2VSession:
         """Create a new chat session.
 
         Tools and skills are session-scoped on the engine, so the registered
@@ -424,20 +458,45 @@ class Talk2View:
                 nothing). A ``DEFAULT_MODEL`` reset made while this request is in flight is
                 the later choice, and stands. ``DEFAULT_MODEL`` is refused here
                 (``TypeError``).
+            reasoning_effort: The effort for this session, sent next to its model. With
+                ``model`` it goes with that model, and a ``model`` given without one runs at
+                that model's default effort (the default effort chosen for ``self.model``
+                is not carried to another model). Without ``model`` it applies to
+                ``self.model``, and needs one (``ValueError``). Left out, the session
+                takes ``self.reasoning_effort``. Neither changes ``self.model`` nor
+                ``self.reasoning_effort``.
         """
         _refuse_default_model(model, "create_session(model=...)")
-        return self._create_session(model)
+        effort = _check_reasoning_effort(reasoning_effort)
+        if effort is not None and not model and not self._model:
+            raise ValueError("reasoning_effort needs a model")
+        return self._create_session(model, effort)
 
     def _create_session(
-        self, model: Optional[str] = None, *, known_fresh: bool = False
+        self,
+        model: Optional[str] = None,
+        reasoning_effort: Optional[str] = None,
+        *,
+        known_fresh: bool = False,
     ) -> T2VSession:
-        """``create_session``. ``known_fresh``: this create follows this client's own
-        confirmed DELETE, so the engine's get-or-create hands back a brand-new session."""
+        """``create_session``, its effort already checked. ``known_fresh``: this create
+        follows this client's own confirmed DELETE, so the engine's get-or-create hands
+        back a brand-new session."""
         version = self._defaults_version  # before the settings are read: see chat()
         use_model = model or self._model
+        # An explicit model is a pick of its own: its effort is the argument's, never the
+        # default's. Without one, an explicit effort applies to the default model.
+        if model or reasoning_effort is not None:
+            use_effort = reasoning_effort
+        else:
+            use_effort = self._effort_for(use_model)
+        if not use_model:
+            use_effort = None  # an effort is only ever sent beside a model
         body: Dict[str, Any] = {}
         if use_model:
             body["model"] = use_model
+            if use_effort is not None:
+                body["reasoning_effort"] = use_effort
             # Before the request, then the flag: set_chat_defaults' order. A Default that
             # lands while the request is in flight sees the model this session will carry,
             # and its reset stands.
@@ -463,6 +522,8 @@ class Talk2View:
             tools=self.tools,
             default_model=use_model,
             capabilities=self._capabilities,
+            reasoning_effort=use_effort,
+            response_reasoning_effort=data.get("reasoning_effort"),
         )
         self._session_version = version
         self._current_session = session
@@ -768,13 +829,20 @@ class Talk2View:
         max_tokens: Optional[int] = None,
         temperature: Optional[float] = None,
         timeout: Optional[float] = None,
+        reasoning_effort: Optional[str] = None,
     ) -> Dict[str, Any]:
         """A direct, non-agentic model call routed through the engine
         (``POST /v1/completions``; e.g. MedGemma). The response is the provider's
         OpenAI-shaped completion, passed through untouched. ``model`` is a model id:
-        ``DEFAULT_MODEL`` is refused (``TypeError``) before any request."""
+        ``DEFAULT_MODEL`` is refused (``TypeError``) before any request.
+        ``reasoning_effort`` is sent when given (trimmed and lower-cased; checked as
+        ``Talk2View(reasoning_effort=...)`` is, before any request); left out, the
+        model runs at its default effort."""
         _refuse_default_model(model, "completions()")
+        effort = _check_reasoning_effort(reasoning_effort)
         body: Dict[str, Any] = {"model": model, "messages": messages}
+        if effort is not None:
+            body["reasoning_effort"] = effort
         if max_tokens is not None:
             body["max_tokens"] = max_tokens
         if temperature is not None:
@@ -879,8 +947,10 @@ class Talk2View:
         *,
         model: Union[str, _DefaultModel, None] = None,
         capabilities: Optional[Capabilities] = None,
+        reasoning_effort: Optional[str] = None,
     ) -> None:
-        """Change the model and/or capabilities used by chat sessions from now on.
+        """Change the model, its reasoning effort and/or the capabilities used by chat
+        sessions from now on.
 
         Both are bound to a ``T2VSession`` when it is created, so when either changes the
         next ``chat()`` does not reuse the current session object: it builds one with the new
@@ -903,17 +973,45 @@ class Talk2View:
         cancels it: a named ``model`` here, or ``create_session(model=...)``; the session
         then switches to that model and keeps its conversation. Nothing is sent from
         here: it only writes fields, and may be called under a caller's lock.
+
+        The pick is the pair (model, ``reasoning_effort``), so the effort goes with the
+        model: ``model="X", reasoning_effort="high"`` picks X at high, and a ``model``
+        given without an effort picks it at its default effort (also when it is the
+        current model), so another model's effort is never carried over.
+        ``reasoning_effort`` alone changes the current model's effort (``ValueError`` with
+        no model set). ``DEFAULT_MODEL`` forgets the effort too, and refuses one
+        (``ValueError``). The effort is trimmed and lower-cased (``TypeError`` for a
+        non-string, ``ValueError`` for a blank one) and not checked against the
+        catalogue. Every check runs before anything is written.
         """
+        effort = _check_reasoning_effort(reasoning_effort)
+        if effort is not None:
+            if isinstance(model, _DefaultModel):
+                raise ValueError(
+                    "reasoning_effort cannot go with DEFAULT_MODEL: the partner's default "
+                    "model runs at the partner's effort"
+                )
+            if not (model if model is not None else self._model):
+                raise ValueError("reasoning_effort needs a model")
         fresh = False
         stale = False
         if isinstance(model, _DefaultModel):
+            self._effort_pick = None
             if self._model is not None or self._named_session_model is not None:
                 self._model = None
                 fresh = True
-        elif model is not None and model != self._model:
-            self._model = model
-            self._fresh_session = False  # an explicit choice supersedes a pending reset
-            stale = True
+        elif model is not None:
+            if (model, effort) != (self._model, self._effort_for(self._model)):
+                # The effort before the model: see _effort_pick.
+                self._effort_pick = (model, effort) if effort is not None else None
+                self._model = model
+                self._fresh_session = False  # an explicit choice supersedes a pending reset
+                stale = True
+        elif effort is not None:
+            current = self._model
+            if current is not None and effort != self._effort_for(current):
+                self._effort_pick = (current, effort)
+                stale = True
         if capabilities is not None and capabilities != self._capabilities:
             self._capabilities = capabilities
             stale = True

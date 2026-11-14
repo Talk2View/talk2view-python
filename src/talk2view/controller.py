@@ -441,6 +441,7 @@ class ChatController:
         model: Optional[str] = None,
         capabilities: Optional[Capabilities] = None,
         executor: Optional[Callable[[Callable[[], None]], None]] = None,
+        reasoning_effort: Optional[str] = None,
     ) -> None:
         self._t2v = t2v
         # Batches for `deliver_on_main` subscribers go through this dispatcher. By default it
@@ -450,8 +451,14 @@ class ChatController:
         )
         self._system_prompt = system_prompt
         self._executor = executor or _thread_executor
-        # Talk2View binds model and capabilities to the session, not to each chat() call.
-        if model is not None or capabilities is not None:
+        # Talk2View binds model, effort and capabilities to the session, not to each chat()
+        # call. The effort goes with the model (see set_chat_defaults); left out of the call
+        # when not given, so a call without one is exactly the one before efforts existed.
+        if reasoning_effort is not None:
+            t2v.set_chat_defaults(
+                model=model, capabilities=capabilities, reasoning_effort=reasoning_effort
+            )
+        elif model is not None or capabilities is not None:
             t2v.set_chat_defaults(model=model, capabilities=capabilities)
 
         self._lock = threading.RLock()  # guards everything below
