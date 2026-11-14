@@ -128,7 +128,13 @@ def test_login_fills_auth_config_and_models(t2v: Talk2View) -> None:
             "oauthError": None,
         }
         assert wait_for(lambda: state(hub)["config"] is not None)
-        assert state(hub)["config"] == CONFIG
+        # The fake engine is an old one: the two resolved-default keys are absent, so
+        # the slice carries them as null.
+        assert state(hub)["config"] == {
+            **CONFIG,
+            "default_llm_base_model": None,
+            "default_llm_reasoning_effort": None,
+        }
         assert state(hub)["models"] == {
             "list": [
                 {"id": "m-fast", "object": "model", "created": 1, "owned_by": "t2v",

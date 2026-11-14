@@ -43,6 +43,8 @@ CONFIG: Dict[str, Any] = {
     "gated_llm_models": ["gpt-5"],
     "gated_stt_models": [],
     "web_search_enabled": True,
+    "default_llm_base_model": "gemini-3.8-flash",
+    "default_llm_reasoning_effort": "medium",
 }
 
 ANON_TOKENS: Dict[str, Any] = {
@@ -158,7 +160,7 @@ def _spy_on_config_waiters(monkeypatch: pytest.MonkeyPatch) -> _Parked:
 
 
 class TestGetConfig:
-    def test_parses_the_nine_field_engine_shape(self, httpserver: HTTPServer) -> None:
+    def test_parses_the_eleven_field_engine_shape(self, httpserver: HTTPServer) -> None:
         httpserver.expect_request("/v1/config").respond_with_json(CONFIG)
         t2v = _t2v(httpserver)
         try:
@@ -173,8 +175,23 @@ class TestGetConfig:
                 gated_llm_models=["gpt-5"],
                 gated_stt_models=[],
                 web_search_enabled=True,
+                default_llm_base_model="gemini-3.8-flash",
+                default_llm_reasoning_effort="medium",
             )
-            assert len(vars(config)) == 9
+            assert len(vars(config)) == 11
+        finally:
+            t2v.close()
+
+    def test_an_old_engine_config_has_no_resolved_default(self, httpserver: HTTPServer) -> None:
+        httpserver.expect_request("/v1/config").respond_with_json(
+            {"default_llm_model": "m-thinking"}
+        )
+        t2v = _t2v(httpserver)
+        try:
+            config = t2v.get_config()
+            assert config.default_llm_model == "m-thinking"
+            assert config.default_llm_base_model is None
+            assert config.default_llm_reasoning_effort is None
         finally:
             t2v.close()
 
@@ -424,6 +441,48 @@ class TestModelsAndCompletions:
                 Model(id="gpt-5", created=2, owned_by="t2v", name=None),
             ]
             assert [m.name or m.id for m in models.data] == ["Gemini 3.8 Flash", "gpt-5"]
+        finally:
+            t2v.close()
+
+    def test_list_models_reads_the_effort_fields(self, httpserver: HTTPServer) -> None:
+        httpserver.expect_request("/v1/models").respond_with_json({"data": [
+            {"id": "g4h", "name": "Gemini 4 Hydrogen",
+             "reasoning_efforts": ["low", "medium", "high"],
+             "default_reasoning_effort": "low", "gated_reasoning_efforts": ["medium", "high"]},
+            {"id": "plain", "reasoning_efforts": None, "default_reasoning_effort": None,
+             "gated_reasoning_efforts": None},
+            {"id": "old-engine"},
+        ]})
+        t2v = _t2v(httpserver)
+        try:
+            g4h, plain, old = t2v.list_models().data
+            assert g4h.reasoning_efforts == ["low", "medium", "high"]
+            assert g4h.default_reasoning_effort == "low"
+            assert g4h.gated_reasoning_efforts == ["medium", "high"]
+            for model in (plain, old):
+                assert model.reasoning_efforts is None
+                assert model.default_reasoning_effort is None
+                assert model.gated_reasoning_efforts is None
+        finally:
+            t2v.close()
+
+    @pytest.mark.parametrize(("entry", "expected"), [
+        ({"reasoning_efforts": []}, (None, None, None)),
+        ({"reasoning_efforts": "high"}, (None, None, None)),
+        ({"reasoning_efforts": ["medium", "high"]}, (["medium", "high"], "medium", [])),
+        ({"reasoning_efforts": ["low", "high"], "default_reasoning_effort": "medium",
+          "gated_reasoning_efforts": ["high", "xhigh", 5]}, (["low", "high"], "low", ["high"])),
+        ({"reasoning_efforts": ["low", 7, "xhigh"]}, (["low", "xhigh"], "low", [])),
+    ])
+    def test_list_models_tolerates_garbled_effort_fields(
+        self, httpserver: HTTPServer, entry: Dict[str, Any], expected: Any
+    ) -> None:
+        httpserver.expect_request("/v1/models").respond_with_json({"data": [{"id": "m", **entry}]})
+        t2v = _t2v(httpserver)
+        try:
+            (m,) = t2v.list_models().data
+            got = (m.reasoning_efforts, m.default_reasoning_effort, m.gated_reasoning_efforts)
+            assert got == expected
         finally:
             t2v.close()
 

@@ -20,8 +20,8 @@ collide with these). Shapes reuse the TypeScript SDK's types where one exists:
   ``state`` is "ready" once the list has actually been read, even when it comes back
   empty (a real answer with nothing in it, distinct from "loading"), and "error" when the
   read itself failed;
-- ``config``: the engine's partner config, TS ``PartnerConfig`` keys (snake_case, the nine
-  fields), or null while signed out or when it could not be read;
+- ``config``: the engine's partner config, TS ``PartnerConfig`` keys (snake_case, the
+  eleven fields), or null while signed out or when it could not be read;
 - ``capabilities``: ``{"audio": bool, "oauth": bool, "oauthProviders": [str],
   "clipboard": bool}``, ``audio`` exactly "the host's ``audio()`` returned a capture"
   (``AppState(..., audio=...)``, read once, never changes after), with ``oauth`` true

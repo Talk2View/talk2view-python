@@ -119,6 +119,8 @@ def test_types_the_wire_is_built_from() -> None:
         "gated_llm_models",
         "gated_stt_models",
         "web_search_enabled",
+        "default_llm_base_model",
+        "default_llm_reasoning_effort",
     }
     assert {f.name for f in dataclasses.fields(Model)} == {
         "id",
@@ -126,6 +128,9 @@ def test_types_the_wire_is_built_from() -> None:
         "created",
         "owned_by",
         "name",
+        "reasoning_efforts",
+        "default_reasoning_effort",
+        "gated_reasoning_efforts",
     }
     assert {f.name for f in dataclasses.fields(UserPreferences)} == {
         "model",

@@ -32,7 +32,7 @@ import threading
 import uuid
 from pathlib import Path
 from types import TracebackType
-from typing import Any, Callable, Dict, Iterator, List, Optional, Type, Union
+from typing import Any, Callable, Dict, Iterator, List, Optional, Tuple, Type, Union
 from urllib.parse import quote
 
 from .audio import DEFAULT_DICTATION_MODEL, AudioCapture, CaptureError
@@ -167,7 +167,36 @@ def _parse_partner_config(data: Any) -> PartnerConfig:
         gated_llm_models=names("gated_llm_models"),
         gated_stt_models=names("gated_stt_models"),
         web_search_enabled=data.get("web_search_enabled") is True,
+        default_llm_base_model=text("default_llm_base_model"),
+        default_llm_reasoning_effort=text("default_llm_reasoning_effort"),
     )
+
+
+def _parse_efforts(
+    item: Dict[str, Any],
+) -> Tuple[Optional[List[str]], Optional[str], Optional[List[str]]]:
+    """One ``/v1/models`` entry's ``(reasoning_efforts, default_reasoning_effort,
+    gated_reasoning_efforts)``. Anything but a non-empty list of strings reads as "no
+    efforts" (all three None), so a garbled entry behaves like an old engine's. The
+    default falls back to the list's first effort; the gated list keeps only listed
+    efforts, in catalogue order. Values are kept as sent (the vocabulary may grow)."""
+    raw = item.get("reasoning_efforts")
+    if not isinstance(raw, list):
+        return None, None, None
+    efforts = [value for value in raw if isinstance(value, str) and value]
+    if not efforts:
+        return None, None, None
+    default = item.get("default_reasoning_effort")
+    if not (isinstance(default, str) and default in efforts):
+        default = efforts[0]
+    raw_gated = item.get("gated_reasoning_efforts")
+    gated_set = (
+        {value for value in raw_gated if isinstance(value, str)}
+        if isinstance(raw_gated, list)
+        else set()
+    )
+    gated = [effort for effort in efforts if effort in gated_set]
+    return efforts, default, gated
 
 
 class _Flight:
@@ -706,21 +735,29 @@ class Talk2View:
 
     def list_models(self) -> ModelsResponse:
         """The LLM models this end-user may pick (``GET /v1/models``). ``Model.name`` is
-        the display name when the catalogue has one — show ``name or id``."""
+        the display name when the catalogue has one — show ``name or id``. A model that
+        declares ``reasoning_efforts`` can be sent with one of them as ``reasoning_effort``;
+        the efforts in ``gated_reasoning_efforts`` need a paid plan."""
         self._require_session()
         data = self._client.request("/v1/models")
         items = data.get("data", []) if isinstance(data, dict) else []
-        models = [
-            Model(
-                id=str(item["id"]),
-                object=str(item.get("object", "model")),
-                created=item["created"] if isinstance(item.get("created"), int) else 0,
-                owned_by=str(item.get("owned_by", "talk2view")),
-                name=item["name"] if isinstance(item.get("name"), str) else None,
+        models = []
+        for item in items:
+            if not (isinstance(item, dict) and item.get("id")):
+                continue
+            efforts, default_effort, gated_efforts = _parse_efforts(item)
+            models.append(
+                Model(
+                    id=str(item["id"]),
+                    object=str(item.get("object", "model")),
+                    created=item["created"] if isinstance(item.get("created"), int) else 0,
+                    owned_by=str(item.get("owned_by", "talk2view")),
+                    name=item["name"] if isinstance(item.get("name"), str) else None,
+                    reasoning_efforts=efforts,
+                    default_reasoning_effort=default_effort,
+                    gated_reasoning_efforts=gated_efforts,
+                )
             )
-            for item in items
-            if isinstance(item, dict) and item.get("id")
-        ]
         return ModelsResponse(object="list", data=models)
 
     def completions(
