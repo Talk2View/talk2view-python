@@ -34,7 +34,7 @@ VALID: Dict[str, Dict[str, Any]] = {
     "threadSwitch": {"threadId": "c_1"},
     "threadRename": {"threadId": "c_1", "title": "My scan"},
     "threadDelete": {"threadId": "c_1"},
-    "selectModel": {"modelId": "m-fast"},
+    "selectModel": {"modelId": "m-fast", "reasoningEffort": "high"},
     "login": {"email": "a@b.c", "password": "pw"},
     "signup": {"email": "a@b.c", "password": "pw"},
     "logout": {},
@@ -102,6 +102,19 @@ def test_optional_fields_default_to_none_or_empty() -> None:
     assert parse_command({"type": "startAnonymous"}).args == {"captchaToken": None}
     assert parse_command({"type": "setFontSize", "fontSize": None}).args == {"fontSize": None}
     assert parse_command({"type": "cancel"}).id is None
+
+
+def test_select_model_takes_an_optional_reasoning_effort() -> None:
+    assert parse_command({"type": "selectModel", "modelId": "g4h"}).args == {
+        "modelId": "g4h", "reasoningEffort": None,
+    }
+    effort = parse_command({"type": "selectModel", "modelId": "g4h", "reasoningEffort": "high"})
+    assert effort.args["reasoningEffort"] == "high"
+    nulled = parse_command({"type": "selectModel", "modelId": "g4h", "reasoningEffort": None})
+    assert nulled.args["reasoningEffort"] is None
+    for bad in ("", 5, "x" * 33):
+        with pytest.raises(CommandError):
+            parse_command({"type": "selectModel", "modelId": "g4h", "reasoningEffort": bad})
 
 
 @pytest.mark.parametrize(

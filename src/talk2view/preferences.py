@@ -2,8 +2,9 @@
 
 Mirrors the TypeScript SDK's ``useUserPreferences`` (``react/useUserPreferences.ts``):
 one JSON object under the storage key ``preferences`` with the camelCase keys ``model``,
-``sttModel``, ``sttLanguage`` and ``fontSize``, so a host that shares a store between the
-two SDKs sees one set of preferences. Keys this SDK does not know are preserved.
+``sttModel``, ``sttLanguage``, ``fontSize`` and ``reasoningEffort``, so a host that shares a
+store between the two SDKs sees one set of preferences. Keys this SDK does not know are
+preserved.
 """
 
 from __future__ import annotations
@@ -27,12 +28,15 @@ FONT_SIZES = ("small", "medium", "large")
 
 @dataclass(frozen=True)
 class UserPreferences:
-    """``None`` means "not set" (the app's default applies)."""
+    """``None`` means "not set" (the app's default applies). ``reasoning_effort`` is the
+    effort picked with ``model`` (one of that model's ``Model.reasoning_efforts``); it is
+    not checked here: the model catalogue decides what is valid."""
 
     model: Optional[str] = None
     stt_model: Optional[str] = None
     stt_language: Optional[str] = None
     font_size: Optional[FontSize] = None
+    reasoning_effort: Optional[str] = None
 
 
 # Python attribute -> wire key (the TS ``UserPreferences`` interface).
@@ -41,6 +45,7 @@ _WIRE_KEYS: Dict[str, str] = {
     "stt_model": "sttModel",
     "stt_language": "sttLanguage",
     "font_size": "fontSize",
+    "reasoning_effort": "reasoningEffort",
 }
 
 
@@ -77,6 +82,7 @@ class T2VPreferences:
         stt_model: _Value = UNSET,
         stt_language: _Value = UNSET,
         font_size: _Value = UNSET,
+        reasoning_effort: _Value = UNSET,
     ) -> UserPreferences:
         """Change some preferences. Pass ``None`` to unset one; leave the rest out to keep
         them. Every value is a string: anything else raises ``TypeError``, and
@@ -87,6 +93,7 @@ class T2VPreferences:
             "stt_model": stt_model,
             "stt_language": stt_language,
             "font_size": font_size,
+            "reasoning_effort": reasoning_effort,
         }
         for attribute, value in changes.items():
             if value is not None and not isinstance(value, (str, _Unset)):
@@ -164,6 +171,7 @@ def _from_wire(raw: Dict[str, Any]) -> UserPreferences:
         stt_model=text("sttModel"),
         stt_language=text("sttLanguage"),
         font_size=font_size if font_size in FONT_SIZES else None,  # type: ignore[arg-type]
+        reasoning_effort=text("reasoningEffort"),
     )
 
 

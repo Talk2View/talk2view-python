@@ -64,3 +64,12 @@ def test_no_change_keeps_the_session() -> None:
     t2v.set_chat_defaults()
 
     assert t2v.get_session() is session
+
+    # A restated (model, effort) pair is no change either.
+    t2v.set_chat_defaults(model="gpt-4o", reasoning_effort="high")
+    t2v.set_chat_defaults(model="gpt-4o", reasoning_effort="high")
+    session = t2v.create_session()
+    version = t2v._defaults_version
+    t2v.set_chat_defaults(model="gpt-4o", reasoning_effort="high")
+    assert t2v.get_session() is session
+    assert t2v._defaults_version == version == t2v._session_version

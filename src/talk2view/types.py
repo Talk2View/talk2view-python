@@ -49,6 +49,8 @@ class CreateSessionResponse:
     session_id: str
     thread_id: str
     model: str
+    # The effort the session runs at; None from an engine that does not send it.
+    reasoning_effort: Optional[str] = None
 
 
 @dataclass
@@ -330,6 +332,20 @@ def _refuse_default_model(model: object, where: str) -> None:
         )
 
 
+def _check_reasoning_effort(value: object) -> Optional[str]:
+    """A reasoning effort as it is kept and sent: trimmed and lower-cased. ``TypeError`` for
+    anything but a string or None. A blank string means no effort (None), as it does to the
+    engine. It is not checked against the catalogue: the engine decides what a model
+    accepts. Called before anything is written or sent."""
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise TypeError(
+            "reasoning_effort must be a string or None, not {}".format(type(value).__name__)
+        )
+    return value.strip().lower() or None
+
+
 @dataclass(frozen=True)
 class PermissionResult:
     """What a tool permission callback returns (TS ``PermissionResult``).
@@ -414,9 +430,14 @@ class RegisterSkillsResponse:
 
 @dataclass
 class PartnerConfig:
-    """``GET /v1/config`` — the engine's ``PartnerConfigResponse`` (nine fields; the
+    """``GET /v1/config`` — the engine's ``PartnerConfigResponse`` (eleven fields; the
     TypeScript type lists four and is stale). ``None`` means no partner override.
-    ``system_prompt`` is never populated: the partner prompt is injected server-side."""
+    ``system_prompt`` is never populated: the partner prompt is injected server-side.
+
+    ``default_llm_base_model`` and ``default_llm_reasoning_effort`` are the partner's
+    default model resolved to a base model id and a reasoning effort (``default_llm_model``
+    may be an older id such as ``X-thinking``). Both are None on an engine that does not
+    send them, and the effort is None when the default model has no efforts."""
 
     default_llm_model: Optional[str] = None
     default_stt_model: Optional[str] = None
@@ -427,6 +448,8 @@ class PartnerConfig:
     gated_llm_models: Optional[List[str]] = None
     gated_stt_models: Optional[List[str]] = None
     web_search_enabled: bool = False
+    default_llm_base_model: Optional[str] = None
+    default_llm_reasoning_effort: Optional[str] = None
 
 
 # ── Models ──
@@ -441,6 +464,15 @@ class Model:
     # Human-friendly display name (e.g. "Qwen: Qwen3.8 Flash"). None when the
     # catalog has none — display `name or id`.
     name: Optional[str] = None
+    # The reasoning efforts this model accepts (e.g. ["low", "medium", "high"]), in the
+    # catalogue's order. None when the model declares none: send no reasoning_effort.
+    reasoning_efforts: Optional[List[str]] = None
+    # The effort a turn runs at when it names this model and no effort. Always one of
+    # reasoning_efforts; None exactly when reasoning_efforts is None.
+    default_reasoning_effort: Optional[str] = None
+    # The efforts that need a paid plan for this partner (static per partner, not this
+    # user's entitlement). A subset of reasoning_efforts; None exactly when it is None.
+    gated_reasoning_efforts: Optional[List[str]] = None
 
 
 @dataclass

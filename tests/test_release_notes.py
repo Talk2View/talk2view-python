@@ -46,3 +46,16 @@ def test_changelog_announces_the_parity_refresh() -> None:
     ):
         assert needle in unreleased, needle
 
+
+
+def test_readme_and_changelog_announce_reasoning_effort() -> None:
+    readme = (PACKAGE / "README.md").read_text(encoding="utf-8")
+    for needle in ("reasoning_efforts", "gated_reasoning_efforts", 'reasoning_effort="high"',
+                   "reasoning_effort_not_supported", "default_llm_base_model"):
+        assert needle in readme, needle
+    changelog = (PACKAGE / "CHANGELOG.md").read_text(encoding="utf-8")
+    release = changelog.split("\n## [0.5.0]", 1)[1].split("\n## [0.4.0]", 1)[0]
+    for needle in ("`reasoning_efforts`", "`selectedEffort`", "Thinking level control",
+                   "(paid plan)", '`ChatController.on("modelRefused")`'):
+        assert needle in release, needle
+    assert changelog.index("## Unreleased") < changelog.index("## [0.5.0]")

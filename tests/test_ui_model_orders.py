@@ -503,7 +503,7 @@ def test_default_takes_back_a_pick_an_earlier_server_applied(engine: ModelEngine
     second.start()
     try:
         assert wait_for(lambda: page(second)["config"] is not None)  # its refresh has run
-        assert page(second)["models"] == {"list": [], "selected": None}
+        assert page(second)["models"] == {"list": [], "selected": None, "selectedEffort": None}
         assert page(second)["preferences"] == {"model": "m-deep"}
         run(second, type="selectModel", modelId=None)
         turn(second, controller, "two")

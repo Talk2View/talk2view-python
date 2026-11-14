@@ -206,11 +206,69 @@ export function modelLabel(m: { id: string; name: string | null }): string {
   return m.name ?? m.id;
 }
 
-/** "Default — <name>" when the partner's default is listed, else "Default". */
+/**
+ * "Default — <name>" when the partner's default is listed, else "Default". When the
+ * engine gives the default as a model and an effort, the label names both:
+ * "Default — <name> (<effort>)".
+ */
 export function defaultModelLabel(s: PageState): string {
+  const base = s.config?.default_llm_base_model ?? null;
+  const effort = s.config?.default_llm_reasoning_effort ?? null;
+  if (base !== null && effort !== null) {
+    const listed = s.models.list.find((m) => m.id === base);
+    return listed ? 'Default — ' + modelLabel(listed) + ' (' + effortLabel(effort) + ')' : 'Default';
+  }
   const id = s.config?.default_llm_model;
   const listed = id ? s.models.list.find((m) => m.id === id) : undefined;
   return listed ? 'Default — ' + modelLabel(listed) : 'Default';
+}
+
+/** One option of the Thinking level control. `paid`: the effort needs a paid plan. */
+export interface EffortChoice {
+  value: string;
+  label: string;
+  paid: boolean;
+}
+
+/** low/medium/high -> Low/Medium/High; any other value with its first letter upper-cased. */
+export function effortLabel(effort: string): string {
+  switch (effort) {
+    case 'low':
+      return 'Low';
+    case 'medium':
+      return 'Medium';
+    case 'high':
+      return 'High';
+    default:
+      return effort.charAt(0).toUpperCase() + effort.slice(1);
+  }
+}
+
+/**
+ * The Thinking level control for the model the picker shows; null when there is none to
+ * show: "Default" (`''`), a model not in the list, or one that declares fewer than two
+ * efforts (an older engine declares none). The choices follow the catalogue's order; one
+ * that needs a paid plan says so in its label and stays selectable, since the page cannot
+ * know whether this end-user pays (the engine decides at the turn). The value is the
+ * effort the server applied for the selected model, else the model's own default (a pick
+ * still on its way shows that model's default).
+ */
+export function effortChoices(
+  s: PageState,
+  modelId: string,
+): { choices: EffortChoice[]; value: string | null } | null {
+  if (modelId === '') return null;
+  const model = s.models.list.find((m) => m.id === modelId);
+  const efforts = model?.reasoning_efforts;
+  if (!model || !efforts || efforts.length < 2) return null;
+  const gated = model.gated_reasoning_efforts ?? [];
+  const choices = efforts.map((value) => {
+    const paid = gated.includes(value);
+    return { value, label: effortLabel(value) + (paid ? ' (paid plan)' : ''), paid };
+  });
+  const fallback = model.default_reasoning_effort ?? null;
+  const value = modelId === s.models.selected ? (s.models.selectedEffort ?? fallback) : fallback;
+  return { choices, value };
 }
 
 /**

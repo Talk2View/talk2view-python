@@ -5,6 +5,35 @@ based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## Unreleased
 
+## [0.5.0] - 2026-11-14
+
+### Added
+
+- Reasoning effort is a setting on a model, not a model of its own. `Model` gains
+  `reasoning_efforts`, `default_reasoning_effort` and `gated_reasoning_efforts`
+  (all `None` for a model with no effort control, and on an engine that does not send
+  them). `Talk2View(reasoning_effort=...)`, `set_chat_defaults(reasoning_effort=...)`,
+  `create_session(reasoning_effort=...)`, `completions(reasoning_effort=...)` and
+  `ChatController(reasoning_effort=...)` send `reasoning_effort` next to `model`. Nothing
+  changes for a host that sets none; ids such as `gemini-4-hydrogen-thinking` keep working.
+- `PartnerConfig.default_llm_base_model` and `default_llm_reasoning_effort`: the partner's
+  default as a model and an effort.
+- `T2VError.model`, `.reasoning_effort` and `.supported_reasoning_efforts`, set on the
+  engine's `model_gated` (403) and `reasoning_effort_not_supported` (400) errors.
+- `UserPreferences.reasoning_effort` (stored as `reasoningEffort`, as the TypeScript SDK).
+- The chat page's Settings show one row per model and a Thinking level control (Low /
+  Medium / High) for models that offer it; efforts that need a paid plan are marked
+  "(paid plan)" and stay selectable. A saved
+  pick of an older `-thinking` model is shown as its model and effort. The `models` slice
+  gains `selectedEffort`, and `selectModel` takes an optional `reasoningEffort`.
+- `ChatController.on("modelRefused")`: a turn was refused with `model_gated` or
+  `reasoning_effort_not_supported`.
+
+### Changed
+
+- `set_chat_defaults(model="x")` now also resets the effort to the model's default, and
+  `set_chat_defaults(model=DEFAULT_MODEL)` forgets the effort with the model.
+
 ### Fixed
 
 - The chat page's server (`UIServer`) listens with a backlog of 64, not the standard

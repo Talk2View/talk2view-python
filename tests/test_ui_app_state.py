@@ -41,6 +41,8 @@ def state(hub: EventHub) -> Dict[str, Any]:
     return result
 
 
+#: The models slice with nothing listed or selected.
+NO_MODELS = {"list": [], "selected": None, "selectedEffort": None}
 SIGNED_OUT = {"user": None, "isAuthenticated": False, "isAnonymous": False,
               "oauthPending": None, "oauthError": None}
 
@@ -86,7 +88,7 @@ def test_attach_seeds_every_slice_signed_out(t2v: Talk2View) -> None:
                              "clipboard": False, "skillImport": False},
             "results": [],
             "config": None,
-            "models": {"list": [], "selected": None},
+            "models": NO_MODELS,
             "audioModels": {"list": [], "state": "loading"},
             "auth": {"user": None, "isAuthenticated": False, "isAnonymous": False,
                      "oauthPending": None, "oauthError": None},
@@ -128,15 +130,25 @@ def test_login_fills_auth_config_and_models(t2v: Talk2View) -> None:
             "oauthError": None,
         }
         assert wait_for(lambda: state(hub)["config"] is not None)
-        assert state(hub)["config"] == CONFIG
+        # The fake engine is an old one: the two resolved-default keys are absent, so
+        # the slice carries them as null.
+        assert state(hub)["config"] == {
+            **CONFIG,
+            "default_llm_base_model": None,
+            "default_llm_reasoning_effort": None,
+        }
+        # No effort keys from the old engine either: each entry carries them as null.
+        none = {"reasoning_efforts": None, "default_reasoning_effort": None,
+                "gated_reasoning_efforts": None}
         assert state(hub)["models"] == {
             "list": [
                 {"id": "m-fast", "object": "model", "created": 1, "owned_by": "t2v",
-                 "name": "Fast"},
+                 "name": "Fast", **none},
                 {"id": "m-deep", "object": "model", "created": 2, "owned_by": "t2v",
-                 "name": None},
+                 "name": None, **none},
             ],
             "selected": None,
+            "selectedEffort": None,
         }
     finally:
         app.detach()
@@ -150,7 +162,7 @@ def test_logout_clears_the_account_slices_at_once(t2v: Talk2View) -> None:
         t2v.auth.logout()
         current = state(hub)
         assert current["auth"]["isAuthenticated"] is False
-        assert current["models"] == {"list": [], "selected": None}
+        assert current["models"] == NO_MODELS
         assert current["config"] is None
     finally:
         app.detach()
@@ -167,7 +179,7 @@ def test_a_new_identity_never_shows_the_previous_ones_models(
         t2v.auth.login("bo@example.com", "pw")  # a switch, with no sign-out in between
         current = state(hub)
         assert current["auth"]["user"] == {"id": "user-bo", "email": "bo@example.com"}
-        assert current["models"] == {"list": [], "selected": None}
+        assert current["models"] == NO_MODELS
         assert current["config"] is None
         with pytest.raises(UnknownModelError):
             app.select_model("m-deep")  # ana's list is not bo's
@@ -203,7 +215,7 @@ def test_a_pick_an_auth_change_overtook_is_refused(t2v: Talk2View) -> None:
         sign_out_when_picked(t2v, "m-deep")
         with pytest.raises(UnknownModelError):
             app.select_model("m-deep")
-        assert state(hub)["models"] == {"list": [], "selected": None}
+        assert state(hub)["models"] == NO_MODELS
         assert t2v._model is None
     finally:
         app.detach()
@@ -430,9 +442,9 @@ def test_a_refresh_an_auth_change_overtook_is_dropped(
             ops = json.loads(event[2])["ops"]
             seen += [op for op in ops if op["path"][0] in ("models", "config")]
             page.feed(*event)
-        leaked = [op for op in seen if op["value"] not in (None, {"list": [], "selected": None})]
+        leaked = [op for op in seen if op["value"] not in (None, NO_MODELS)]
         assert leaked == [], leaked
-        assert state(hub)["models"] == {"list": [], "selected": None}
+        assert state(hub)["models"] == NO_MODELS
         assert state(hub)["config"] is None
     finally:
         app.detach()
@@ -591,10 +603,10 @@ def test_a_stored_user_json_cannot_carry_reads_as_signed_out(
         client.auth.login("bo@example.com", "pw")
         current = state(hub)
         assert current["auth"] == SIGNED_OUT
-        assert current["models"] == {"list": [], "selected": None}  # not ana's
+        assert current["models"] == NO_MODELS  # not ana's
         assert current["config"] is None
         assert wait_for(lambda: len(passes) == 3)  # bo's refresh: nothing shown for a
-        assert state(hub)["models"] == {"list": [], "selected": None}  # user it cannot show
+        assert state(hub)["models"] == NO_MODELS  # user it cannot show
         assert state(hub)["config"] is None
     finally:
         app.detach()

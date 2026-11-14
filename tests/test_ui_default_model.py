@@ -39,7 +39,9 @@ def ids(hub: EventHub) -> list:  # type: ignore[type-arg]
 
 
 def test_model_id_may_be_null_but_not_missing_or_empty() -> None:
-    assert parse_command({"type": "selectModel", "modelId": None}).args == {"modelId": None}
+    assert parse_command({"type": "selectModel", "modelId": None}).args == {
+        "modelId": None, "reasoningEffort": None,
+    }
     for body in ({"type": "selectModel"}, {"type": "selectModel", "modelId": ""}):
         with pytest.raises(CommandError):
             parse_command(body)

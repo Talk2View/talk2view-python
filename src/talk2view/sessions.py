@@ -50,13 +50,23 @@ class T2VSession:
         tools: T2VTools,
         default_model: Optional[str] = None,
         capabilities: Optional[Capabilities] = None,
+        reasoning_effort: Optional[str] = None,
+        response_reasoning_effort: Optional[str] = None,
     ) -> None:
+        """``default_model`` and ``reasoning_effort`` are what each message names (the
+        effort only beside the model). ``model`` and ``response_reasoning_effort`` are
+        the engine's answer to the create, kept read-only as ``model`` and
+        ``reasoning_effort``: None when the engine sent no effort."""
         self.id = session_id
         self.thread_id = thread_id
         self.model = model
+        self.reasoning_effort = (
+            response_reasoning_effort if isinstance(response_reasoning_effort, str) else None
+        )
         self._client = client
         self._tools = tools
         self._default_model = default_model
+        self._send_effort = reasoning_effort
         self._capabilities = capabilities
 
     def _capability_fields(self, resume: bool) -> Dict[str, Any]:
@@ -142,6 +152,8 @@ class T2VSession:
         body: Dict[str, Any] = {"messages": messages, "stream": True}
         if self._default_model:
             body["model"] = self._default_model
+            if self._send_effort:
+                body["reasoning_effort"] = self._send_effort
         body.update(self._capability_fields(resume=False))
 
         yield from self._process_stream(

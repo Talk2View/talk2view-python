@@ -108,6 +108,7 @@ t2v = Talk2View(
     anonymous_auto_start=False,         # Optional — start a demo session when signed out
     request_timeout=30.0,               # Optional — seconds per request (and to open a stream)
     upload_timeout=120.0,               # Optional — seconds per upload (attachments, audio)
+    reasoning_effort=None,              # Optional — how long `model` thinks (needs `model`)
 )
 ```
 
@@ -170,9 +171,11 @@ token.cancel()  # from any thread
 A cancelled turn ends the `chat()` iteration quietly. The lower-level
 `T2VSession` / `T2VClient` iterators raise `Cancelled` instead.
 
-#### `t2v.create_session(model=None)`
+#### `t2v.create_session(model=None, reasoning_effort=None)`
 
-Explicitly create a new session. Returns a `T2VSession`.
+Explicitly create a new session. Returns a `T2VSession`. `reasoning_effort` goes with
+`model`; given alone, it applies to `t2v.model` (see
+[Partner config, models, completions](#partner-config-models-completions-warm-up)).
 
 #### `t2v.clear_session()`
 
@@ -579,13 +582,14 @@ controller = ChatController(
     system_prompt="You are a 3D Slicer assistant.",   # sent with every turn
     model="gpt-4.1-mini",                              # bound to the session
     capabilities=Capabilities(approval=True),          # bound to the session
+    reasoning_effort=None,                             # goes with `model`
 )
 ```
 
 **One controller per `Talk2View`.** It holds that client's chat session, its
 LLM history and the single run in flight, so a second controller on the same
-client would fight it for all three. `model=` and `capabilities=` are handed to
-`t2v.set_chat_defaults()`; `dispatcher=` defaults to the one the tools use
+client would fight it for all three. `model=`, `capabilities=` and
+`reasoning_effort=` are handed to `t2v.set_chat_defaults()`; `dispatcher=` defaults to the one the tools use
 (`t2v.tools.dispatcher`), so tool handlers and main-thread callbacks share a
 thread; `executor=` is where a turn streams — by default a daemon thread named
 `t2v-chat` per run.
@@ -717,6 +721,7 @@ run.
 | `wait_idle(timeout=None)` | Blocks until no run is active. A pending approval counts as idle: no thread waits on it. Idle can be reported while that approval's paused response is still being closed — the run is over, but a `t2v-chat` thread may take a moment more to unwind. | — |
 | `close()` | Abandons any run (its cancel token is cancelled), drops subscribers and listeners. Does not close the `Talk2View`. | — |
 | `on("demoLimitReached", cb)` | A one-shot notice, not chat state: the anonymous demo budget ran out (`DEMO_LIMIT_REACHED`). Returns an unsubscribe. | — |
+| `on("modelRefused", cb)` | A one-shot notice: the engine refused a turn for its model or its reasoning effort (`model_gated` or `reasoning_effort_not_supported`; `MODEL_REFUSED`, from `talk2view.controller`). The chat's `error` shows the engine's message and the turn is not resent. The chat page uses it to drop the effort it sent, so the next turn runs at the model's default. Returns an unsubscribe. | — |
 | `on("conversationReplaced", cb)` | A conversation was just put on screen, replacing whatever was there — `restore_conversation` or a snapshot-carrying `exchange_conversation`, either one; not raised for an export-only `exchange_conversation(None, ...)` or one refused for a stale `epoch`, since nothing was replaced. For a host that needs to know a switch happened without caring which method caused it — the 3D Slicer extension's screenshot follow-up guard drops what it was queued for on this, not by overriding either method. Returns an unsubscribe. | — |
 
 An approval never parks a thread: the worker returns with `pendingApproval`
@@ -1096,16 +1101,21 @@ keyring-backed `storage` its own `data_storage`: a keyring must never hold skill
 
 ### `t2v.preferences`
 
-The end-user's UI choices (`model`, `stt_model`, `stt_language`, `font_size`), stored
-in `data_storage` under the same key and JSON shape as the TypeScript SDK's
-`useUserPreferences`.
+The end-user's UI choices (`model`, `stt_model`, `stt_language`, `font_size`,
+`reasoning_effort`), stored in `data_storage` under the same key and JSON shape as the
+TypeScript SDK's `useUserPreferences`. `reasoning_effort` is the effort picked with
+`model`, stored as `reasoningEffort` (shared with the TypeScript SDK).
 
 ```python
 prefs = t2v.preferences.get()                      # UserPreferences (None = not set)
 t2v.preferences.update(model="gemini-3.8-flash", font_size="large")
+t2v.preferences.update(model="gemini-4-hydrogen", reasoning_effort="medium")
 t2v.preferences.update(model=None)                 # unset one
 t2v.preferences.on_change(lambda p: print(p))
 ```
+
+Writing `model` alone leaves a stored `reasoning_effort` as it is: write both when the
+model changes.
 
 Every value is a string or `None`: anything else raises `TypeError`, and a `font_size`
 other than `small`/`medium`/`large` raises `ValueError`, before anything is stored.
@@ -1136,6 +1146,28 @@ content = t2v.get_attachment_content(attachment.id)   # AttachmentContent(data, 
 t2v.set_chat_defaults(model="gemini-3.8-flash")   # the model for the next turns
 t2v.set_chat_defaults(model=DEFAULT_MODEL)        # back to the partner's default
 ```
+
+```python
+for m in t2v.list_models().data:
+    m.reasoning_efforts          # ["low", "medium", "high"], or None: no effort control
+    m.default_reasoning_effort   # "low"
+    m.gated_reasoning_efforts    # ["high"]: these need a paid plan (the partner's list, not this user's status)
+
+t2v.set_chat_defaults(model="gemini-4-hydrogen", reasoning_effort="high")
+t2v.set_chat_defaults(reasoning_effort="medium")     # same model, another effort
+t2v.set_chat_defaults(model="gemini-4-hydrogen")     # back to the model's own default effort
+```
+
+The model and its effort are one pick. Naming a model without an effort runs it at the
+model's default effort, so one model's effort is never carried over to another. An
+effort needs a model (`ValueError` without one), and `DEFAULT_MODEL` drops both. The
+effort is sent as given, trimmed and lower-cased (a blank one counts as none), and is
+not checked against the catalogue: the engine refuses one the model does not accept.
+Older ids such as `gemini-4-hydrogen-thinking-high` keep working and mean the same
+thing (that model at that effort). `PartnerConfig.default_llm_base_model` and
+`default_llm_reasoning_effort` are the partner's default as a model and an effort (`None`
+on an older engine). `completions(..., reasoning_effort="low")` sends one for a single
+call.
 
 `completions()` needs a signed-in end-user: for a guest the engine answers
 `sign_in_required`. It asks for one reply (`max_tokens` up to 16384).
@@ -1213,6 +1245,12 @@ request (also its `X-Request-Id` header; quote it when you contact support), and
 limits and some temporary outages). The SDK does not retry for you. A stream
 `error` event carries `request_id` too. Every error type the engine sends is
 listed at [docs.talk2view.com/errors](https://docs.talk2view.com/errors).
+
+Two errors concern the model pick, matched on `err.type` (both are a plain
+`T2VError`): `reasoning_effort_not_supported` (400; the model does not accept that
+effort, and `err.supported_reasoning_efforts` lists the ones it does) and `model_gated`
+(403; the model, or the model at that effort, needs a paid plan: `err.model` and
+`err.reasoning_effort` say which). The SDK never retries with another effort.
 
 > **Upgrading from 0.1.0:** `T2VError`'s second parameter is now `type=` (was
 > `error_type=`) and `code` is the fourth positional parameter, before

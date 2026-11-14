@@ -7,6 +7,8 @@ import {
   deepEqual,
   defaultModelLabel,
   dictationFailureText,
+  effortChoices,
+  effortLabel,
   failureText,
   findResult,
   gate,
@@ -211,6 +213,68 @@ describe('the AI model picker (Settings.tsx)', () => {
       orphan: 'm-deep',
       loaded: true,
     });
+  });
+});
+
+describe('the Thinking level control (Settings.tsx)', () => {
+  const g4h = {
+    id: 'g4h',
+    object: 'model',
+    created: 1,
+    owned_by: 't',
+    name: 'Hydrogen',
+    reasoning_efforts: ['low', 'medium', 'high'],
+    default_reasoning_effort: 'low',
+    gated_reasoning_efforts: ['high'],
+  };
+  const plain = { id: 'gpt', object: 'model', created: 1, owned_by: 't', name: null };
+
+  it('effortLabel', () => {
+    expect(['low', 'medium', 'high', 'xhigh'].map(effortLabel)).toEqual(['Low', 'Medium', 'High', 'Xhigh']);
+  });
+
+  it('no control for Default, an unlisted model, or a model without efforts (an older engine)', () => {
+    const st = s({ models: { list: [g4h, plain], selected: null } });
+    expect(effortChoices(st, '')).toBeNull();
+    expect(effortChoices(st, 'gone')).toBeNull();
+    expect(effortChoices(st, 'gpt')).toBeNull();
+    expect(effortChoices(s({ models: { list: [{ ...plain, reasoning_efforts: null }], selected: null } }), 'gpt')).toBeNull();
+    expect(effortChoices(s({ models: { list: [{ ...g4h, reasoning_efforts: ['low'] }], selected: null } }), 'g4h')).toBeNull();
+  });
+
+  it('lists the efforts in catalogue order, gated ones marked (paid plan), with the applied effort as the value', () => {
+    expect(effortChoices(s({ models: { list: [g4h], selected: 'g4h', selectedEffort: 'medium' } }), 'g4h')).toEqual({
+      choices: [
+        { value: 'low', label: 'Low', paid: false },
+        { value: 'medium', label: 'Medium', paid: false },
+        { value: 'high', label: 'High (paid plan)', paid: true },
+      ],
+      value: 'medium',
+    });
+  });
+
+  it('the applied model with no selectedEffort (an older server) shows its default', () => {
+    expect(effortChoices(s({ models: { list: [g4h], selected: 'g4h' } }), 'g4h')?.value).toBe('low');
+  });
+
+  it('a model the server has not applied yet shows its own default', () => {
+    expect(effortChoices(s({ models: { list: [g4h, plain], selected: 'gpt', selectedEffort: null } }), 'g4h')?.value).toBe(
+      'low',
+    );
+  });
+
+  it('the Default label names the resolved model and effort, else falls back to default_llm_model', () => {
+    const config = {
+      ...EMPTY_CONFIG,
+      default_llm_model: 'g4h-thinking',
+      default_llm_base_model: 'g4h',
+      default_llm_reasoning_effort: 'medium',
+    };
+    expect(defaultModelLabel(s({ models: { list: [g4h], selected: null }, config }))).toBe('Default — Hydrogen (Medium)');
+    expect(defaultModelLabel(s({ models: { list: [g4h], selected: null }, config: { ...EMPTY_CONFIG, default_llm_model: 'g4h' } }))).toBe(
+      'Default — Hydrogen',
+    );
+    expect(defaultModelLabel(s({ models: { list: [plain], selected: null }, config }))).toBe('Default');
   });
 });
 

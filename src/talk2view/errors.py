@@ -5,7 +5,7 @@ from __future__ import annotations
 import email.utils
 import math
 import time
-from typing import Callable, Dict, FrozenSet, Optional
+from typing import Callable, Dict, FrozenSet, List, Optional
 
 # Shown when the engine lost the chat session mid-turn: nothing is resent,
 # because the tool handler has already run on this side.
@@ -39,10 +39,19 @@ class T2VError(Exception):
     is the number of seconds to wait from a ``Retry-After`` header, sent on rate
     limits and some temporary outages. Both are ``None`` when the engine sent
     nothing, and on errors raised in the SDK itself.
+
+    ``model`` and ``reasoning_effort`` are the model and effort the engine refused,
+    sent with ``reasoning_effort_not_supported`` (400) and ``model_gated`` (403);
+    ``supported_reasoning_efforts`` is the efforts that model does accept, sent with
+    ``reasoning_effort_not_supported``. Each is ``None`` when the engine sent nothing.
+    The SDK never retries with another effort: the caller decides.
     """
 
     request_id: Optional[str] = None
     retry_after: Optional[int] = None
+    model: Optional[str] = None
+    reasoning_effort: Optional[str] = None
+    supported_reasoning_efforts: Optional[List[str]] = None
 
     def __init__(
         self,
@@ -197,12 +206,18 @@ def error_for_type(
     *,
     request_id: Optional[str] = None,
     retry_after: Optional[int] = None,
+    model: Optional[str] = None,
+    reasoning_effort: Optional[str] = None,
+    supported_reasoning_efforts: Optional[List[str]] = None,
 ) -> T2VError:
     """Build the most specific error class for an engine error type."""
     cls = _ERROR_CLASS_BY_TYPE.get(type) if type else None
     err = (cls or T2VError)(message, type, status_code, code, detail)
     err.request_id = request_id
     err.retry_after = retry_after
+    err.model = model
+    err.reasoning_effort = reasoning_effort
+    err.supported_reasoning_efforts = supported_reasoning_efforts
     return err
 
 

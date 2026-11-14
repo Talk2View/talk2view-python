@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+from typing import Any, Dict
 from unittest.mock import MagicMock, patch
 
 import httpx
 import pytest
+from pytest_httpserver import HTTPServer
 
 import talk2view.client as client_module
 from talk2view.client import T2VClient
@@ -398,3 +400,72 @@ class TestTalk2ViewLifecycle:
         with Talk2View("pk_test") as t2v:
             t2v._client = sentinel
         sentinel.close.assert_called_once()
+
+
+# ── Reasoning effort fields on engine errors ──
+
+
+def _engine_error(httpserver: HTTPServer, error: Dict[str, Any], status: int) -> T2VError:
+    """POST /v1/sessions answered with ``{"error": error}``; the error it raises."""
+    httpserver.expect_request("/v1/sessions").respond_with_json({"error": error}, status=status)
+    storage = MemoryStorage()
+    storage.set("access_token", "tok")
+    c = T2VClient("pk_test", storage, httpserver.url_for(""))
+    with pytest.raises(T2VError) as excinfo:
+        c.request("/v1/sessions", method="POST", body={"model": "gemini-4-hydrogen"})
+    return excinfo.value
+
+
+def test_a_400_reasoning_effort_not_supported_is_typed(httpserver: HTTPServer) -> None:
+    err = _engine_error(httpserver, {
+        "type": "reasoning_effort_not_supported",
+        "message": "Model gemini-4-hydrogen does not support reasoning effort 'xhigh'",
+        "model": "gemini-4-hydrogen", "reasoning_effort": "xhigh",
+        "supported": ["low", "medium", "high"]}, 400)
+    assert type(err) is T2VError
+    assert err.type == "reasoning_effort_not_supported" and err.status_code == 400
+    assert err.model == "gemini-4-hydrogen" and err.reasoning_effort == "xhigh"
+    assert err.supported_reasoning_efforts == ["low", "medium", "high"]
+    assert str(err) == "Model gemini-4-hydrogen does not support reasoning effort 'xhigh'"
+
+
+def test_a_403_model_gated_carries_the_effort(httpserver: HTTPServer) -> None:
+    err = _engine_error(httpserver, {
+        "type": "model_gated",
+        "message": "Model gemini-4-hydrogen requires a paid subscription",
+        "model": "gemini-4-hydrogen", "reasoning_effort": "high"}, 403)
+    assert (err.type, err.model, err.reasoning_effort) == (
+        "model_gated", "gemini-4-hydrogen", "high"
+    )
+    assert err.supported_reasoning_efforts is None
+
+
+def test_garbled_effort_fields_on_an_error_are_dropped(httpserver: HTTPServer) -> None:
+    err = _engine_error(httpserver, {
+        "type": "model_gated", "message": "no", "model": 5,
+        "reasoning_effort": "x" * 300, "supported": "high"}, 403)
+    assert (err.model, err.reasoning_effort, err.supported_reasoning_efforts) == (None, None, None)
+
+
+def test_empty_effort_fields_on_an_error_read_as_none(httpserver: HTTPServer) -> None:
+    err = _engine_error(httpserver, {
+        "type": "model_gated", "message": "no", "model": "", "reasoning_effort": ""}, 403)
+    assert (err.model, err.reasoning_effort) == (None, None)
+
+
+def test_a_streamed_turn_refused_for_its_effort_carries_the_fields(
+    httpserver: HTTPServer,
+) -> None:
+    httpserver.expect_request("/v1/sessions/s1/messages").respond_with_json({"detail": {"error": {
+        "type": "reasoning_effort_not_supported", "message": "nope",
+        "model": "g4h", "reasoning_effort": "xhigh", "supported": ["low", 3, "high"]}}},
+        status=400)
+    storage = MemoryStorage()
+    storage.set("access_token", "tok")
+    c = T2VClient("pk_test", storage, httpserver.url_for(""))
+    with pytest.raises(T2VError) as excinfo:
+        list(c.stream_request("/v1/sessions/s1/messages", {"messages": []}))
+    err = excinfo.value
+    assert (err.model, err.reasoning_effort, err.supported_reasoning_efforts) == (
+        "g4h", "xhigh", ["low", "high"]
+    )

@@ -586,6 +586,8 @@ html[data-theme='dark'] .aui-composer-stop-dictation { background: var(--t2v-sec
 .t2v-seg button { flex: 1 1 0; height: 30px; padding: 0; border: 0; background: transparent; color: var(--t2v-muted-foreground); font-size: 13px; font-weight: 500; cursor: pointer; }
 .t2v-seg button + button { border-left: 1px solid var(--t2v-hairline-strong); }
 .t2v-seg button[aria-pressed='true'] { background: var(--t2v-wash-2); color: var(--t2v-foreground); }
+/* One line at any width: "High (paid plan)" is wider than a third of a 320px pane. */
+.t2v-seg button { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .t2v-guest-card { padding: 12px 14px; border: 1px solid var(--t2v-hairline); background: var(--t2v-wash); }
 .t2v-guest-card p { margin: 0 0 10px 0; font-size: 13px; line-height: 18px; color: var(--t2v-muted-foreground); }
 /* ── Skills view (Skills.tsx), laid out as the TS SDK's (chat/views/skills.tsx):

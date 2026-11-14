@@ -122,12 +122,20 @@ export interface WireModel {
   created: number;
   owned_by: string;
   name: string | null;
+  /** The efforts the model can think at, in order; null: no effort control. Absent from an older server. */
+  reasoning_efforts?: string[] | null;
+  /** The effort the model runs at when none is sent. Absent from an older server. */
+  default_reasoning_effort?: string | null;
+  /** The efforts that need a paid plan (the partner's list, not this user's). Absent from an older server. */
+  gated_reasoning_efforts?: string[] | null;
 }
 
 export interface ModelsSlice {
   list: WireModel[];
   /** The end-user's own listed choice; null means the default. */
   selected: string | null;
+  /** The effort the selected model runs at; null: none selected, or no effort control. Absent from an older server. */
+  selectedEffort?: string | null;
 }
 
 export interface PartnerConfig {
@@ -140,6 +148,9 @@ export interface PartnerConfig {
   gated_llm_models: string[] | null;
   gated_stt_models: string[] | null;
   web_search_enabled: boolean;
+  /** The partner's default as a model and an effort. Absent from an older server. */
+  default_llm_base_model?: string | null;
+  default_llm_reasoning_effort?: string | null;
 }
 
 export interface Capabilities {
@@ -161,6 +172,7 @@ export type FontSize = 'small' | 'medium' | 'large';
 
 export interface Preferences {
   model?: string;
+  reasoningEffort?: string;
   sttModel?: string;
   sttLanguage?: string;
   fontSize?: FontSize;
@@ -330,7 +342,7 @@ export type Command =
   | { type: 'reload' }
   | { type: 'newSession' }
   | { type: 'clearError' }
-  | { type: 'selectModel'; modelId: string | null }
+  | { type: 'selectModel'; modelId: string | null; reasoningEffort?: string }
   | { type: 'login'; email: string; password: string }
   | { type: 'signup'; email: string; password: string }
   | { type: 'logout' }

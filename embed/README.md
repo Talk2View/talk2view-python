@@ -142,6 +142,9 @@ A few things a host developer should know that go beyond the wire contract:
   and the skills panel do not render at all, not merely disabled; text size stays
   available either way. A guest (an anonymous session with its own token) is authenticated
   and sees both.
+- **Thinking level shows only for a model that offers it.** The control appears under the
+  model picker when the model declares two or more efforts. An effort that needs a paid
+  plan is marked "(paid plan)" and can still be chosen; the engine decides at the turn.
 - **The Account and Thread panes never unmount.** Visiting Settings, or the other pane,
   keeps a half-typed message and the email of a half-typed sign-in. The password is
   cleared whenever the Account pane is hidden or the identity changes. Only Settings

@@ -10,7 +10,7 @@
         [--slow-transcribe SECONDS] [--slow-capture-start SECONDS] [--capture-fails TYPE]
         [--max-clip-seconds SECONDS]
         [--needs-session-reset] [--late-login-result SECONDS] [--register-signed-out]
-        [--signup-auto-confirm] [--drop-model-on-relogin] [--hostile]
+        [--signup-auto-confirm] [--drop-model-on-relogin] [--reasoning-efforts] [--hostile]
         [--desktop-sign-in] [--no-provider-sign-in] [--oauth-browser auto|hold|deny]
         [--slow-cancel SECONDS] [--thread-command-error] [--audio]
 
@@ -878,6 +878,12 @@ def account_controller(args: argparse.Namespace) -> "tuple[ChatController, Any]"
         engine.signup_auto_confirm = True
     if args.drop_model_on_relogin:
         engine.drop_model_on_relogin = True
+    if args.reasoning_efforts:
+        for model in engine.models:
+            if model["id"] == "m-deep":
+                model["reasoning_efforts"] = ["low", "medium", "high"]
+                model["default_reasoning_effort"] = "low"
+                model["gated_reasoning_efforts"] = ["high"]
     if args.desktop_sign_in:
         engine.desktop_providers = ["apple", "google"]
     if args.oauth_browser == "deny":
@@ -1102,6 +1108,12 @@ def main(argv: Optional[list] = None) -> int:
         "--drop-model-on-relogin",
         action="store_true",
         help="account mode: the engine stops offering m-deep from the second sign-in on",
+    )
+    parser.add_argument(
+        "--reasoning-efforts",
+        action="store_true",
+        help="account mode: the engine lists m-deep with the efforts low, medium and high "
+        "(default low; high needs a paid plan)",
     )
     parser.add_argument(
         "--hostile",

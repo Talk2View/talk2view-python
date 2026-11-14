@@ -1,5 +1,5 @@
 // vendored-from: Talk2View/talk2view-typescript src/types.ts
-// vendored-commit: 741b084383751a22e34674b0604797c452bdab39
+// vendored-commit: 990b8249b8bf4a4279020389457ae782fc218882
 // local-delta: types.ts.delta.diff
 //
 // A copy of the public TS SDK's types, plus one local delta, declared in full in
@@ -14,12 +14,26 @@
 // end of vendoring header
 // ── Configuration ──
 
+/**
+ * How hard the model thinks before answering. The engine lists the efforts a
+ * model offers in `Model.reasoning_efforts`; the type stays open so a
+ * catalogue that grows needs no SDK release.
+ */
+export type ReasoningEffort = 'low' | 'medium' | 'high' | (string & {});
+
 export interface T2VConfig {
   partnerKey: string;
   baseUrl?: string;
   /** @deprecated Voice requests now route through baseUrl. This option will be removed in a future version. */
   voiceApiUrl?: string;
   model?: string;
+  /**
+   * Reasoning effort sent with `model`. Only for a model whose
+   * `reasoning_efforts` lists it. The engine ignores it for a model with no
+   * effort control and answers 400 `reasoning_effort_not_supported` for a
+   * value the model does not list.
+   */
+  reasoningEffort?: ReasoningEffort;
   /** Timeout in milliseconds for HTTP requests. Defaults to 30000 (30s). Does not apply to SSE streams after connection. */
   requestTimeout?: number;
   /** Enable debug logging to console. Logs streaming events, tool calls, history, and state changes. */
@@ -84,6 +98,8 @@ export interface CreateSessionResponse {
   session_id: string;
   thread_id: string;
   model: string;
+  /** The session's reasoning effort; absent or null when the model has no effort control. */
+  reasoning_effort?: string | null;
 }
 
 // ── Attachments ──
@@ -120,6 +136,8 @@ export interface SendMessageRequest {
   stream?: boolean;
   temperature?: number;
   model?: string;
+  /** Reasoning effort for `model`; omit the key for the model's default. */
+  reasoning_effort?: ReasoningEffort;
   /**
    * The client renders platform-tool activity, so the server emits tool_event
    * chunks (tool_start / tool_end) for its server-side tools. Defaults to
@@ -389,6 +407,15 @@ export interface Model {
    * when the catalog has none — render `name ?? id`.
    */
   name?: string | null;
+  /**
+   * Efforts this model offers, in display order. Absent on engines before
+   * reasoning-effort support; null for a model with no effort control.
+   */
+  reasoning_efforts?: string[] | null;
+  /** The effort used when none is sent. Absent on older engines; null for a model with no effort control. */
+  default_reasoning_effort?: string | null;
+  /** The listed efforts that need a paid plan. Absent on older engines; null for a model with no effort control. */
+  gated_reasoning_efforts?: string[] | null;
 }
 
 export interface ModelsResponse {
@@ -479,12 +506,18 @@ export interface PartnerConfig {
   system_prompt: string | null;
   /** Realtime voice agent enabled for this partner (`<VoiceButton>` shows only when true). */
   voice_agent_enabled?: boolean;
+  /** The partner default's base model id; absent on older engines, null when the default has no effort. */
+  default_llm_base_model?: string | null;
+  /** The partner default's reasoning effort; absent on older engines, null when the default has no effort. */
+  default_llm_reasoning_effort?: string | null;
 }
 
 // ── User Preferences ──
 
 export interface UserPreferences {
   model?: string;
+  /** Reasoning effort chosen with `model`; absent for the model's default. */
+  reasoningEffort?: ReasoningEffort;
   sttModel?: string;
   sttLanguage?: string;
   fontSize?: 'small' | 'medium' | 'large';
@@ -560,6 +593,10 @@ export interface T2VEventMap {
   anonymousUnavailable: [reason: string];
   /** A lost chat session was replaced; the turn was resent on the new one. */
   sessionRecovered: [sessionId: string];
+  /** The engine refused the model (or model and effort) as needing a paid plan (403 `model_gated`). */
+  modelGated: [{ model: string | null; reasoningEffort: string | null }];
+  /** The engine refused the reasoning effort for the model (400 `reasoning_effort_not_supported`). */
+  reasoningEffortUnsupported: [{ model: string | null; reasoningEffort: string | null; supported: string[] }];
 }
 
 // ── Theme ──

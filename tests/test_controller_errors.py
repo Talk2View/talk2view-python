@@ -7,7 +7,8 @@ from typing import Any, List
 
 import pytest
 
-from talk2view.controller import DEMO_LIMIT_REACHED
+from talk2view.controller import DEMO_LIMIT_REACHED, MODEL_REFUSED
+from talk2view.errors import T2VError
 from talk2view.types import ChatMessage
 
 from .controller_fakes import (
@@ -32,6 +33,32 @@ class TestSendMessageErrors:
         assert snap["isLoading"] is False
         # The engine mirrors the message into delta.content; it must never become chat text.
         assert snap["messages"][1]["content"] == "partial"
+
+
+class TestModelRefused:
+    @pytest.mark.parametrize("error_type", ["model_gated", "reasoning_effort_not_supported"])
+    def test_a_refused_model_or_effort_raises_the_notice_and_keeps_the_engines_message(
+        self, error_type: str
+    ) -> None:
+        t2v = FakeT2V()
+        t2v.chat_scripts = [[T2VError("Model g4h requires a paid subscription", error_type, 403)]]
+        controller = make_controller(t2v)
+        hits: List[int] = []
+        controller.on(MODEL_REFUSED, lambda: hits.append(1))
+        controller.send("hi")
+        assert hits == [1]
+        assert controller.snapshot()["error"] == "Model g4h requires a paid subscription"
+
+    def test_any_other_failure_raises_no_model_notice(self) -> None:
+        t2v = FakeT2V()
+        t2v.chat_scripts = [[T2VError("boom", "rate_limited", 429)], [RuntimeError("reset")]]
+        controller = make_controller(t2v)
+        hits: List[int] = []
+        controller.on(MODEL_REFUSED, lambda: hits.append(1))
+        controller.send("hi")
+        controller.send("again")
+        assert hits == []
+        assert controller.snapshot()["error"] == "reset"
 
 
 class TestConversationHistoryIntegrity:

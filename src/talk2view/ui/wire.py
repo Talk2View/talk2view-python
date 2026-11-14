@@ -345,8 +345,13 @@ COMMANDS: Dict[str, Dict[str, Reader]] = {
     },
     "threadDelete": {"threadId": _text(max_chars=MAX_ID_CHARS, non_empty=True)},
     # Account (Talk2View).
-    # null: "Default", the partner's model.
-    "selectModel": {"modelId": _text(max_chars=256, non_empty=True, nullable=True)},
+    # modelId null: "Default", the partner's model (any reasoningEffort is ignored).
+    # reasoningEffort absent or null: the model's default effort. Not a fixed choice: the
+    # efforts a model offers may grow, and AppState checks it against the model.
+    "selectModel": {
+        "modelId": _text(max_chars=256, non_empty=True, nullable=True),
+        "reasoningEffort": _text(max_chars=32, non_empty=True, required=False, nullable=True),
+    },
     "login": {
         "email": _text(max_chars=320, non_empty=True),
         "password": _text(max_chars=1024, non_empty=True, secret=True),
