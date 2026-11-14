@@ -181,3 +181,16 @@ class TestClientErrorMapping:
 
         assert excinfo.value.type == "tool_call_id_mismatch"
         assert str(excinfo.value) == "Moved on"
+
+
+def test_error_for_type_carries_the_effort_fields() -> None:
+    err = error_for_type("m", "reasoning_effort_not_supported", 400, model="g4h",
+                         reasoning_effort="xhigh", supported_reasoning_efforts=["low", "high"])
+    assert type(err) is T2VError
+    assert (err.model, err.reasoning_effort, err.supported_reasoning_efforts) == (
+        "g4h", "xhigh", ["low", "high"]
+    )
+    plain = error_for_type("m", "not_found", 404)
+    assert (plain.model, plain.reasoning_effort, plain.supported_reasoning_efforts) == (
+        None, None, None
+    )

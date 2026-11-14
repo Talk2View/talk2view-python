@@ -108,6 +108,30 @@ class _ParsedError(TypedDict):
     detail: Optional[str]
     request_id: Optional[str]
     retry_after: Optional[int]
+    model: Optional[str]
+    reasoning_effort: Optional[str]
+    supported: Optional[List[str]]
+
+
+# An error's ``model`` / ``reasoning_effort`` longer than this is not an id: dropped.
+_MAX_ERROR_ID_LENGTH = 256
+
+
+def _short_text(value: Any) -> Optional[str]:
+    """A string of at most ``_MAX_ERROR_ID_LENGTH`` characters, else None."""
+    return value if isinstance(value, str) and len(value) <= _MAX_ERROR_ID_LENGTH else None
+
+
+def _no_fields(error: Dict[str, Any]) -> Dict[str, Any]:
+    """A body error with no code, detail or effort fields: every optional key None."""
+    return {
+        **error,
+        "code": None,
+        "detail": None,
+        "model": None,
+        "reasoning_effort": None,
+        "supported": None,
+    }
 
 
 def _stringify_detail(raw: Any) -> Optional[str]:
@@ -774,6 +798,9 @@ class T2VClient:
                 error["detail"],
                 request_id=error["request_id"],
                 retry_after=error["retry_after"],
+                model=error["model"],
+                reasoning_effort=error["reasoning_effort"],
+                supported_reasoning_efforts=error["supported"],
             )
 
         encoding = response.headers.get("content-encoding", "identity").strip().lower()
@@ -950,6 +977,9 @@ class T2VClient:
             error["detail"],
             request_id=error["request_id"],
             retry_after=error["retry_after"],
+            model=error["model"],
+            reasoning_effort=error["reasoning_effort"],
+            supported_reasoning_efforts=error["supported"],
         )
 
     def _raise_if_partner_key_error(self, response: httpx.Response) -> None:
@@ -969,6 +999,9 @@ class T2VClient:
                 error["detail"],
                 request_id=error["request_id"],
                 retry_after=error["retry_after"],
+                model=error["model"],
+                reasoning_effort=error["reasoning_effort"],
+                supported_reasoning_efforts=error["supported"],
             )
 
     @staticmethod
@@ -986,6 +1019,9 @@ class T2VClient:
             "detail": error["detail"],
             "request_id": body_request_id or response.headers.get("X-Request-Id"),
             "retry_after": parse_retry_after(response.headers.get("Retry-After")),
+            "model": error["model"],
+            "reasoning_effort": error["reasoning_effort"],
+            "supported": error["supported"],
         }
 
     @staticmethod
@@ -1002,6 +1038,10 @@ class T2VClient:
         *structured* detail (e.g. a FastAPI 422 validation list) is JSON-
         serialized onto ``detail`` instead. FastAPI 422s and ``{"detail": "..."}``
         responses stay debuggable rather than collapsing to a bare status.
+
+        ``model``/``reasoning_effort`` (a string of at most 256 characters) and
+        ``supported`` (its string items) are read from the error object as sent,
+        None when absent or mistyped; none of them is folded into ``message``.
         """
         generic = f"Request failed (HTTP {response.status_code})"
         try:
@@ -1009,19 +1049,14 @@ class T2VClient:
         except Exception:
             # Opaque/non-JSON body (e.g. an HTML error page): never echo it back
             # to the caller — fall back to a generic message + status.
-            return {"message": generic, "type": "unknown_error", "code": None, "detail": None}, None
+            return _no_fields({"message": generic, "type": "unknown_error"}), None
 
         if not isinstance(data, dict):
-            return {"message": generic, "type": "unknown_error", "code": None, "detail": None}, None
+            return _no_fields({"message": generic, "type": "unknown_error"}), None
 
         err = data.get("error")
         if isinstance(err, str):
-            return {
-                "message": err or generic,
-                "type": "unknown_error",
-                "code": None,
-                "detail": None,
-            }, None
+            return _no_fields({"message": err or generic, "type": "unknown_error"}), None
         if not isinstance(err, dict):
             # Some routes wrap the envelope as {"detail": {"error": {...}}}.
             wrapped = data.get("detail")
@@ -1053,4 +1088,17 @@ class T2VClient:
             else:
                 msg = generic
 
-        return {"message": msg, "type": error_type, "code": code, "detail": detail}, request_id
+        supported = err.get("supported")
+        return {
+            "message": msg,
+            "type": error_type,
+            "code": code,
+            "detail": detail,
+            "model": _short_text(err.get("model")),
+            "reasoning_effort": _short_text(err.get("reasoning_effort")),
+            "supported": (
+                [value for value in supported if isinstance(value, str)]
+                if isinstance(supported, list)
+                else None
+            ),
+        }, request_id
