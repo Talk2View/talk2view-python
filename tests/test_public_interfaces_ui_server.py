@@ -137,6 +137,7 @@ def test_types_the_wire_is_built_from() -> None:
         "stt_model",
         "stt_language",
         "font_size",
+        "reasoning_effort",
     }
     assert Decision("once").approved and not Decision("deny").approved
     assert {f.name for f in dataclasses.fields(SignupOutcome)} == {

@@ -17,7 +17,11 @@ def test_storage_key_and_wire_keys_match_the_typescript_sdk() -> None:
     storage = MemoryStorage()
     prefs = T2VPreferences(storage)
     prefs.update(
-        model="gemini-3.8-flash", stt_model="scribe_v2", stt_language="en", font_size="large"
+        model="gemini-3.8-flash",
+        stt_model="scribe_v2",
+        stt_language="en",
+        font_size="large",
+        reasoning_effort="high",
     )
     assert STORAGE_KEY == "preferences"
     assert json.loads(storage.get("preferences") or "") == {
@@ -25,7 +29,28 @@ def test_storage_key_and_wire_keys_match_the_typescript_sdk() -> None:
         "sttModel": "scribe_v2",
         "sttLanguage": "en",
         "fontSize": "large",
+        "reasoningEffort": "high",
     }
+
+
+def test_reasoning_effort_round_trips_and_none_unsets() -> None:
+    storage = MemoryStorage()
+    prefs = T2VPreferences(storage)
+    storage.set("preferences", '{"model":"g4h","reasoningEffort":"medium"}')
+    assert prefs.get() == UserPreferences(model="g4h", reasoning_effort="medium")
+    prefs.update(reasoning_effort=None)
+    assert json.loads(storage.get("preferences") or "") == {"model": "g4h"}
+    storage.set("preferences", '{"model":"g4h","reasoningEffort":5}')
+    assert prefs.get().reasoning_effort is None
+    with pytest.raises(TypeError):
+        prefs.update(reasoning_effort=5)  # type: ignore[arg-type]
+    assert json.loads(storage.get("preferences") or "") == {"model": "g4h", "reasoningEffort": 5}
+
+
+def test_positional_construction_keeps_working() -> None:
+    assert UserPreferences("m", "s", "en", "small") == UserPreferences(
+        model="m", stt_model="s", stt_language="en", font_size="small"
+    )
 
 
 def test_get_reads_a_typescript_written_object_and_keeps_unknown_keys() -> None:
