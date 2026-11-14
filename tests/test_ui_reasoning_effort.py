@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from typing import Any, Dict, Iterator, Tuple
+import threading
+from typing import Any, Callable, Dict, Iterator, List, Tuple
 
 import pytest
 
@@ -356,3 +357,119 @@ def test_the_router_takes_an_effort_and_reports_one_the_model_lacks(
         assert (t2v.model, t2v.reasoning_effort) == (None, None)
     finally:
         rig.close()
+
+
+class Notices:
+    """A controller stand-in: ``on()`` keeps each callback, ``fire()`` runs them."""
+
+    def __init__(self) -> None:
+        self.callbacks: Dict[str, List[Callable[[], None]]] = {}
+
+    def on(self, event: str, callback: Callable[[], None]) -> Callable[[], None]:
+        self.callbacks.setdefault(event, []).append(callback)
+        return lambda: self.callbacks[event].remove(callback)
+
+    def fire(self, event: str) -> None:
+        for callback in list(self.callbacks.get(event, [])):
+            callback()
+
+
+def test_a_refused_effort_is_forgotten_and_the_default_applies(
+    t2v: Talk2View, account_engine: AccountEngine
+) -> None:
+    # The 403 model_gated case: "high" is gated for the partner and this user does not pay.
+    offer(account_engine, G4H)
+    stub = Notices()
+    hub, app = attached(t2v, stub)
+    try:
+        login(t2v, hub)
+        app.select_model("g4h", "high")
+        stub.fire("modelRefused")
+        assert wait_for(lambda: t2v.preferences.get().reasoning_effort is None)
+        assert t2v.preferences.get().model == "g4h"
+        assert (t2v.model, t2v.reasoning_effort) == ("g4h", None)
+        assert wait_for(lambda: state(hub)["models"]["selectedEffort"] == "low")
+        assert state(hub)["preferences"] == {"model": "g4h"}
+    finally:
+        app.detach()
+
+
+def test_a_refused_legacy_pick_is_stored_as_its_base(
+    t2v: Talk2View, account_engine: AccountEngine
+) -> None:
+    t2v.preferences.update(model="g4h-thinking-private")
+    offer(account_engine, G4HP)
+    stub = Notices()
+    hub, app = attached(t2v, stub)
+    try:
+        login(t2v, hub)
+        assert wait_for(lambda: t2v.reasoning_effort == "medium")
+        stub.fire("modelRefused")
+        assert wait_for(lambda: t2v.preferences.get().model == "g4h-private")
+        assert t2v.preferences.get().reasoning_effort is None
+        assert (t2v.model, t2v.reasoning_effort) == ("g4h-private", None)
+    finally:
+        app.detach()
+
+
+def test_a_refusal_with_no_effort_in_force_changes_nothing(
+    t2v: Talk2View, account_engine: AccountEngine
+) -> None:
+    offer(account_engine, G4H, PLAIN)
+    stub = Notices()
+    hub, app = EventHub(), AppState(t2v, GenericHost())
+    passes = count_passes(app)
+    app.attach(hub, stub)
+    try:
+        login(t2v, hub)
+        app.select_model("gpt")
+        done = len(passes)
+        stub.fire("modelRefused")
+        assert wait_for(lambda: len(passes) > done)
+        assert state(hub)["preferences"] == {"model": "gpt"}
+        assert (t2v.model, t2v.reasoning_effort) == ("gpt", None)
+        assert app._effort_refused is False
+    finally:
+        app.detach()
+
+
+def test_a_model_at_its_default_effort_is_left_as_it_is_after_a_refusal(
+    t2v: Talk2View, account_engine: AccountEngine
+) -> None:
+    offer(account_engine, G4H)
+    stub = Notices()
+    hub, app = EventHub(), AppState(t2v, GenericHost())
+    passes = count_passes(app)
+    app.attach(hub, stub)
+    try:
+        login(t2v, hub)
+        app.select_model("g4h")  # no effort sent: the whole model was refused
+        done = len(passes)
+        stub.fire("modelRefused")
+        assert wait_for(lambda: len(passes) > done)
+        assert state(hub)["preferences"] == {"model": "g4h"}
+        assert (t2v.model, t2v.reasoning_effort) == ("g4h", None)
+    finally:
+        app.detach()
+
+
+def test_an_auth_change_drops_a_pending_refusal(
+    t2v: Talk2View, account_engine: AccountEngine
+) -> None:
+    t2v.preferences.update(model="g4h", reasoning_effort="high")
+    offer(account_engine, G4H)
+    stub = Notices()
+    hub, app = attached(t2v, stub)
+    try:
+        login(t2v, hub)
+        assert wait_for(lambda: t2v.reasoning_effort == "high")
+        gate = account_engine.config_gate = threading.Event()  # hold the refresh
+        stub.fire("modelRefused")
+        t2v.auth.login("bo@example.com", "pw")  # another identity before that pass records
+        gate.set()
+        assert wait_for(lambda: state(hub)["auth"]["user"]["id"] == "user-bo")
+        assert wait_for(lambda: state(hub)["models"]["selected"] == "g4h")
+        assert t2v.preferences.get() == UserPreferences(model="g4h", reasoning_effort="high")
+        assert t2v.reasoning_effort == "high"
+    finally:
+        app.detach()

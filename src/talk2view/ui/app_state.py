@@ -66,13 +66,15 @@ ends on the latest state however deliveries interleave. ``attach`` subscribes be
 seeds, so a change that lands in between is read by the seed or delivered after it. Under
 ``_lock`` this object takes the token store's lock (reading the auth state), the
 preferences' lock and through it the data store's (reading the preferences), and the hub's
-lock; nothing takes them the other way. The chat controller's ``demoLimitReached`` notice
-runs inside its emit window, so its emit lock comes before ``_lock`` too; nothing under
-``_lock`` reaches the controller. No lock is held across a request or a call into
-``Talk2View`` that notifies listeners; ``set_chat_defaults`` (field writes only: no lock,
-no listener, no request) is called under ``_lock``, so a pick and a refresh apply in the
-order they record. Requests (config, models) run on this object's own ``t2v-ui-refresh`` thread,
-never in a listener. A refresh records only what it fetched for the identity the auth slice
+lock; nothing takes them the other way. The chat controller's ``demoLimitReached`` and
+``modelRefused`` notices run inside its emit window, so its emit lock comes before
+``_lock`` too; nothing under ``_lock`` reaches the controller. No lock is held across a
+request or a call into ``Talk2View`` that notifies listeners (the refresh thread's own
+``preferences.update``, when it forgets a stored effort, runs after it lets go of
+``_lock``); ``set_chat_defaults`` (field writes only: no lock, no listener, no request) is
+called under ``_lock``, so a pick and a refresh apply in the order they record. Requests
+(config, models) run on this object's own ``t2v-ui-refresh`` thread, never in a
+listener. A refresh records only what it fetched for the identity the auth slice
 shows: one that an auth change overtook, or that ran on tokens this object has not been
 told of yet, is dropped, and the change's own refresh follows. It never starts a guest
 session: ``list_models()`` does, with ``anonymous_auto_start``, when nobody is signed in,
@@ -92,7 +94,7 @@ import logging
 import threading
 from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple
 
-from ..controller import DEMO_LIMIT_REACHED
+from ..controller import DEMO_LIMIT_REACHED, MODEL_REFUSED
 from ..errors import T2VError
 from ..preferences import UserPreferences
 from ..types import DEFAULT_MODEL, AudioModel, Model, User, _check_reasoning_effort
@@ -263,6 +265,9 @@ class AppState:
         self._selected_effort: Optional[str] = None  # models.selectedEffort
         #: The (model, effort) this object last handed to Talk2View.
         self._applied: Optional[Tuple[str, Optional[str]]] = None
+        #: The engine refused a turn for its model or effort: the next refresh pass drops
+        #: the effort in force (an auth change clears it: it was the previous identity's).
+        self._effort_refused = False
         self._generation = 0  # +1 per auth change: a refresh from before it is dropped
         self._shown: Any = _SIGNED_OUT  # the `_identity` the auth slice last recorded
         self._demo_limit = False  # the `limits` slice
@@ -294,8 +299,9 @@ class AppState:
     # ── Lifecycle ──
 
     def attach(self, hub: EventHub, controller: Any = None) -> None:
-        """Follow ``t2v`` and ``controller``'s ``demoLimitReached`` notice (a controller
-        without ``on()`` has none), seed every slice into ``hub``, start the refresh thread.
+        """Follow ``t2v`` and ``controller``'s ``demoLimitReached`` and ``modelRefused``
+        notices (a controller without ``on()`` has none), seed every slice into ``hub``,
+        start the refresh thread.
         Raises ``RuntimeError`` once ``detach()`` has run, also when it runs on another
         thread while this call is under way: nothing is left subscribed either way, nor when
         a subscription raises (a controller's ``on()``, say), which is raised."""
@@ -316,6 +322,7 @@ class AppState:
             notices = getattr(controller, "on", None)
             if callable(notices):
                 followed.append(notices(DEMO_LIMIT_REACHED, self._on_demo_limit))
+                followed.append(notices(MODEL_REFUSED, self._on_model_refused))
         except BaseException:
             for unsubscribe in followed:
                 unsubscribe()
@@ -556,6 +563,7 @@ class AppState:
                 # identity (a switch signs no one out first), so nothing of the previous
                 # one stays on show, or selectable, until the refresh lists the new one's.
                 self._models, self._selected, self._selected_effort = [], None, None
+                self._effort_refused = False
                 self._record_models_locked()
                 self._audio_models = []
                 self._audio_models_state = "loading"
@@ -597,6 +605,17 @@ class AppState:
         with self._lock:
             self._demo_limit = True
             self._record_limits_locked()
+
+    def _on_model_refused(self) -> None:
+        """``ChatController.on("modelRefused")``: the engine, which knows whether this
+        end-user may use it, refused a turn for its model or effort. The next refresh pass
+        forgets the effort in force, so the next turn runs at the model's default, and
+        re-reads the list so Settings shows what is offered now. A refusal with no effort
+        in force (the whole model is refused) changes nothing. Runs inside the
+        controller's delivery window, so it only records and wakes the refresh."""
+        with self._lock:
+            self._effort_refused = True
+        self.refresh()
 
     # ── Recording (``_lock`` held) ──
 
@@ -784,6 +803,16 @@ class AppState:
             self._record_audio_models_locked()
             stored = _stored_pick(t2v)
             pick = resolve_pick(models, *stored)
+            if self._effort_refused:
+                self._effort_refused = False
+                if pick is not None and pick.effort is not None:
+                    # The engine refused this effort for this end-user: the model's
+                    # default from now on, and stored so (an older id as its model), so
+                    # the refusal cannot repeat on the next pass.
+                    entry = next(m for m in models if m["id"] == pick.model)
+                    pick = ResolvedPick(
+                        pick.model, None, entry.get("default_reasoning_effort"), True
+                    )
             self._selected = pick.model if pick is not None else None
             self._selected_effort = pick.shown_effort if pick is not None else None
             if t2v is not None and pick is not None:
@@ -806,10 +835,10 @@ class AppState:
     def _drop_stored_effort(
         t2v: "Talk2View", stored: Tuple[Optional[str], Optional[str]], pick: ResolvedPick
     ) -> None:
-        """The stored effort is no longer offered for its model: store the model alone, so
-        the model's default applies from now on. Only while the preferences still hold the
-        pick this pass resolved (a newer pick wins). Notifies listeners: never under
-        ``_lock``."""
+        """The stored effort is no longer offered for its model, or the engine refused it:
+        store the listed model alone, so the model's default applies from now on. Only
+        while the preferences still hold the pick this pass resolved (a newer pick wins).
+        Notifies listeners: never under ``_lock``."""
         try:
             if _stored_pick(t2v) == stored:
                 t2v.preferences.update(model=pick.model, reasoning_effort=None)

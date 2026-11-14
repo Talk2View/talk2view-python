@@ -86,6 +86,7 @@ __all__ = [
     "ControllerClosedError",
     "Decision",
     "IdentityChange",
+    "MODEL_REFUSED",
 ]
 
 logger = logging.getLogger("talk2view.controller")
@@ -93,6 +94,10 @@ logger = logging.getLogger("talk2view.controller")
 #: Feedback sent when ``cancel()`` denies a pending approval (same string as the TS adapter).
 CANCELLED_APPROVAL_FEEDBACK = "Cancelled by the user"
 # DEMO_LIMIT_REACHED (the ``on()`` event name) is defined in ``_reducer`` and re-exported here.
+#: The ``on()`` event for a turn the engine refused for its model or its reasoning effort
+#: (``model_gated``, ``reasoning_effort_not_supported``).
+MODEL_REFUSED = "modelRefused"
+_MODEL_REFUSALS = frozenset({"model_gated", "reasoning_effort_not_supported"})
 #: How many times in a row a callback may record new ops from inside a delivery before
 #: ``_flush`` stops re-flushing for it. Deep enough that no sane host reaches it; shallow
 #: enough that a runaway callback cannot hold the emit lock for long.
@@ -646,6 +651,9 @@ class ChatController:
 
     def on(self, event: str, callback: Callable[[], None]) -> Callable[[], None]:
         """Listen for a one-shot notice that is not chat state. Events: ``demoLimitReached``;
+        ``modelRefused`` -- the engine refused a turn for its model or its reasoning effort
+        (a ``T2VError`` of type ``model_gated`` or ``reasoning_effort_not_supported``; the
+        chat's ``error`` shows the engine's message, and the turn is not resent);
         ``conversationReplaced`` -- a conversation was just put on screen, replacing
         whatever was there, whichever of ``restore_conversation`` or
         ``exchange_conversation`` did it (a host that only overrides
@@ -1750,6 +1758,8 @@ class ChatController:
                     if self._is_current(run_id):
                         self._turn_failed = True
                         self._set_top("error", str(exc))
+                        if _error_type(exc) in _MODEL_REFUSALS:
+                            self._notices.append(MODEL_REFUSED)
                 self._flush()
         finally:
             _close_stream(stream)
