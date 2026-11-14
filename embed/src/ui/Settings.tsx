@@ -1,13 +1,21 @@
 /**
- * The Settings view: the AI model (with the partner's Default, TS chat/views/settings.tsx),
- * and the text size. Skills have their own view (Skills.tsx, from the header).
+ * The Settings view: the AI model (with the partner's Default, TS chat/views/settings.tsx)
+ * and, for a model that offers it, its Thinking level; and the text size. Skills have their own view (Skills.tsx, from the header).
  * Every choice is a command; what the page shows is what the server's slices say, so a
  * refused pick simply does not stick. Signed out, the model picker is hidden outright, not
  * merely disabled — text size is a local preference and stays available.
  */
 import { useEffect, useId, useRef, useState, type ReactNode } from 'react';
 import { ChevronDown, UserRound } from 'lucide-react';
-import { defaultModelLabel, FALLBACK_STT_MODEL, languageName, languagesFor, modelLabel, modelPick } from '../selectors';
+import {
+  defaultModelLabel,
+  effortChoices,
+  FALLBACK_STT_MODEL,
+  languageName,
+  languagesFor,
+  modelLabel,
+  modelPick,
+} from '../selectors';
 import { resultOf, WATCH_MS, type PageModel, type PageStore } from '../store';
 import type { FontSize } from '../wire';
 import { useModel, useStore } from './context';
@@ -153,12 +161,17 @@ export function SettingsView({ onAccount }: { onAccount: () => void }) {
   const features = state.options.features;
 
   const [pendingModel, setPendingModel] = usePending<string | null>(model, store);
+  // [model, effort]: a pending effort is shown only on the model it was picked for.
+  const [pendingEffort, setPendingEffort] = usePending<[string, string]>(model, store);
   const [pendingSize, setPendingSize] = usePending<FontSize>(model, store);
   const [pendingVoice, setPendingVoice] = usePending<string | null>(model, store);
   const [pendingLanguage, setPendingLanguage] = usePending<string | null>(model, store);
 
   const { value: modelValue, orphan, loaded } = modelPick(state);
   const shownModel = pendingModel ? pendingModel.value ?? '' : modelValue;
+  const effort = effortChoices(state, shownModel);
+  const shownEffort =
+    pendingEffort && pendingEffort.value[0] === shownModel ? pendingEffort.value[1] : effort?.value ?? null;
   const shownSize = pendingSize?.value ?? (preferences.fontSize ?? 'medium');
   // A pending pick that has fallen out of the list mid-flight (the
   // partner's own list refreshing while a pick is still awaiting its result) needs an
@@ -192,6 +205,7 @@ export function SettingsView({ onAccount }: { onAccount: () => void }) {
       : 'The ' + String(languages.length) + ' languages ' + displayText(voiceName) + ' can transcribe.'
     : 'A hint for the voice model.';
   const sizeLabelId = useId();
+  const effortLabelId = useId();
 
   const textSize = (
     <div className="t2v-field">
@@ -250,6 +264,30 @@ export function SettingsView({ onAccount }: { onAccount: () => void }) {
           </div>
         )}
       </Field>
+
+      {effort ? (
+        <div className="t2v-field">
+          <label id={effortLabelId}>Thinking level</label>
+          <div className="t2v-seg" role="group" aria-labelledby={effortLabelId} aria-busy={pendingEffort !== null}>
+            {effort.choices.map((c) => (
+              // A paid choice differs only in its label: the page cannot know whether this
+              // end-user pays, so the engine decides at the turn.
+              <button
+                key={c.value}
+                type="button"
+                aria-pressed={shownEffort === c.value}
+                onClick={() => {
+                  const cmdId = store.command({ type: 'selectModel', modelId: shownModel, reasoningEffort: c.value });
+                  setPendingEffort([shownModel, c.value], cmdId);
+                }}
+              >
+                {displayText(c.label)}
+              </button>
+            ))}
+          </div>
+          <p className="t2v-hint">How long the model thinks before it answers. Higher is slower.</p>
+        </div>
+      ) : null}
 
       {features.dictation ? (
         <>

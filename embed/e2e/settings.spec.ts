@@ -51,6 +51,61 @@ test.describe('Settings (real Talk2View + ChatController)', () => {
     await page.getByRole('button', { name: 'Settings' }).click();
     await expect(page.getByLabel('AI model')).toHaveValue('');
   });
+
+  test('no effort control without declared efforts', async ({ page, backend }) => {
+    await page.goto(backend.url);
+    await signIn(page);
+    await page.getByRole('button', { name: 'Settings' }).click();
+    await page.getByLabel('AI model').selectOption('m-deep');
+    await expect(page.getByLabel('AI model')).toHaveValue('m-deep');
+    await expect(page.getByRole('group', { name: 'Thinking level' })).toHaveCount(0);
+  });
+});
+
+test.describe('a model with reasoning efforts', () => {
+  test.use({ backendArgs: ['--mode', 'account', '--reasoning-efforts'] });
+
+  test('the Thinking level control: default, a pick that survives a reload, and a model switch', async ({
+    page,
+    backend,
+  }) => {
+    await page.goto(backend.url);
+    await signIn(page);
+    await page.getByRole('button', { name: 'Settings' }).click();
+    const picker = page.getByLabel('AI model');
+    const group = page.getByRole('group', { name: 'Thinking level' });
+    await expect(picker).toHaveValue('');
+    await expect(group).toHaveCount(0); // Default is selected
+    await picker.selectOption('m-deep');
+    await expect(group.getByRole('button')).toHaveText(['Low', 'Medium', 'High (paid plan)']);
+    await expect(group.getByRole('button', { name: 'Low' })).toHaveAttribute('aria-pressed', 'true');
+    await group.getByRole('button', { name: 'Medium' }).click();
+    await expect(group.getByRole('button', { name: 'Medium' })).toHaveAttribute('aria-pressed', 'true');
+    await page.reload(); // the pick is the server's
+    await page.getByRole('button', { name: 'Settings' }).click();
+    await expect(page.getByLabel('AI model')).toHaveValue('m-deep');
+    await expect(group.getByRole('button', { name: 'Medium' })).toHaveAttribute('aria-pressed', 'true');
+    await page.getByLabel('AI model').selectOption('m-fast');
+    await expect(group).toHaveCount(0);
+    await page.getByLabel('AI model').selectOption('m-deep');
+    // The effort was not carried over.
+    await expect(group.getByRole('button', { name: 'Low' })).toHaveAttribute('aria-pressed', 'true');
+  });
+
+  test('a gated effort is marked and can still be chosen', async ({ page, backend }) => {
+    await page.goto(backend.url);
+    await signIn(page);
+    await page.getByRole('button', { name: 'Settings' }).click();
+    await page.getByLabel('AI model').selectOption('m-deep');
+    const high = page.getByRole('group', { name: 'Thinking level' }).getByRole('button', { name: 'High (paid plan)' });
+    await expect(high).toBeEnabled();
+    await expect(high).not.toHaveAttribute('aria-disabled', 'true');
+    await high.click();
+    await expect(high).toHaveAttribute('aria-pressed', 'true');
+    await page.reload(); // the server took the pick: it was sent, stored and applied
+    await page.getByRole('button', { name: 'Settings' }).click();
+    await expect(page.getByRole('button', { name: 'High (paid plan)' })).toHaveAttribute('aria-pressed', 'true');
+  });
 });
 
 test.describe('the model list has not loaded yet', () => {
