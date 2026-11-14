@@ -334,19 +334,16 @@ def _refuse_default_model(model: object, where: str) -> None:
 
 def _check_reasoning_effort(value: object) -> Optional[str]:
     """A reasoning effort as it is kept and sent: trimmed and lower-cased. ``TypeError`` for
-    anything but a string or None, ``ValueError`` for a blank string. It is not checked
-    against the catalogue: the engine decides what a model accepts. Called before anything
-    is written or sent."""
+    anything but a string or None. A blank string means no effort (None), as it does to the
+    engine. It is not checked against the catalogue: the engine decides what a model
+    accepts. Called before anything is written or sent."""
     if value is None:
         return None
     if not isinstance(value, str):
         raise TypeError(
             "reasoning_effort must be a string or None, not {}".format(type(value).__name__)
         )
-    effort = value.strip().lower()
-    if not effort:
-        raise ValueError("reasoning_effort must not be empty")
-    return effort
+    return value.strip().lower() or None
 
 
 @dataclass(frozen=True)

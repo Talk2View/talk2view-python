@@ -258,7 +258,7 @@ class Talk2View:
             ``model``, trimmed and lower-cased, and not checked against the catalogue:
             the engine refuses an effort the model does not accept
             (``reasoning_effort_not_supported``). Needs ``model`` (``ValueError``
-            without one). Left out, the model runs at its default effort.
+            without one). Left out or blank, the model runs at its default effort.
     """
 
     def __init__(
@@ -981,8 +981,8 @@ class Talk2View:
         ``reasoning_effort`` alone changes the current model's effort (``ValueError`` with
         no model set). ``DEFAULT_MODEL`` forgets the effort too, and refuses one
         (``ValueError``). The effort is trimmed and lower-cased (``TypeError`` for a
-        non-string, ``ValueError`` for a blank one) and not checked against the
-        catalogue. Every check runs before anything is written.
+        non-string; a blank one counts as none) and not checked against the catalogue.
+        Every check runs before anything is written.
         """
         effort = _check_reasoning_effort(reasoning_effort)
         if effort is not None:

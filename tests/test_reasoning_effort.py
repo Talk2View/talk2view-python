@@ -102,12 +102,24 @@ def test_the_effort_is_normalised_and_checked_before_anything_changes() -> None:
     assert t2v.reasoning_effort == "high"
     with pytest.raises(TypeError, match="must be a string or None"):
         t2v.set_chat_defaults(model="other", reasoning_effort=3)  # type: ignore[arg-type]
-    with pytest.raises(ValueError, match="must not be empty"):
-        t2v.set_chat_defaults(model="other", reasoning_effort="  ")
     assert (t2v.model, t2v.reasoning_effort) == ("g4h", "high")
     with pytest.raises(TypeError):
         Talk2View("pk", model="g4h", reasoning_effort=["high"])  # type: ignore[arg-type]
     assert _t2v(model="g4h", reasoning_effort="MEDIUM").reasoning_effort == "medium"
+
+
+def test_a_blank_effort_counts_as_none() -> None:
+    t2v = _t2v()
+    t2v.set_chat_defaults(model="g4h", reasoning_effort="high")
+    t2v.set_chat_defaults(model="other", reasoning_effort="  ")
+    assert (t2v.model, t2v.reasoning_effort) == ("other", None)
+    assert _t2v(reasoning_effort="").reasoning_effort is None
+    assert _t2v(model="g4h", reasoning_effort=" ").reasoning_effort is None
+    t2v = _t2v()
+    t2v.set_chat_defaults(reasoning_effort="")
+    assert (t2v.model, t2v.reasoning_effort) == (None, None)
+    t2v.create_session(reasoning_effort="")
+    assert bodies(t2v, "/v1/sessions")[-1] == {}
 
 
 def test_an_effort_needs_a_model() -> None:
@@ -189,9 +201,8 @@ def test_completions_sends_the_effort_only_when_given() -> None:
     }
     t2v.completions("g4h", messages)
     assert "reasoning_effort" not in bodies(t2v, "/v1/completions")[-1]
-    with pytest.raises(ValueError, match="must not be empty"):
-        t2v.completions("g4h", messages, reasoning_effort="")
-    assert len(bodies(t2v, "/v1/completions")) == 2
+    t2v.completions("g4h", messages, reasoning_effort="  ")
+    assert "reasoning_effort" not in bodies(t2v, "/v1/completions")[-1]
 
 
 def test_the_controller_forwards_the_effort() -> None:
