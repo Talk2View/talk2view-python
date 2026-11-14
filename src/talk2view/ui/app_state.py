@@ -686,7 +686,9 @@ class AppState:
         in_use = False
         if forgotten is not None:
             legacy = legacy_model_effort(forgotten)
-            in_use = t2v.model in (forgotten, legacy[0] if legacy is not None else None)
+            in_use = t2v.model is not None and t2v.model in (
+                forgotten, legacy[0] if legacy is not None else forgotten
+            )
         if self._applied is not None or in_use:
             t2v.set_chat_defaults(model=DEFAULT_MODEL)
             self._applied = None
@@ -803,7 +805,7 @@ class AppState:
             self._record_audio_models_locked()
             stored = _stored_pick(t2v)
             pick = resolve_pick(models, *stored)
-            if self._effort_refused:
+            if self._effort_refused and listed:  # an unread list keeps it for the next pass
                 self._effort_refused = False
                 if pick is not None and pick.effort is not None:
                     # The engine refused this effort for this end-user: the model's

@@ -473,3 +473,47 @@ def test_an_auth_change_drops_a_pending_refusal(
         assert t2v.reasoning_effort == "high"
     finally:
         app.detach()
+
+
+def test_default_with_a_pick_never_applied_leaves_a_session_made_with_a_model(
+    t2v: Talk2View,
+) -> None:
+    t2v.preferences.update(model="g4h")
+    t2v._named_session_model = "host-model"  # create_session(model=...) made the session
+    hub, app = attached(t2v)  # signed out: the stored pick is never applied
+    try:
+        assert t2v.model is None
+        app.select_default_model()
+        assert t2v._fresh_session is False  # no session reset, as before efforts existed
+        assert t2v.preferences.get() == UserPreferences()
+    finally:
+        app.detach()
+
+
+def test_a_refusal_waits_for_a_pass_that_reads_the_list(
+    t2v: Talk2View, account_engine: AccountEngine
+) -> None:
+    offer(account_engine, G4H)
+    stub = Notices()
+    hub, app = EventHub(), AppState(t2v, GenericHost())
+    passes = count_passes(app)
+    app.attach(hub, stub)
+    try:
+        login(t2v, hub)
+        app.select_model("g4h", "high")
+        original = t2v.list_models
+
+        def failing() -> Any:
+            raise OSError("offline")
+
+        t2v.list_models = failing  # type: ignore[method-assign]
+        done = len(passes)
+        stub.fire("modelRefused")
+        assert wait_for(lambda: len(passes) > done)
+        assert t2v.preferences.get().reasoning_effort == "high"  # nothing known yet
+        t2v.list_models = original  # type: ignore[method-assign]
+        app.refresh()
+        assert wait_for(lambda: t2v.preferences.get().reasoning_effort is None)
+        assert (t2v.model, t2v.reasoning_effort) == ("g4h", None)
+    finally:
+        app.detach()
