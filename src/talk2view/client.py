@@ -118,8 +118,10 @@ _MAX_ERROR_ID_LENGTH = 256
 
 
 def _short_text(value: Any) -> Optional[str]:
-    """A string of at most ``_MAX_ERROR_ID_LENGTH`` characters, else None."""
-    return value if isinstance(value, str) and len(value) <= _MAX_ERROR_ID_LENGTH else None
+    """A non-empty string of at most ``_MAX_ERROR_ID_LENGTH`` characters, else None."""
+    if isinstance(value, str) and 0 < len(value) <= _MAX_ERROR_ID_LENGTH:
+        return value
+    return None
 
 
 def _no_fields(error: Dict[str, Any]) -> Dict[str, Any]:

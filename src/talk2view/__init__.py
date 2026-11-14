@@ -180,11 +180,15 @@ def _parse_efforts(
     gated_reasoning_efforts)``. Anything but a non-empty list of strings reads as "no
     efforts" (all three None), so a garbled entry behaves like an old engine's. The
     default falls back to the list's first effort; the gated list keeps only listed
-    efforts, in catalogue order. Values are kept as sent (the vocabulary may grow)."""
+    efforts, in catalogue order. Values are kept as sent (the vocabulary may grow), once
+    each."""
     raw = item.get("reasoning_efforts")
     if not isinstance(raw, list):
         return None, None, None
-    efforts = [value for value in raw if isinstance(value, str) and value]
+    efforts: List[str] = []
+    for value in raw:
+        if isinstance(value, str) and value and value not in efforts:
+            efforts.append(value)
     if not efforts:
         return None, None, None
     default = item.get("default_reasoning_effort")
@@ -295,8 +299,8 @@ class Talk2View:
         self._model = model
         # The effort of the pick, as (the model it was chosen for, effort): it applies only
         # while _model is that model. set_chat_defaults writes it before _model, and a
-        # reader reads _model first, so a reader racing a model change never pairs the new
-        # model with the old model's effort (it gets that model's default instead).
+        # reader reads _model first, so a reader racing a change sends its model with no
+        # effort, never a model with another model's effort.
         self._effort_pick: Optional[Tuple[str, str]] = (
             (model, effort) if model and effort is not None else None
         )

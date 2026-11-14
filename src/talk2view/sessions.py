@@ -66,7 +66,7 @@ class T2VSession:
         self._client = client
         self._tools = tools
         self._default_model = default_model
-        self._reasoning_effort = reasoning_effort
+        self._send_effort = reasoning_effort
         self._capabilities = capabilities
 
     def _capability_fields(self, resume: bool) -> Dict[str, Any]:
@@ -152,8 +152,8 @@ class T2VSession:
         body: Dict[str, Any] = {"messages": messages, "stream": True}
         if self._default_model:
             body["model"] = self._default_model
-            if self._reasoning_effort:
-                body["reasoning_effort"] = self._reasoning_effort
+            if self._send_effort:
+                body["reasoning_effort"] = self._send_effort
         body.update(self._capability_fields(resume=False))
 
         yield from self._process_stream(

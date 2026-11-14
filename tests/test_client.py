@@ -447,6 +447,12 @@ def test_garbled_effort_fields_on_an_error_are_dropped(httpserver: HTTPServer) -
     assert (err.model, err.reasoning_effort, err.supported_reasoning_efforts) == (None, None, None)
 
 
+def test_empty_effort_fields_on_an_error_read_as_none(httpserver: HTTPServer) -> None:
+    err = _engine_error(httpserver, {
+        "type": "model_gated", "message": "no", "model": "", "reasoning_effort": ""}, 403)
+    assert (err.model, err.reasoning_effort) == (None, None)
+
+
 def test_a_streamed_turn_refused_for_its_effort_carries_the_fields(
     httpserver: HTTPServer,
 ) -> None:

@@ -473,6 +473,8 @@ class TestModelsAndCompletions:
         ({"reasoning_efforts": ["low", "high"], "default_reasoning_effort": "medium",
           "gated_reasoning_efforts": ["high", "xhigh", 5]}, (["low", "high"], "low", ["high"])),
         ({"reasoning_efforts": ["low", 7, "xhigh"]}, (["low", "xhigh"], "low", [])),
+        ({"reasoning_efforts": ["low", "high", "low"], "gated_reasoning_efforts": ["high"]},
+         (["low", "high"], "low", ["high"])),
     ])
     def test_list_models_tolerates_garbled_effort_fields(
         self, httpserver: HTTPServer, entry: Dict[str, Any], expected: Any
