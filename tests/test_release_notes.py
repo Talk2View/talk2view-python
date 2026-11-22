@@ -59,3 +59,11 @@ def test_readme_and_changelog_announce_reasoning_effort() -> None:
                    "(paid plan)", '`ChatController.on("modelRefused")`'):
         assert needle in release, needle
     assert changelog.index("## Unreleased") < changelog.index("## [0.5.0]")
+
+
+def test_changelog_announces_the_long_tool_call_id_fix() -> None:
+    changelog = (PACKAGE / "CHANGELOG.md").read_text(encoding="utf-8")
+    release = changelog.split("\n## [0.5.1]", 1)[1].split("\n## [0.5.0]", 1)[0]
+    assert "toolCallId is longer than" in release
+    assert "100,000 characters" in release
+    assert changelog.index("## Unreleased") < changelog.index("## [0.5.1]")
