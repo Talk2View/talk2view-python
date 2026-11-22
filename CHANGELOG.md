@@ -5,6 +5,8 @@ based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## Unreleased
 
+## [0.5.1] - 2026-11-22
+
 ### Fixed
 
 - The chat page's **Allow** and **Deny** no longer fail with "toolCallId is longer than
