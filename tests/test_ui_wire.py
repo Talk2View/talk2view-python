@@ -117,6 +117,21 @@ def test_select_model_takes_an_optional_reasoning_effort() -> None:
             parse_command({"type": "selectModel", "modelId": "g4h", "reasoningEffort": bad})
 
 
+def test_approve_takes_a_tool_call_id_as_long_as_the_engine_does() -> None:
+    # Gemini carries its encrypted thought signature inside the tool call id: kilobytes,
+    # not a short uuid. The engine's resume takes up to 100,000 characters.
+    signed = "call_" + "s" * 4_000
+    assert parse_command(
+        {"type": "approve", "toolCallId": signed, "action": "once"}
+    ).args["toolCallId"] == signed
+    longest = "t" * 100_000
+    assert parse_command(
+        {"type": "approve", "toolCallId": longest, "action": "once"}
+    ).args["toolCallId"] == longest
+    with pytest.raises(CommandError):
+        parse_command({"type": "approve", "toolCallId": longest + "t", "action": "once"})
+
+
 @pytest.mark.parametrize(
     "body",
     [
