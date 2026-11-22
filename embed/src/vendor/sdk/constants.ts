@@ -1,5 +1,5 @@
 // vendored-from: Talk2View/talk2view-typescript src/constants.ts
-// vendored-commit: 741b084383751a22e34674b0604797c452bdab39
+// vendored-commit: 3c5a6b6d8a3b0fe9a3f4e302cae1b8d7b8a0c908
 // local-delta: none
 //
 // A copy of the public TS SDK's attachment constants (the page's upload `accept` list).
@@ -42,4 +42,5 @@ export const VOICE_MODEL_NAMES: Record<VoiceModelId, string> = {
   'gemini-live': 'Gemini Live',
   elevenlabs: 'ElevenLabs',
   'elevenlabs-medical': 'ElevenLabs Medical',
+  'elevenlabs-medical-live': 'ElevenLabs Medical Live',
 };
