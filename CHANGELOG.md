@@ -5,6 +5,13 @@ based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## Unreleased
 
+### Fixed
+
+- The chat page's **Allow** and **Deny** no longer fail with "toolCallId is longer than
+  256 characters" on Gemini models, which carry their thought signature inside the tool
+  call id. The page's `approve` command now takes ids up to 100,000 characters, the
+  engine's own limit.
+
 ## [0.5.0] - 2026-11-14
 
 ### Added

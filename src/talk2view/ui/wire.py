@@ -75,6 +75,9 @@ __all__ = [
 ]
 
 MAX_ID_CHARS = 128
+#: The engine's own cap on a resume's ``tool_call_id``. Gemini carries its encrypted thought
+#: signature inside the id, so it runs to kilobytes, not the length of a uuid.
+MAX_TOOL_CALL_ID_CHARS = 100_000
 MAX_ATTACHMENTS = 10
 #: How much of a page-supplied value a refusal's message quotes, and how many field names.
 MAX_ECHO_CHARS = 64
@@ -324,7 +327,7 @@ COMMANDS: Dict[str, Dict[str, Reader]] = {
     },
     "cancel": {},
     "approve": {
-        "toolCallId": _text(max_chars=256, non_empty=True),
+        "toolCallId": _text(max_chars=MAX_TOOL_CALL_ID_CHARS, non_empty=True),
         "action": _choice("once", "always", "deny"),
         "feedback": _text(max_chars=10_000, required=False, user=True),
         "updatedInput": _object,
