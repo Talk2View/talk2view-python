@@ -1,5 +1,5 @@
 // vendored-from: Talk2View/talk2view-typescript src/types.ts
-// vendored-commit: 990b8249b8bf4a4279020389457ae782fc218882
+// vendored-commit: 3c5a6b6d8a3b0fe9a3f4e302cae1b8d7b8a0c908
 // local-delta: types.ts.delta.diff
 //
 // A copy of the public TS SDK's types, plus one local delta, declared in full in
@@ -629,7 +629,7 @@ export interface VoiceIceServer {
 }
 
 /** What runs a voice call. */
-export type VoiceModelId = 'gemini-live' | 'elevenlabs' | 'elevenlabs-medical';
+export type VoiceModelId = 'gemini-live' | 'elevenlabs' | 'elevenlabs-medical' | 'elevenlabs-medical-live';
 
 /** Body of `POST /v1/voice/sessions`. Every field is optional. */
 export interface VoiceSessionRequest {
